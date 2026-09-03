@@ -1,0 +1,8 @@
+{
+  "name": "duplicate-finder-tests",
+  "private": true,
+  "description": "Headless UI/API test suite for the Duplicate Finder DSM package",
+  "dependencies": {
+    "jsdom": "^24.0.0"
+  }
+}

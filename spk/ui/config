@@ -1,0 +1,19 @@
+{
+	"DuplicateFinder.js": {
+		"SYNO.SDS.DuplicateFinder.Application": {
+			"type": "app",
+			"title": "Duplicate Finder",
+			"desc": "Find duplicate files, conflicting files, empty folders and junk on your DiskStation",
+			"icon": "images/icon_{0}.png",
+			"appWindow": "SYNO.SDS.DuplicateFinder.MainWindow",
+			"allUsers": false,
+			"allowMultiInstance": false,
+			"hidden": false
+		},
+		"SYNO.SDS.DuplicateFinder.MainWindow": {
+			"type": "lib",
+			"title": "Duplicate Finder",
+			"icon": "images/icon_{0}.png"
+		}
+	}
+}

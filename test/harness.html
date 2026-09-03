@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>DF ExtJS harness</title>
+<script src="ext-base.js"></script>
+<script src="ext-all.js"></script>
+<script>
+// Stand-ins for the DSM desktop framework classes the app uses. The themed
+// SYNO.ux widgets are aliased to their plain-Ext bases (the app only relies on
+// their public Ext API); the app-window/instance bases and the FileChooser
+// are stubbed just enough to construct and drive the flows.
+Ext.namespace('SYNO.SDS', 'SYNO.ux', 'SYNO.SDS.Utils.FileChooser');
+
+SYNO.ux.Toolbar = Ext.Toolbar;
+// DSM's pager is an Ext.PagingToolbar subclass that swaps the page-number
+// field for numbered buttons and ±5-page jumps; the plain Ext one shares its
+// API and store contract, which is what the app drives.
+SYNO.ux.PagingToolbar = Ext.PagingToolbar;
+SYNO.ux.GridPanel = Ext.grid.GridPanel;
+SYNO.ux.Menu = Ext.menu.Menu;
+// Real DSM tags every button with `syno-ux-button` plus a variant class taken
+// from btnStyle — measured live: `x-btn syno-ux-button syno-ux-button-default
+// x-btn-noicon`, and `-blue` for btnStyle:'blue'. The bare Ext.Button alias
+// this replaced carried neither, so any CSS or assertion keyed on DSM's own
+// class names silently matched nothing here while working on the NAS.
+SYNO.ux.Button = Ext.extend(Ext.Button, {
+	initComponent: function () {
+		var variant = this.btnStyle || 'default';
+		this.cls = (this.cls ? this.cls + ' ' : '') +
+			'syno-ux-button syno-ux-button-' + variant;
+		SYNO.ux.Button.superclass.initComponent.call(this);
+	}
+});
+SYNO.ux.Checkbox = Ext.form.Checkbox;
+// Verified against real DSM: SYNO.ux.RadioGroup extends checkboxgroup, renders
+// one input per item, groups them, and getValue() returns the checked radio.
+SYNO.ux.RadioGroup = Ext.form.RadioGroup;
+SYNO.ux.NumberField = Ext.form.NumberField;
+SYNO.ux.ComboBox = Ext.form.ComboBox;
+SYNO.ux.TextField = Ext.form.TextField;
+SYNO.ux.DateField = Ext.form.DateField;
+// File Station's advanced-search date fields are DateTimeField/DateTimeMenu
+// (its picker carries the Clear button and year/month dropdowns); the app
+// prefers those, so the harness must expose them or the DSM path goes untested.
+SYNO.ux.DateTimeField = Ext.extend(Ext.form.DateField, {
+	getPickerCfg: function () { return { clearType: 'clear', isAllDay: true }; }
+});
+SYNO.ux.DateTimeMenu = Ext.extend(Ext.menu.DateMenu, {});
+// File Station pairs controls on one row with a composite field
+SYNO.ux.CompositeField = Ext.form.CompositeField;
+SYNO.SDS.ModalWindow = Ext.Window;
+// Real SearchField is an Ext.form.TriggerField subclass whose constructor
+// installs a LOCALIZED "Search" placeholder before applying config — the app
+// relies on not passing emptyText so that localized default survives.
+SYNO.ux.SearchField = Ext.extend(Ext.form.TriggerField, {
+	constructor: function (cfg) {
+		this.emptyText = '__localized_search__';
+		SYNO.ux.SearchField.superclass.constructor.apply(this, arguments);
+	},
+	initMenu: function () {},
+	onTriggerClick: function () {}
+});
+// Real TreePanel is a thin Ext.tree.TreePanel subclass adding DSM's FleXcroll
+// and ARIA; the app drives only the stock tree API.
+SYNO.ux.TreePanel = Ext.extend(Ext.tree.TreePanel, {
+	autoFlexcroll: false,
+	initComponent: function () {
+		SYNO.ux.TreePanel.superclass.initComponent.call(this);
+		this.addEvents('rootnoderendered', 'noderendered');
+	}
+});
+
+// ToastBox / PercentageBar / CapacityRender stubs, modelled on the real DSM
+// 7.4 implementations read out of the browser (2026-07-30). Without these the
+// app silently takes its fallback paths and the DSM branches go untested —
+// which is how the 0077 checkbox regression slipped through.
+SYNO.SDS.ToastBox = Ext.extend(Ext.Component, {
+	constructor: function (cfg) {
+		cfg = cfg || {};
+		// the real one requires an owner and renders into owner.id
+		if (!cfg.owner) { throw new Error('ToastBox: owner required'); }
+		window.__toasts = (window.__toasts || 0) + 1;
+		window.__lastToastText = cfg.text;
+		// Record whether the caller passed `listeners`. The real ToastBox
+		// builds its own (afterrender -> defineToastBoxBehavior, which starts
+		// the auto-dismiss timer and wires the close button) and then does
+		// Ext.apply(ownCfg, userCfg), so a user `listeners` key REPLACES them
+		// and the toast neither dismisses nor closes. Shipped in 0079-0081.
+		window.__lastToastCfgHadListeners = Object.prototype.hasOwnProperty.call(cfg, 'listeners');
+		var c = Ext.apply({ cls: 'syno-sds-toast-box', html: cfg.text,
+			renderTo: cfg.owner.el ? cfg.owner.el : undefined }, cfg);
+		delete c.owner;
+		SYNO.SDS.ToastBox.superclass.constructor.call(this, c);
+	}
+});
+// Real signature: fill(value, extraInfo, noAnimation, info) -> HTML string.
+// Mirrors DSM's flexBarTpl markup so the app's selectors still apply.
+SYNO.SDS.Utils.PercentageBar = Ext.extend(Ext.XTemplate, {
+	constructor: function (cfg) {
+		Ext.apply(this, { barHeight: 16, marginTop: 0, cls: '' }, cfg || {});
+		Ext.apply(this, cfg || {});
+		SYNO.SDS.Utils.PercentageBar.superclass.constructor.call(this,
+			'<div class="{cls} syno-percentage-cmp">',
+			'<div class="percentage-cmp-hbar-background" style="height:{barHeight}px; margin-top:{marginTop}px;">',
+			'<div class="percentage-cmp-hbar-fill" style="width:{fillW}%; height:{barHeight}px; min-width:{fillMinWidth}px;"></div>',
+			'</div></div>');
+	},
+	fill: function (v) {
+		return this.applyTemplate({ cls: this.cls, barHeight: this.barHeight,
+			marginTop: this.marginTop, fillW: v, value: v, fillMinWidth: v > 0 ? 6 : 0 });
+	}
+});
+// Real one takes MEGABYTES and returns a localized "N.NN UNIT" string.
+SYNO.SDS.Utils.CapacityRender = function (mb, dec) {
+	var u = 'MB', v = mb < 0 ? 0 : mb;
+	if (v >= 1024) { v /= 1024; u = 'GB'; }
+	if (v >= 1024) { v /= 1024; u = 'TB'; }
+	return v.toFixed(dec == null ? 2 : dec) + ' ' + u;
+};
+
+SYNO.SDS.AppWindow = Ext.extend(Ext.Window, {
+	constructor: function (config) {
+		SYNO.SDS.AppWindow.superclass.constructor.call(this, config);
+	}
+});
+SYNO.SDS.AppInstance = Ext.extend(Ext.util.Observable, {
+	appWindowName: null,
+	constructor: function () {
+		SYNO.SDS.AppInstance.superclass.constructor.call(this);
+	}
+});
+SYNO.SDS.AppLaunch = function (app, cfg) {
+	window.__fsLaunches = (window.__fsLaunches || 0) + 1;
+	window.__fsLaunchCfg = cfg;
+};
+
+// FileChooser stub: records the instance so tests can simulate a choice.
+SYNO.SDS.Utils.FileChooser.Chooser = Ext.extend(Ext.util.Observable, {
+	constructor: function (config) {
+		this.chooserConfig = config || {};
+		this.addEvents('choose');
+		SYNO.SDS.Utils.FileChooser.Chooser.superclass.constructor.call(this);
+		window.__lastChooser = this;
+	},
+	mon: function (item, ev, fn, scope) { item.on(ev, fn, scope); },
+	open: function () { window.__chooserOpened = (window.__chooserOpened || 0) + 1; },
+	close: function () { window.__chooserClosed = (window.__chooserClosed || 0) + 1; }
+});
+
+window._S = function (k) { return k === 'SynoToken' ? 'HARNESSTOKEN' : ''; };
+</script>
+<script src="http://localhost:9807/DuplicateFinder.js"></script>
+</head>
+<body>
+<script>
+window.__harnessErrors = [];
+window.onerror = function (msg) { window.__harnessErrors.push(String(msg)); };
+Ext.onReady(function () {
+	try {
+		window.__win = new SYNO.SDS.DuplicateFinder.MainWindow({});
+		window.__win.show();
+	} catch (e) {
+		window.__harnessErrors.push('construct/show: ' + (e && e.message ? e.message : e));
+	}
+});
+</script>
+</body>
+</html>

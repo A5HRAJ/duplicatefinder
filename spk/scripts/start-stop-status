@@ -1,0 +1,84 @@
+#!/bin/sh
+# Duplicate Finder daemon control (runs as the package user on DSM 7).
+
+PKG="DuplicateFinder"
+PKG_DEST="${SYNOPKG_PKGDEST:-/var/packages/$PKG/target}"
+PKG_VAR="${SYNOPKG_PKGVAR:-/var/packages/$PKG/var}"
+PID_FILE="$PKG_VAR/dupfinder.pid"
+LOG_FILE="$PKG_VAR/dupfinder.log"
+PORT="${DUPFINDER_PORT:-9807}"
+
+# fail writes the reason where Package Center surfaces it (SYNOPKG_TEMP_LOGFILE)
+# in addition to stderr, then exits with the given code.
+fail() {
+	echo "$2" >&2
+	[ -n "$SYNOPKG_TEMP_LOGFILE" ] && echo "$2" >> "$SYNOPKG_TEMP_LOGFILE"
+	exit "$1"
+}
+
+# pid_running also confirms the PID is still OUR daemon. PIDs are reused, and
+# a NAS runs for months: a stale pid file whose number now belongs to some
+# other process of the same user would otherwise make "start" do nothing and
+# "stop" send TERM and then KILL to an innocent process.
+pid_running() {
+	[ -f "$PID_FILE" ] || return 1
+	PID="$(cat "$PID_FILE" 2>/dev/null)"
+	[ -n "$PID" ] || return 1
+	kill -0 "$PID" 2>/dev/null || return 1
+	[ -r "/proc/$PID/cmdline" ] || return 1
+	case "$(tr '\0' ' ' < "/proc/$PID/cmdline" 2>/dev/null)" in
+		*dupfinder*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+case "$1" in
+	start)
+		if pid_running; then
+			exit 0
+		fi
+		# One spk per architecture ships exactly one binary (see build.sh),
+		# so there is no runtime dispatch to do.
+		DAEMON="$PKG_DEST/bin/dupfinder"
+		[ -x "$DAEMON" ] || fail 1 "Daemon binary missing: $DAEMON"
+		mkdir -p "$PKG_VAR" || fail 1 "Cannot create $PKG_VAR"
+		"$DAEMON" -mode daemon -port "$PORT" -var "$PKG_VAR" >>"$LOG_FILE" 2>&1 &
+		PID=$!
+		echo "$PID" > "$PID_FILE"
+		# A daemon that dies during startup (port taken, unreadable token
+		# file — runDaemon fails fatally on both) must fail the package
+		# start visibly, not leave Package Center showing success while the
+		# UI gets "service is not running".
+		sleep 1
+		if ! kill -0 "$PID" 2>/dev/null; then
+			rm -f "$PID_FILE"
+			fail 1 "Duplicate Finder daemon exited during startup: $(tail -n 3 "$LOG_FILE" 2>/dev/null | tr '\n' ' ')"
+		fi
+		exit 0
+		;;
+	stop)
+		if pid_running; then
+			kill "$PID" 2>/dev/null
+			for i in 1 2 3 4 5 6 7 8 9 10; do
+				kill -0 "$PID" 2>/dev/null || break
+				sleep 1
+			done
+			kill -9 "$PID" 2>/dev/null
+		fi
+		rm -f "$PID_FILE"
+		exit 0
+		;;
+	status)
+		if pid_running; then
+			exit 0
+		fi
+		exit 3
+		;;
+	log)
+		echo "$LOG_FILE"
+		exit 0
+		;;
+	*)
+		exit 0
+		;;
+esac
