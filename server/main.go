@@ -68,19 +68,29 @@ func main() {
 const (
 	authTokenHeader = "X-DupFinder-Token"
 	authTokenFile   = ".authtoken"
-	defaultVarDir   = "/var/packages/DuplicateFinder/var"
 	// readyFile is written (with the port) once the daemon is bound and its
 	// token is loaded; the start script waits for it.
 	readyFile = "dupfinder.ready"
 )
 
 // cgiVarDir resolves the package var dir for the CGI process. api.cgi
-// exports DUPFINDER_VAR; the default matches the installed package layout.
+// exports DUPFINDER_VAR. Failing that, DSM's layout is the fallback: the
+// shim execs /var/packages/<id>/target/bin/dupfinder, and the var dir is
+// target's sibling — for whatever <id> this build installed under (the
+// hand-built spk and the SynoCommunity build use different ids, so none is
+// hardcoded). argv[0] is used, not os.Executable: the latter resolves the
+// symlinks to /volumeN/@appstore/<id>/bin/dupfinder, whose parent holds no
+// var dir. With neither, the token cannot be found and the daemon refuses
+// the request — a visible failure, not a guess.
 func cgiVarDir() string {
 	if d := os.Getenv("DUPFINDER_VAR"); d != "" {
 		return d
 	}
-	return defaultVarDir
+	if exe := os.Args[0]; filepath.IsAbs(exe) {
+		return filepath.Join(filepath.Dir(filepath.Dir(exe)), "..", "var")
+	}
+	log.Printf("cgi: DUPFINDER_VAR unset and argv[0] %q is not absolute; cannot locate the package var dir", os.Args[0])
+	return ""
 }
 
 func runCGI(port int) {
@@ -107,7 +117,7 @@ func runCGI(port int) {
 	proxy.Director = func(r *http.Request) {
 		orig(r)
 		r.Header.Set(dsmBaseHeader, dsmBase)
-		// Incoming path looks like /webman/3rdparty/DuplicateFinder/api.cgi/scan
+		// Incoming path looks like /webman/3rdparty/<id>/api.cgi/scan
 		// — keep only what follows api.cgi and mount it under /api.
 		p := r.URL.Path
 		if i := strings.Index(p, "api.cgi"); i >= 0 {

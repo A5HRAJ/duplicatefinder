@@ -14,10 +14,17 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
+
+// devPkgPrefix is the /webman/3rdparty/<id> prefix DSM mounts a package's UI
+// under. Any id: the UI derives its API base from its own script tag, so a
+// dev page can load it under either build's id, or (as the harness does)
+// straight from the root.
+var devPkgPrefix = regexp.MustCompile(`^/webman/3rdparty/[^/]+`)
 
 // DUPFINDER_UI: serve this directory's files alongside the API, translating
 // the "…/api.cgi/…" paths the packaged UI uses into /api routes.
@@ -32,7 +39,7 @@ func devServeUI(api http.Handler) http.Handler {
 			mockWebAPI(w, r)
 			return
 		}
-		r.URL.Path = strings.TrimPrefix(r.URL.Path, "/webman/3rdparty/DuplicateFinder")
+		r.URL.Path = devPkgPrefix.ReplaceAllString(r.URL.Path, "")
 		if r.URL.Path == "" {
 			r.URL.Path = "/"
 		}

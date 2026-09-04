@@ -8,7 +8,33 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 (function () {
 	'use strict';
 
-	var API_BASE = '/webman/3rdparty/DuplicateFinder/api.cgi';
+	/* DSM keys every package URL on the package id, and the id differs
+	   between builds: the hand-built spk installs as DuplicateFinder, the
+	   SynoCommunity build as duplicatefinder. DSM loads this file through a
+	   script tag whose src is /webman/3rdparty/<id>/DuplicateFinder-<stamp>.js
+	   (measured on the DS916+), and api.cgi sits beside the script, so the
+	   base is read off that tag rather than hardcoded. document.currentScript
+	   is the tag while it runs; the scan over document.scripts is for a
+	   loader that leaves it unset. The dev daemon and the jsdom harness serve
+	   the script from their root, which yields /api.cgi — dev.go routes any
+	   path containing api.cgi. No tag at all is a broken deployment, and it
+	   fails here, loudly, rather than at the first request. */
+	var API_BASE = (function () {
+		var tags = [], all = document.scripts || document.getElementsByTagName('script');
+		var i, path;
+		if (document.currentScript) { tags.push(document.currentScript); }
+		for (i = 0; i < all.length; i++) { tags.push(all[i]); }
+		for (i = 0; i < tags.length; i++) {
+			/* .src is the resolved absolute URL; keep the path only */
+			path = String(tags[i].src || '')
+				.replace(/^[a-z][a-z0-9+.\-]*:\/\/[^\/]*/i, '')
+				.replace(/[?#][\s\S]*$/, '');
+			if (/\/DuplicateFinder[^\/]*\.js$/.test(path)) {
+				return path.replace(/\/[^\/]*$/, '/api.cgi');
+			}
+		}
+		throw new Error('Duplicate Finder: no DuplicateFinder*.js script tag, cannot locate api.cgi');
+	})();
 	var PREFS_KEY = 'duplicateFinder.native';
 
 	/* Results are paged, exactly the way File Station pages a big folder: the

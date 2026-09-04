@@ -1,6 +1,6 @@
 #!/bin/sh
 # Duplicate Finder API gateway.
-# DSM's web server executes this for /webman/3rdparty/DuplicateFinder/api.cgi/*.
+# DSM's web server executes this for /webman/3rdparty/<package>/api.cgi/*.
 # It verifies the DSM session, requires an administrator, then hands the
 # request to the Go binary in CGI mode, which proxies to the local daemon.
 #
@@ -9,7 +9,6 @@
 # only answers if the session's SynoToken is also supplied (the UI sends it
 # on every request via the query string or the X-Syno-Token header).
 
-PKG_DEST="/var/packages/DuplicateFinder/target"
 MODULES="${DUPFINDER_MODULES:-/usr/syno/synoman/webman/modules}"
 AUTH="$MODULES/authenticate.cgi"
 
@@ -17,6 +16,47 @@ deny() {
 	printf 'Status: %s\r\nContent-Type: application/json\r\n\r\n{"error":"%s"}' "$1" "$2"
 	exit 0
 }
+
+# --- locate this package ------------------------------------------------
+# DSM keys every package path on the package id, and the id differs between
+# builds: the hand-built spk installs as DuplicateFinder, the SynoCommunity
+# build as duplicatefinder. Nothing here hardcodes one. DSM executes this
+# file in place, so its own resolved location names the id: the package
+# lives at /volumeN/@appstore/<id>, and both /var/packages/<id>/target and
+# the /webman/3rdparty/<id> entry are symlinks into it, so however the web
+# server addressed this file it resolves to <id>/ui/api.cgi. SCRIPT_FILENAME
+# and SCRIPT_NAME cover a server that invoked it some other way. A request
+# that reveals no id is refused, never guessed: the id chooses which binary
+# runs and which token file it reads.
+pkg_id_from_path() {
+	case "$1" in
+		*/ui/api.cgi) p="${1%/ui/api.cgi}"; printf '%s' "${p##*/}" ;;
+	esac
+}
+PKG_ID="$(pkg_id_from_path "$(readlink -f "$0" 2>/dev/null)")"
+PKG_ID_SOURCE="argv0"
+if [ -z "$PKG_ID" ] && [ -n "$SCRIPT_FILENAME" ]; then
+	PKG_ID="$(pkg_id_from_path "$(readlink -f "$SCRIPT_FILENAME" 2>/dev/null)")"
+	PKG_ID_SOURCE="script_filename"
+fi
+if [ -z "$PKG_ID" ]; then
+	case "$SCRIPT_NAME" in
+		/webman/3rdparty/*/api.cgi*)
+			p="${SCRIPT_NAME#/webman/3rdparty/}"
+			PKG_ID="${p%%/*}"
+			PKG_ID_SOURCE="script_name"
+			;;
+	esac
+fi
+# The id is spliced into filesystem paths below: only the characters DSM
+# allows in a package name may pass, and the package must really be there.
+case "$PKG_ID" in
+	""|.|..|*[!A-Za-z0-9._-]*) PKG_ID="" ;;
+esac
+if [ -z "$PKG_ID" ] || [ ! -x "/var/packages/$PKG_ID/target/bin/dupfinder" ]; then
+	deny "500 Internal Server Error" "Cannot locate the Duplicate Finder package"
+fi
+PKG_DEST="/var/packages/$PKG_ID/target"
 
 # --- recover the session's SynoToken -----------------------------------
 # The query-string value is URL-encoded; authenticate.cgi expects the raw
@@ -99,14 +139,14 @@ if [ "${PATH_INFO:-}" = "/debug" ]; then
 	TOKEN_OK=false; [ -n "$TOKEN" ] && TOKEN_OK=true
 	SAFE_USER="$(printf '%s' "$USER" | tr -cd 'A-Za-z0-9._@ -')"
 	printf 'Content-Type: application/json\r\n\r\n'
-	printf '{"cgiUser":"%s","cookiePresent":%s,"sessionCookie":%s,"authCgiExec":%s,"tokenFound":%s,"authUser":"%s","isAdmin":true}' \
-		"$CGIUSER" "$COOKIE" "$SESSION" "$AUTH_X" "$TOKEN_OK" "$SAFE_USER"
+	printf '{"cgiUser":"%s","cookiePresent":%s,"sessionCookie":%s,"authCgiExec":%s,"tokenFound":%s,"authUser":"%s","isAdmin":true,"pkgId":"%s","pkgIdSource":"%s"}' \
+		"$CGIUSER" "$COOKIE" "$SESSION" "$AUTH_X" "$TOKEN_OK" "$SAFE_USER" "$PKG_ID" "$PKG_ID_SOURCE"
 	exit 0
 fi
 
 # Where the daemon keeps its shared auth token; the CGI proxy reads it and
 # attaches it to every request it forwards to the daemon.
-DUPFINDER_VAR="/var/packages/DuplicateFinder/var"
+DUPFINDER_VAR="/var/packages/$PKG_ID/var"
 export DUPFINDER_VAR
 
 # One spk per architecture ships exactly one binary (see build.sh).

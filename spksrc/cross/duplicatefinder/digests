@@ -1,0 +1,5 @@
+# TODO(before submission): replace with the real hashes of the release archive
+# (run `make digests` in cross/duplicatefinder once PKG_DIST_SITE resolves).
+duplicatefinder-1.0.0.tar.gz SHA1 0000000000000000000000000000000000000000
+duplicatefinder-1.0.0.tar.gz SHA256 0000000000000000000000000000000000000000000000000000000000000000
+duplicatefinder-1.0.0.tar.gz MD5 00000000000000000000000000000000
