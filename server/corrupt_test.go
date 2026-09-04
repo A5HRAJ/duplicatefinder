@@ -1049,7 +1049,7 @@ func goodJPEG(t *testing.T) []byte {
 func verifyBytes(t *testing.T, dir, name string, b []byte) (intactness, string) {
 	t.Helper()
 	e := mkAt(t, dir, name, b, fixedTime)
-	return verifyContent(e.openContent, e.name, e.size)
+	return verifyContent(e.openContent, e.size)
 }
 
 func TestVerifyContentPNG(t *testing.T) {

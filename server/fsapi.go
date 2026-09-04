@@ -376,6 +376,7 @@ func (s *fsSession) copyMoveOnce(srcShare, destShare string) error {
 		return err
 	}
 	delay := 200 * time.Millisecond
+	deadline := time.Now().Add(copyMoveMax)
 	for {
 		var st struct {
 			Finished bool `json:"finished"`
@@ -387,6 +388,9 @@ func (s *fsSession) copyMoveOnce(srcShare, destShare string) error {
 		}
 		if st.Finished {
 			return nil
+		}
+		if time.Now().After(deadline) {
+			return errMoveTimeout
 		}
 		time.Sleep(delay)
 		if delay < 2*time.Second {
@@ -470,6 +474,22 @@ func (e parkedError) Error() string {
 	return fmt.Sprintf("%v — the file is parked in %s", e.cause, e.tmpShare)
 }
 
+// nameClaimTries bounds every probe-then-claim loop over File Station's
+// " (n)" names (moveViaFS's final hop, allocBatchFolder): a name that keeps
+// being taken between the probe and the claim is another writer winning a
+// race, and after this many rounds it is reported rather than spun on.
+const nameClaimTries = 25
+
+// copyMoveMax bounds one CopyMove task's status polling. A cross-volume move
+// of a large tree legitimately takes hours; past this the task is treated as
+// an unknown outcome — the caller probes for the entry rather than guessing
+// — instead of holding the move lock for ever on a task DSM never finishes.
+const copyMoveMax = 12 * time.Hour
+
+// errMoveTimeout is deliberately NOT an fsError: it is the absence of an
+// answer, and moveOutcomeUnknown must say so.
+var errMoveTimeout = errors.New("File Station did not finish the move within 12 hours")
+
 // moveOutcomeUnknown reports that an error carries NO answer from File
 // Station (connection dropped, reply mangled): the operation may well have
 // completed. A coded fsError is the opposite — DSM answered, the state is
@@ -537,22 +557,22 @@ func moveViaFS(s *fsSession, srcShare, outShare string) (string, error) {
 	}
 	tmpShare := outShare + "/" + tmp
 	if err := s.copyMoveOnce(srcShare, tmpShare); err != nil {
-		// The staging folder may be holding the ONLY copy: if the move
-		// completed but its status reply was lost, the source is already
-		// gone. Deleting here on that evidence would be permanent data loss —
-		// so the folder is removed only when the file is CONFIRMED absent
-		// from it. A coded DSM error means the move did not happen and the
-		// empty folder is safe to drop; anything less certain parks.
-		if moveOutcomeUnknown(err) {
-			if there, _, serr := s.statShare(tmpShare + "/" + base); serr != nil || there {
-				return "", parkedError{tmpShare: tmpShare, name: base, cause: err}
-			}
+		// The staging folder may be holding the ONLY copy — whatever the
+		// error said. A coded reply used to be read as "the move did not
+		// happen", but the task had already been started, and a coded error
+		// can come back from the status poll after data moved: a directory
+		// moved member by member, or a transient code on a task that in fact
+		// finished. Deleting on that evidence would be permanent data loss,
+		// so the folder is removed only when the entry is CONFIRMED absent
+		// from it; anything less certain parks, visibly and by path.
+		if there, _, serr := s.statShare(tmpShare + "/" + base); serr != nil || there {
+			return "", parkedError{tmpShare: tmpShare, name: base, cause: err}
 		}
 		s.deletePath(tmpShare)
 		return "", err
 	}
 	cur := base
-	for tries := 0; tries < 25; tries++ {
+	for tries := 0; tries < nameClaimTries; tries++ {
 		free, err := s.firstFreeName(outShare, base)
 		if err != nil {
 			return "", parkedError{tmpShare: tmpShare, name: cur, cause: err}
@@ -757,7 +777,7 @@ func (s *fsSession) firstFreeName(folderShare, base string) (string, error) {
 // batch takes the next name. File Station has no create-and-return-path call,
 // so that residual is unavoidable; it is visible and harmless.
 func (s *fsSession) allocBatchFolder(destShare, base string) (string, error) {
-	for tries := 0; tries < 25; tries++ {
+	for tries := 0; tries < nameClaimTries; tries++ {
 		name, err := s.firstFreeName(destShare, base)
 		if err != nil {
 			return "", err
@@ -1009,14 +1029,21 @@ func (s *fsSession) fetchCrtimesShares(shares []string, byShare map[string]strin
 // through to the parallel fetch: a cancelled scan stores its results with
 // whatever creation times had already arrived.
 func applyCrtimes(sess *fsSession, res *toolResult, cancel chan struct{}, prog func(done, total int)) {
+	// Only rows still without a value: under Created matching every duplicate
+	// row already carries the answer from the per-window fetch, and asking
+	// again cost a thousand repeated round trips at the result cap.
 	var paths []string
 	for i := range res.Files {
-		paths = append(paths, filepath.Join(res.Files[i].Dir, res.Files[i].Name))
+		if res.Files[i].Created == "" {
+			paths = append(paths, filepath.Join(res.Files[i].Dir, res.Files[i].Name))
+		}
 	}
 	for gi := range res.Groups {
 		for fi := range res.Groups[gi].Files {
 			f := &res.Groups[gi].Files[fi]
-			paths = append(paths, filepath.Join(f.Dir, f.Name))
+			if f.Created == "" {
+				paths = append(paths, filepath.Join(f.Dir, f.Name))
+			}
 		}
 	}
 	if len(paths) == 0 {

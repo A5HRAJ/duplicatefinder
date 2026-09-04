@@ -48,27 +48,78 @@ const (
 	minGroupRows = 2    // ... but never so few that a group stops looking like one
 )
 
+// refMatcher decides whether a result row is a read-only reference copy. It
+// compares CANONICAL paths — the reference folders symlink-resolved through
+// the same dirResolver the move uses, and each row mapped into canonical
+// space through the result's own root table (a row's canonical path is its
+// root's canonical path plus the same relative tail, because the walk never
+// follows symlinks below a root) — so it needs no syscall per row, and the
+// padlock the grid draws can never disagree with the refusal the move
+// issues about a folder given through an alias. The raw forms are matched
+// too, for results an older build persisted without a root table.
+type refMatcher struct {
+	raw   []string
+	canon []string
+	roots []RootMap
+}
+
+func newRefMatcher(refs []string, roots []RootMap) *refMatcher {
+	m := &refMatcher{roots: roots}
+	if len(refs) == 0 {
+		return m
+	}
+	m.raw = uniquePaths(refs)
+	r := newDirResolver()
+	for _, d := range m.raw {
+		m.canon = append(m.canon, r.dir(d))
+	}
+	return m
+}
+
+func (m *refMatcher) empty() bool { return m == nil || len(m.raw) == 0 }
+
+// protects reports whether the row at dir/name lies under a reference folder.
+func (m *refMatcher) protects(dir, name string) bool {
+	if m.empty() {
+		return false
+	}
+	p := filepath.Join(dir, name)
+	if isUnder(p, m.raw) || isUnder(p, m.canon) {
+		return true
+	}
+	for _, rt := range m.roots {
+		if p == rt.Raw || strings.HasPrefix(p, rt.Raw+"/") {
+			return isUnder(rt.Canon+p[len(rt.Raw):], m.canon)
+		}
+	}
+	return false
+}
+
 // markGroupProt records each group's protected-reference count over its WHOLE
-// membership. It must run BEFORE trimGroupRows: the client cannot recount
-// protection from a shortened page, and pairing a partial protected count with
-// the true member count overstates the group's reclaimable space — the header
-// then advertises bytes the move will refuse to free, and disagrees with the
-// toolbar summary, which dupTotals computes over the whole group.
+// membership, and flags each protected row, so the client draws the padlock
+// from the daemon's decision instead of re-deriving it. It must run BEFORE
+// trimGroupRows: the client cannot recount protection from a shortened page,
+// and pairing a partial protected count with the true member count overstates
+// the group's reclaimable space — the header then advertises bytes the move
+// will refuse to free, and disagrees with the toolbar summary, which
+// dupTotals computes over the whole group.
 //
 // Safe to mutate: the caller passes slicePage's freshly copied Group headers,
-// never the cached view's.
-func markGroupProt(groups []Group, refs []string) {
-	if len(refs) == 0 {
-		return // nothing protected; the client's own count is already right
+// never the cached view's — and the rows are copied here before flagging.
+func markGroupProt(groups []Group, m *refMatcher) {
+	if m.empty() {
+		return // nothing protected
 	}
 	for i := range groups {
+		files := append([]FileEnt(nil), groups[i].Files...)
 		n := 0
-		for j := range groups[i].Files {
-			f := &groups[i].Files[j]
-			if isUnder(filepath.Join(f.Dir, f.Name), refs) {
+		for j := range files {
+			if m.protects(files[j].Dir, files[j].Name) {
+				files[j].Prot = true
 				n++
 			}
 		}
+		groups[i].Files = files
 		groups[i].Prot = n
 	}
 }
@@ -103,14 +154,18 @@ func trimGroupRows(groups []Group) []Group {
 // pages, because the UI's keep-one-per-group selection logic needs every
 // loaded group whole — and FILES (rows) for the flat tools.
 type resultsQuery struct {
-	Tool    string    `json:"tool"`
-	Offset  int       `json:"offset"`
-	Limit   int       `json:"limit"`
-	Query   string    `json:"q"`       // case-insensitive substring of the full path
-	Match   MatchOpts `json:"match"`   // duplicates: display-time refinement
-	Sort    string    `json:"sort"`    // flat tools: column to order by
-	Dir     string    `json:"dir"`     // ASC | DESC
-	RefDirs []string  `json:"refDirs"` // reference dirs, for the reclaimable figure
+	Tool   string    `json:"tool"`
+	Offset int       `json:"offset"`
+	Limit  int       `json:"limit"`
+	Query  string    `json:"q"`     // case-insensitive substring of the full path
+	Match  MatchOpts `json:"match"` // duplicates: display-time refinement
+	// RefDirs is accepted for compatibility and IGNORED: reference protection
+	// is decided from the folders the stored results were scanned with,
+	// which the daemon holds — a client-supplied list let the padlocks and
+	// the move's refusals describe two different sets.
+	Sort    string   `json:"sort"`    // flat tools: column to order by
+	Dir     string   `json:"dir"`     // ASC | DESC
+	RefDirs []string `json:"refDirs"` // reference dirs, for the reclaimable figure
 
 	// Search options (the magnifier menu, mirroring File Station's advanced
 	// search). Like q, they narrow `total` but never `grand`: rail badges keep
@@ -433,8 +488,12 @@ func (s *Server) handlePagedResults(w http.ResponseWriter, r *http.Request) {
 	}
 	key := q.viewKey()
 	view := s.view
+	// The matcher resolves the (few) reference folders once per request; the
+	// view it feeds is cached until the results — and with them s.refDirs —
+	// change.
+	refs := newRefMatcher(s.refDirs, res.Roots)
 	if view == nil || view.key != key {
-		view = buildView(res, &q, key)
+		view = buildView(res, &q, key, refs)
 		s.view = view
 	}
 	// Metadata is copied under the lock; the view itself is immutable.
@@ -465,7 +524,7 @@ func (s *Server) handlePagedResults(w http.ResponseWriter, r *http.Request) {
 		page := slicePage(view.groups, off, lim)
 		// Before trimming, while the group is still whole.
 		if q.Tool == "duplicates" {
-			markGroupProt(page, uniquePaths(q.RefDirs))
+			markGroupProt(page, refs)
 		}
 		resp["groups"] = trimGroupRows(page)
 	} else {
@@ -476,7 +535,7 @@ func (s *Server) handlePagedResults(w http.ResponseWriter, r *http.Request) {
 
 // buildView derives the filtered/refined/sorted view for one parameter set.
 // Caller holds s.mu. Every slice in the view is freshly allocated.
-func buildView(res *toolResult, q *resultsQuery, key string) *resultView {
+func buildView(res *toolResult, q *resultsQuery, key string, refs *refMatcher) *resultView {
 	v := &resultView{key: key}
 	pred := compileSearch(q)
 	if res.Tool == "corrupted_files" {
@@ -510,7 +569,6 @@ func buildView(res *toolResult, q *resultsQuery, key string) *resultView {
 		return v
 	}
 	if res.Tool == "duplicates" {
-		refs := uniquePaths(q.RefDirs)
 		groups := refineGroups(res.Groups, q.Match)
 		v.grand = dupTotals(groups, refs)
 		if pred != nil {
@@ -630,17 +688,20 @@ func filterGroups(groups []Group, pred *searchPred) []Group {
 
 // dupTotals aggregates duplicate groups. Reclaimable mirrors the UI's own
 // arithmetic: per group, every copy beyond the kept one may go — protected
-// reference copies (under refs, compared on the raw display paths the client
-// itself uses) count as kept.
-func dupTotals(groups []Group, refs []string) pageTotals {
+// reference copies count as kept. With no reference folders the per-row
+// test is skipped entirely: it ran under s.mu, and joining and comparing
+// 100k paths against an empty list on every keystroke was pure cost.
+func dupTotals(groups []Group, refs *refMatcher) pageTotals {
 	t := pageTotals{Groups: len(groups)}
 	for _, g := range groups {
 		t.Files += len(g.Files)
 		t.Bytes += g.Size * int64(len(g.Files))
 		prot := 0
-		for _, f := range g.Files {
-			if isUnder(filepath.Join(f.Dir, f.Name), refs) {
-				prot++
+		if !refs.empty() {
+			for _, f := range g.Files {
+				if refs.protects(f.Dir, f.Name) {
+					prot++
+				}
 			}
 		}
 		keep := prot

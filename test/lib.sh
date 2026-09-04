@@ -12,6 +12,21 @@ fetch_deps() {
 	[ -d node_modules/jsdom ] || npm install --no-audit --no-fund >/dev/null
 }
 
+# wait_daemon <port> <logfile> [seconds]: block until the daemon answers
+# /api/info, or fail loudly with its log. Both runners used a bare `sleep 1`
+# after every launch; on a slow host the first request then raced the
+# startup and a persistence test failed with a diagnosis about markers.
+wait_daemon() {
+	local PORT="$1" LOG="$2" SECS="${3:-30}" i
+	for i in $(seq 1 $((SECS * 4))); do
+		curl -sf "http://localhost:$PORT/api/info" >/dev/null 2>&1 && return 0
+		sleep 0.25
+	done
+	echo "daemon failed to start within ${SECS}s:" >&2
+	cat "$LOG" >&2
+	return 1
+}
+
 # make_fixture <volume-dir> <outside-dir> [usb-volume-dir]: the disposable
 # test volume. The outside dir holds the symlink-escape target and must live
 # outside the volume. The optional third dir becomes a second "volume" whose

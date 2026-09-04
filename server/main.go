@@ -40,19 +40,15 @@ import (
 // (dev runs, tests) produces.
 var appVersion = "1.0.0-dev"
 
-func defaultPort() int {
-	if v := os.Getenv("DUPFINDER_PORT"); v != "" {
-		var p int
-		if _, err := fmt.Sscanf(v, "%d", &p); err == nil && p > 0 {
-			return p
-		}
-	}
-	return 9807
-}
+// defaultPort is the one port the daemon, the package's start script and the
+// CGI shim agree on. An environment override used to exist, but only the
+// daemon and the start script could see it — the CGI shim, exec'd by DSM's
+// web server, never did, so setting it produced a daemon nobody could reach.
+const defaultPort = 9807
 
 func main() {
 	mode := flag.String("mode", "daemon", "daemon | cgi")
-	port := flag.Int("port", defaultPort(), "daemon listen port (127.0.0.1)")
+	port := flag.Int("port", defaultPort, "daemon listen port (127.0.0.1)")
 	varDir := flag.String("var", "", "writable state dir (logs)")
 	flag.Parse()
 
@@ -73,6 +69,9 @@ const (
 	authTokenHeader = "X-DupFinder-Token"
 	authTokenFile   = ".authtoken"
 	defaultVarDir   = "/var/packages/DuplicateFinder/var"
+	// readyFile is written (with the port) once the daemon is bound and its
+	// token is loaded; the start script waits for it.
+	readyFile = "dupfinder.ready"
 )
 
 // cgiVarDir resolves the package var dir for the CGI process. api.cgi
@@ -148,6 +147,7 @@ type Server struct {
 	dateRange map[string]dateRanges  // per-tool date span over the whole result; nil after results change
 	refDirs   []string               // reference dirs from the most recent scan
 	lastTool  string                 // tool whose scan finished (and stored) last
+	lastEnd   scanEnd                // how the most recent scan run ended, completed or not
 	nextID    int
 	authToken string // shared secret required on /api/*; "" disables (dev/tests)
 
@@ -240,13 +240,35 @@ type moveState struct {
 }
 
 type toolResult struct {
-	Tool      string     `json:"tool"`
+	Tool string `json:"tool"`
+	// Roots maps each scan root's display form to its canonical (symlink-
+	// resolved) path. The walk skips symlinks below a root, so a row's
+	// canonical path is its root's canonical path plus the same relative
+	// tail — which lets the reference-folder protection be decided on
+	// canonical paths without a syscall per row (results.go refMatcher).
+	Roots     []RootMap  `json:"roots,omitempty"`
 	Groups    []Group    `json:"groups,omitempty"`
 	Files     []FileEnt  `json:"files,omitempty"`
 	Errors    []string   `json:"errors,omitempty"`
 	Match     *MatchOpts `json:"match,omitempty"`     // criteria applied at scan time
 	Truncated *TruncInfo `json:"truncated,omitempty"` // results found beyond the stored cap
 	Scanned   string     `json:"scannedAt"`
+}
+
+// RootMap is one scan root: Raw as the user gave it (and as rows display it),
+// Canon as the filesystem resolves it.
+type RootMap struct {
+	Raw   string `json:"raw"`
+	Canon string `json:"canon"`
+}
+
+// scanEnd records how the most recent scan run ended, whatever the outcome —
+// lastTool names only the last scan that COMPLETED, so a poller watching a
+// run stop could not tell a cancel from a finish and replayed the previous
+// finish's announcements.
+type scanEnd struct {
+	Tool      string
+	Completed bool
 }
 
 // TruncInfo reports what a scan found but did not keep, so no results cap is
@@ -261,11 +283,17 @@ type TruncInfo struct {
 // FileEnt is one row in the results table. Dir is the containing directory
 // (the "Location" column); the full path is Dir + "/" + Name.
 type FileEnt struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Dir      string `json:"path"`
-	Size     int64  `json:"size"`
-	Mod      string `json:"date"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Dir  string `json:"path"`
+	Size int64  `json:"size"`
+	Mod  string `json:"date"`
+	// ModUnix is the same instant as Mod as an epoch value, and is what the
+	// move-time identity check compares: Mod is a zone-less local-time
+	// string, so a NAS whose time zone changed between scan and move would
+	// otherwise refuse every file as "changed". Absent from results written
+	// by older builds, which fall back to comparing Mod.
+	ModUnix  int64  `json:"modUnix,omitempty"`
 	Created  string `json:"created"`
 	Captured string `json:"captured,omitempty"`
 	Hash     string `json:"hash,omitempty"`
@@ -291,6 +319,11 @@ type FileEnt struct {
 	// before anyone clicks it; the daemon refuses these independently, so the
 	// disabled box is presentation, not the enforcement.
 	NoMove bool `json:"nomove,omitempty"`
+	// Prot marks a read-only reference copy. Decided by the daemon per page
+	// (results.go) on CANONICAL paths — the same comparison the move refuses
+	// with — so the padlock the grid draws and the refusal the move issues
+	// can never disagree about a folder given through a symlink alias.
+	Prot bool `json:"prot,omitempty"`
 }
 
 type Group struct {
@@ -341,7 +374,10 @@ type rotatingLog struct {
 }
 
 func newRotatingLog(path string) (*rotatingLog, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	// 0600 like every other var-dir artifact: the log names files whose
+	// moves parked or failed verification, in shares other local users may
+	// have no access to.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -372,7 +408,7 @@ func (l *rotatingLog) rotateLocked() {
 	if err := os.Rename(l.path, l.path+".1"); err != nil {
 		return // cannot rotate (read-only dir, race): keep appending
 	}
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return // the old descriptor still writes, now into the .1 file
 	}
@@ -395,13 +431,6 @@ func runDaemon(port int, varDir string) {
 		host = h
 	}
 	s := &Server{results: map[string]*toolResult{}, varDir: varDir}
-	// Results persisted by an earlier run come back before serving starts —
-	// a day-long scan survives a package upgrade or NAS reboot. A scan
-	// marker left behind means a scan died with the daemon; /api/state
-	// reports it so the UI can offer a rescan (a full re-read: an
-	// interrupted scan's hashes are history, never a shortcut).
-	s.loadState()
-	s.interrupted = s.loadMarker()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/info", s.handleInfo)
 	mux.HandleFunc("/api/state", s.handleState)
@@ -431,6 +460,28 @@ func runDaemon(port int, varDir string) {
 		}
 		s.authToken = tok
 	}
+	// Everything that can still fail has passed: say so where the start
+	// script can see it. It waits for this file instead of guessing with a
+	// fixed sleep, so Package Center never reports a daemon that then died.
+	if varDir != "" {
+		err := writeAtomic(filepath.Join(varDir, readyFile), 0o600, false, func(f *os.File) error {
+			_, err := fmt.Fprintf(f, "%d\n", port)
+			return err
+		})
+		if err != nil {
+			log.Printf("ready file could not be written: %v", err)
+		}
+	}
+	// Results persisted by an earlier run come back before serving starts —
+	// a day-long scan survives a package upgrade or NAS reboot. Loaded AFTER
+	// the bind: the load of a 100k-row state file can outlast the start
+	// script's patience, and a bind that then failed left Package Center
+	// showing a running package with no daemon behind it. Connections
+	// arriving meanwhile simply wait in the listen backlog. A scan marker
+	// left behind means a scan died with the daemon; /api/state reports it
+	// so the UI can offer a resume.
+	s.loadState()
+	s.interrupted = s.loadMarker()
 	log.Printf("Duplicate Finder %s listening on %s", appVersion, addr)
 	if err := http.Serve(l, handler); err != nil {
 		log.Fatal(err)
@@ -591,6 +642,13 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		"lastTool": s.lastTool,
 		"scanned":  scanned, "refDirs": s.refDirs,
 	}
+	// How the most recent run ended, completed or not: a poller that sees
+	// running flip to false needs this to tell Stop from a finish — lastTool
+	// alone names the last scan that completed, which after a Stop is the
+	// previous one, and replaying its completion is exactly wrong.
+	if s.lastEnd.Tool != "" {
+		out["lastEnd"] = map[string]any{"tool": s.lastEnd.Tool, "completed": s.lastEnd.Completed}
+	}
 	// Only while a move is actually in flight: its absence is what tells the
 	// UI's poller to stop.
 	if s.move.Running {
@@ -740,9 +798,10 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	}
 	cancel := make(chan struct{})
 	s.job = jobState{Running: true, Tool: req.Tool, Label: "Initializing scan…", cancel: cancel}
-	// Store the reference dirs cleaned: isUnder is a prefix match, so a raw
-	// value like "/vol/ref/." would protect nothing.
-	s.refDirs = uniquePaths(req.RefDirs)
+	// s.refDirs is NOT updated here. It describes the stored results, so it
+	// changes when results do — at completion, in runScan's defer. Publishing
+	// it at admission let a cancelled scan (of any tool) silently change
+	// which files the OLD results' moves refuse.
 	// Resume is decided here, under mu, against the notice this scan is
 	// about to supersede: the request must MATCH the dead run's — same
 	// tool, same normalized roots and reference folders, same recursion
@@ -797,6 +856,13 @@ func validateRoots(roots, canonRoots []string, sess *fsSession) error {
 func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, 405, "POST required")
+		return
+	}
+	// Like every other mutation: the raw API (token, no DSM session) reads
+	// state and results, nothing more. A cancel is not harmless — it ends a
+	// scan that may be hours in, and clears its marker with it.
+	if _, err := fsSessionFrom(r); err != nil {
+		writeErr(w, 400, err.Error())
 		return
 	}
 	s.mu.Lock()
@@ -947,53 +1013,24 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "a scan is running — wait for it to finish before moving files")
 		return
 	}
-	// Pin the destination: containment is decided from the pinned object's
-	// canonical path, and the File Station move below targets that same
-	// canonical path — so swapping req.Dest for a symlink after validation
-	// cannot launder an outside destination past the vetting, and the vetted
-	// destination and the executed destination are never two different
-	// strings.
-	destH, err := openDirHandle(req.Dest)
-	if err != nil {
-		writeErr(w, 400, "destination is not a folder")
+	destH, destCanon, destShare, sess, ok := s.vetDestination(w, r, req.Dest)
+	if !ok {
 		return
 	}
 	defer destH.Close()
 	vols := volumeRootsResolved()
-	destCanon, err := destH.Canon()
-	if err != nil || !allowedPath(req.Dest) || !isUnder(destCanon, vols) {
-		writeErr(w, 400, "destination outside allowed volumes")
-		return
-	}
-	// Execution is delegated to File Station with the caller's DSM session;
-	// without one (a raw daemon call from outside DSM) moves are refused.
-	sess, err := fsSessionFrom(r)
-	if err != nil {
-		writeErr(w, 400, err.Error())
-		return
-	}
-	destShare, err := sess.shareSpacePath(destCanon)
-	if err != nil {
-		writeErr(w, 400, "destination outside allowed volumes")
-		return
-	}
-	// Directive: "is this a usable folder for this DSM session" is File
-	// Station's question — the canonical containment above stays native
-	// (the vetting exception), everything else is asked of the API.
-	if exists, isdir, err := sess.statShare(destShare); err != nil {
-		writeErr(w, 400, err.Error())
-		return
-	} else if !exists || !isdir {
-		writeErr(w, 400, "destination is not a folder")
-		return
-	}
 
 	// One move request at a time: the keep-one vetting below is only sound
 	// when vet → execute → prune runs as an uninterrupted critical section,
 	// so each request is checked against the state the previous one left
-	// behind. Moves are an occasional, admin-only operation — holding the
-	// lock across the File Station calls is an acceptable cost.
-	s.moveMu.Lock()
+	// behind. A second request is REFUSED rather than queued: a queued
+	// request published no progress of its own while it waited, so its
+	// caller's dialog showed the first move's counts and file names as its
+	// own for as long as that took.
+	if !s.moveMu.TryLock() {
+		writeErr(w, 409, "a move is already running — wait for it to finish")
+		return
+	}
 	defer s.moveMu.Unlock()
 
 	// THE guard. The pre-lock check above was taken before a File Station
@@ -1060,7 +1097,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	for _, f := range cachedEnts {
 		cp := canon.path(filepath.Join(f.Dir, f.Name))
 		allowed[cp] = true
-		idents[cp] = append(idents[cp], entIdent{size: f.Size, mod: f.Mod, isDir: f.IsDir, pfx: f.Pfx, hash: f.Hash})
+		idents[cp] = append(idents[cp], identOf(f))
 	}
 
 	// The UI never submits every file of a duplicate group, but the daemon
@@ -1068,16 +1105,48 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	// otherwise lose its last copy. Files whose parent cannot be resolved
 	// stay out of the requested set — they cannot move, so they survive.
 	requested := map[string]bool{}
+	var reqDirs []string
 	for _, f := range req.Files {
 		if cp, err := canon.strictPath(f); err == nil {
 			requested[cp] = true
+			for _, id := range idents[cp] {
+				if id.isDir {
+					reqDirs = append(reqDirs, cp)
+					break
+				}
+			}
+		}
+	}
+	// A moved DIRECTORY takes every duplicate-group member beneath it, so
+	// those members are requested too as far as keep-one is concerned — or
+	// two junk-only folders holding the same Thumbs.db could be moved one
+	// after the other and drain the group in place. The directory itself is
+	// then refused below when a held-back copy lives inside it.
+	if len(reqDirs) > 0 {
+		for _, g := range groups {
+			for _, f := range g.Files {
+				if p := canon.path(filepath.Join(f.Dir, f.Name)); isUnder(p, reqDirs) {
+					requested[p] = true
+				}
+			}
 		}
 	}
 	// The scan snapshot may be stale: a cached group member that vanished
-	// since the scan must not count as a surviving copy, so File Station is
-	// asked which members of the touched groups still exist.
-	exists := groupExistence(sess, groups, requested, canon)
+	// since the scan must not count as a surviving copy — and a member that
+	// no longer has the scan's identity is not a surviving copy of the
+	// group's CONTENT either — so File Station is asked which members of
+	// the touched groups still exist as recorded.
+	exists := groupExistence(sess, groups, requested, canon, idents)
 	drops := keepOneDrops(groups, requested, canonRefs, canon, exists)
+	// holdsUnder reports whether any held-back path lies inside dir.
+	holdsUnder := func(dir string, held map[string]bool) bool {
+		for p := range held {
+			if strings.HasPrefix(p, dir+"/") {
+				return true
+			}
+		}
+		return false
+	}
 
 	// In preserve mode the whole batch moves into ONE new folder at the
 	// destination, allocated LAZILY and at most ONCE per request.
@@ -1164,6 +1233,8 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		// survivor stays held back until the next duplicates scan.
 		case drops[cp] || keepers[cp]:
 			moveErr = errors.New("keeping one copy of this duplicate group")
+		case isDirIdent(idents[cp]) && (holdsUnder(cp, drops) || holdsUnder(cp, keepers)):
+			moveErr = errors.New("keeping one copy of a duplicate group that lives inside this folder")
 		case isUnder(cp, canonRefs):
 			moveErr = errors.New("read-only reference file")
 		// Refused BEFORE File Station is asked, because asking produces "no
@@ -1183,18 +1254,38 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			moveErr = execMoveFS(sess, src, cp, destShare, destCanon, idents[cp], batchFn, req.Verify, note)
 		}
 		parentH.Close()
+		// A moved DIRECTORY takes everything under it (a junk-only "empty"
+		// folder moves with its junk inside), so pruneMoved must also drop
+		// rows beneath it. The scan's own record says what moved: any ident
+		// for this path being a directory is enough — a path that was a dir
+		// to one tool and a file to another has changed since some scan, and
+		// the identity check would have refused the move. BOTH forms, and the
+		// display path is not redundant: once the directory is gone,
+		// dirResolver.dir() can no longer resolve it, so every row beneath it
+		// falls back to its raw stored path (that fallback is deliberate — see
+		// dir()). Matching only the canonical form then silently prunes
+		// nothing wherever the two differ: a symlinked share, or a scope
+		// naming an alias of a real directory.
+		noteMovedDir := func() {
+			if isDirIdent(idents[cp]) {
+				movedDirs = append(movedDirs, cp, filepath.Clean(src))
+			}
+		}
 		if moveErr != nil {
 			errs = append(errs, map[string]string{"path": src, "error": moveErr.Error()})
-			// A verification failure AFTER File Station completed the move
-			// leaves the file at the destination and the source gone: the
-			// row must prune like any moved row, or it would linger pointing
-			// at a path that no longer exists and count as a phantom keep-one
-			// survivor. It stays out of `moved` — the response's error entry
-			// is the truth about this file. (Only files verify, so this never
-			// contributes to movedDirs.)
+			// A failure AFTER File Station completed the move — a verification
+			// mismatch, or an entry parked in the staging folder — leaves the
+			// source gone: the row must prune like any moved row, or it would
+			// linger pointing at a path that no longer exists and count as a
+			// phantom keep-one survivor. It stays out of `moved` — the
+			// response's error entry is the truth about this entry. A parked
+			// DIRECTORY took its contents with it, so its rows beneath prune
+			// too; the branch used to skip that on the assumption that only
+			// files reach here.
 			var mbe movedButError
 			if errors.As(moveErr, &mbe) {
 				movedCanon = append(movedCanon, cp)
+				noteMovedDir()
 				// The toast is transient and the row is about to prune: the
 				// daemon log is the durable record of a move that left the
 				// source but did not end clean.
@@ -1204,26 +1295,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		}
 		moved = append(moved, src)
 		movedCanon = append(movedCanon, cp)
-		// A moved DIRECTORY takes everything under it (a junk-only "empty"
-		// folder moves with its junk inside), so pruneMoved must also drop
-		// rows beneath it. The scan's own record says what moved: any ident
-		// for this path being a directory is enough — a path that was a dir
-		// to one tool and a file to another has changed since some scan, and
-		// the identity check would have refused the move.
-		for _, id := range idents[cp] {
-			if id.isDir {
-				// BOTH forms, and the display path is not redundant: once the
-				// directory is gone, dirResolver.dir() can no longer resolve
-				// it, so every row beneath it falls back to its raw stored
-				// path (that fallback is deliberate — see dir()). Matching
-				// only the canonical form then silently prunes nothing
-				// wherever the two differ: a symlinked share, or a scope
-				// naming an alias of a real directory. Cheap and duplicate-
-				// tolerant — isUnder just tests prefixes.
-				movedDirs = append(movedDirs, cp, filepath.Clean(src))
-				break
-			}
-		}
+		noteMovedDir()
 	}
 	// Every file accounted for — report the full count before the response is
 	// written, so a poll racing the last file cannot show N-1 of N and then
@@ -1231,7 +1303,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	s.setMoveProgress(true, len(req.Files), len(req.Files), "")
 
 	if len(movedCanon) > 0 {
-		s.pruneMoved(movedCanon, movedDirs)
+		s.pruneMoved(movedCanon, movedDirs, canon)
 		// Pruned rows and new keep-one survivors must survive a restart too,
 		// or a reboot would resurrect moved rows and forget protections.
 		s.saveState()
@@ -1261,14 +1333,32 @@ func (s *Server) setMoveProgress(running bool, done, total int, name string) {
 // to notice, at move time, that the file at that path is no longer the one
 // the scan saw.
 type entIdent struct {
-	size  int64
-	mod   string // fmtTime form, matching FileEnt.Mod
-	isDir bool
-	pfx   string // content fingerprint; "" when the scan recorded none
+	size int64
+	mod  string // fmtTime form, matching FileEnt.Mod
+	// modUnix is the same instant as an epoch value; 0 for rows an older
+	// build persisted, which fall back to the string form.
+	modUnix int64
+	isDir   bool
+	pfx     string // content fingerprint; "" when the scan recorded none
 	// hash is the scan's full-content hash; "" when the scan recorded none
 	// (only duplicates rows carry one). When verification is on, the source
 	// must still hash to exactly this before it is moved.
 	hash string
+}
+
+// identOf is the identity a cached row carries into the move checks.
+func identOf(f FileEnt) entIdent {
+	return entIdent{size: f.Size, mod: f.Mod, modUnix: f.ModUnix, isDir: f.IsDir, pfx: f.Pfx, hash: f.Hash}
+}
+
+// isDirIdent reports whether any scan recorded this path as a directory.
+func isDirIdent(ids []entIdent) bool {
+	for _, id := range ids {
+		if id.isDir {
+			return true
+		}
+	}
+	return false
 }
 
 // identMatches reports whether File Station's current view of a file agrees
@@ -1284,7 +1374,18 @@ func identMatches(e fsEntry, wants []entIdent) (entIdent, bool) {
 	var best entIdent
 	found := false
 	for _, w := range wants {
-		if e.IsDir != w.isDir || mod != w.mod {
+		if e.IsDir != w.isDir {
+			continue
+		}
+		// The modification time compares as an epoch value where the scan
+		// recorded one. The string form is a zone-less local time: a NAS
+		// whose time zone changed between the scan and the move would
+		// otherwise refuse every file as "changed since the scan".
+		if w.modUnix != 0 {
+			if e.Additional.Time.Mtime != w.modUnix {
+				continue
+			}
+		} else if mod != w.mod {
 			continue
 		}
 		if !e.IsDir && e.Additional.Size != w.size {
@@ -1502,10 +1603,21 @@ func execMoveFS(sess *fsSession, src, cp, destShare, destCanon string, wants []e
 // longer exist and fail any later move with a misleading refusal. (A truly
 // empty folder can contain no rows, which is why file-only moves never
 // needed this.)
-func (s *Server) pruneMoved(canonPaths, dirPaths []string) {
+func (s *Server) pruneMoved(canonPaths, dirPaths []string, canon *dirResolver) {
 	gone := map[string]bool{}
+	names := map[string]bool{} // base names of the moved entries
 	for _, p := range canonPaths {
 		gone[p] = true
+		names[filepath.Base(p)] = true
+	}
+	// A row can only have moved if its NAME is one of the moved entries' — or,
+	// when a directory moved, if it lies beneath it. Rows failing both never
+	// need canonicalizing, which is the whole cost here: the resolver is
+	// handleMove's, already warm for every cached directory, and the loop
+	// runs under s.mu, where a syscall per row stalled /api/state for the
+	// duration of a 100k-row prune.
+	candidate := func(f *FileEnt) bool {
+		return names[f.Name] || len(dirPaths) > 0
 	}
 	// raw is the row's stored path, cp its canonicalized form. Both are tested
 	// against dirPaths because a row under a JUST-MOVED directory can no
@@ -1519,7 +1631,9 @@ func (s *Server) pruneMoved(canonPaths, dirPaths []string) {
 		}
 		return len(dirPaths) > 0 && (isUnder(cp, dirPaths) || isUnder(raw, dirPaths))
 	}
-	canon := newDirResolver()
+	if canon == nil {
+		canon = newDirResolver()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.invalidateDerivedLocked() // cached view/date span describe rows that may just have moved
@@ -1530,7 +1644,7 @@ func (s *Server) pruneMoved(canonPaths, dirPaths []string) {
 				files := g.Files[:0]
 				for _, f := range g.Files {
 					raw := filepath.Join(f.Dir, f.Name)
-					if !dropped(canon.path(raw), raw) {
+					if !candidate(&f) || !dropped(canon.path(raw), raw) {
 						files = append(files, f)
 					}
 				}
@@ -1560,13 +1674,59 @@ func (s *Server) pruneMoved(canonPaths, dirPaths []string) {
 			out := res.Files[:0]
 			for _, f := range res.Files {
 				raw := filepath.Join(f.Dir, f.Name)
-				if !dropped(canon.path(raw), raw) {
+				if !candidate(&f) || !dropped(canon.path(raw), raw) {
 					out = append(out, f)
 				}
 			}
 			res.Files = out
 		}
 	}
+}
+
+// vetDestination pins and vets a move or export destination and returns the
+// pinned handle (the caller closes it), its canonical and share-space paths
+// and the caller's session. One implementation for both handlers, so the
+// checks — and their wording — cannot drift apart: the two copies it
+// replaced already disagreed about what an unopenable destination was.
+//
+// Containment is decided from the pinned object's canonical path, and the
+// File Station operation later targets that same canonical path — so
+// swapping the destination for a symlink after validation cannot launder an
+// outside destination past the vetting, and the vetted destination and the
+// executed destination are never two different strings. The canonical
+// containment stays native (the vetting exception); "is this a usable folder
+// for this DSM session" is File Station's question.
+func (s *Server) vetDestination(w http.ResponseWriter, r *http.Request, dest string) (destH *dirHandle, destCanon, destShare string, sess *fsSession, ok bool) {
+	destH, err := openDirHandle(dest)
+	if err != nil {
+		writeErr(w, 400, "destination is not a folder")
+		return nil, "", "", nil, false
+	}
+	fail := func(code int, msg string) (*dirHandle, string, string, *fsSession, bool) {
+		destH.Close()
+		writeErr(w, code, msg)
+		return nil, "", "", nil, false
+	}
+	destCanon, err = destH.Canon()
+	if err != nil || !allowedPath(dest) || !isUnder(destCanon, volumeRootsResolved()) {
+		return fail(400, "destination outside allowed volumes")
+	}
+	// Execution is delegated to File Station with the caller's DSM session;
+	// without one (a raw daemon call from outside DSM) mutations are refused.
+	sess, err = fsSessionFrom(r)
+	if err != nil {
+		return fail(400, err.Error())
+	}
+	destShare, err = sess.shareSpacePath(destCanon)
+	if err != nil {
+		return fail(400, "destination outside allowed volumes")
+	}
+	if exists, isdir, err := sess.statShare(destShare); err != nil {
+		return fail(400, err.Error())
+	} else if !exists || !isdir {
+		return fail(400, "destination is not a folder")
+	}
+	return destH, destCanon, destShare, sess, true
 }
 
 type ExportReq struct {
@@ -1584,40 +1744,14 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad request body")
 		return
 	}
-	// Pin the destination for vetting (same rationale as handleMove).
-	destH, err := openDirHandle(req.Dest)
-	if err != nil {
-		writeErr(w, 400, "destination outside allowed volumes")
+	destH, _, destShare, sess, ok := s.vetDestination(w, r, req.Dest)
+	if !ok {
 		return
 	}
 	defer destH.Close()
-	destCanon, err := destH.Canon()
-	if err != nil || !allowedPath(req.Dest) || !isUnder(destCanon, volumeRootsResolved()) {
-		writeErr(w, 400, "destination outside allowed volumes")
-		return
-	}
-	sess, err := fsSessionFrom(r)
-	if err != nil {
-		writeErr(w, 400, err.Error())
-		return
-	}
-	destClean := filepath.Clean(req.Dest)
 	// The upload targets the canonical (vetted) destination; destClean only
 	// names the written file back to the client in the path form it sent.
-	destShare, err := sess.shareSpacePath(destCanon)
-	if err != nil {
-		writeErr(w, 400, "destination outside allowed volumes")
-		return
-	}
-	// Same as handleMove: File Station answers whether this is a usable
-	// folder for the caller's session before anything is uploaded into it.
-	if exists, isdir, err := sess.statShare(destShare); err != nil {
-		writeErr(w, 400, err.Error())
-		return
-	} else if !exists || !isdir {
-		writeErr(w, 400, "destination is not a folder")
-		return
-	}
+	destClean := filepath.Clean(req.Dest)
 	res := s.snapshotResult(req.Tool)
 	if res == nil {
 		writeErr(w, 400, "no results to export — run a scan first")
@@ -1731,13 +1865,6 @@ func resolveAllowedRoot(p string) (string, error) {
 	return rp, nil
 }
 
-// resolvedAllowedPath reports whether p (which must exist) still lies inside
-// the allowed volumes after resolving symlinks.
-func resolvedAllowedPath(p string) bool {
-	_, err := resolveAllowedRoot(p)
-	return err == nil
-}
-
 // dirResolver canonicalizes paths by symlink-resolving their directory part,
 // memoized per request. Client-supplied paths, cached scan paths, and
 // reference dirs are all compared in this one canonical namespace so a
@@ -1817,14 +1944,18 @@ func isUnder(p string, roots []string) bool {
 }
 
 // groupExistence answers, for every member of a duplicate group this
-// request touches, whether the file still exists per File Station. The
-// scan snapshot may be stale — a member deleted or moved externally since
-// the scan must not excuse moving the last remaining copy. Untouched
-// groups are skipped (their keep-one outcome cannot change). On a File
-// Station error the map stays empty, which fails in the safe direction:
-// unknown existence counts as missing, so more is held back, never less.
-func groupExistence(sess *fsSession, groups []Group, requested map[string]bool, canon *dirResolver) map[string]bool {
+// request touches, whether the file still exists per File Station AS THE
+// SCAN RECORDED IT. The scan snapshot may be stale — a member deleted or
+// moved externally since the scan must not excuse moving the last remaining
+// copy, and neither must a member rewritten in place: a survivor is a copy
+// of the group's CONTENT, and a file that no longer has the scan's size and
+// mtime is not one, whatever its name. Untouched groups are skipped (their
+// keep-one outcome cannot change). On a File Station error the map stays
+// empty, which fails in the safe direction: unknown existence counts as
+// missing, so more is held back, never less.
+func groupExistence(sess *fsSession, groups []Group, requested map[string]bool, canon *dirResolver, idents map[string][]entIdent) map[string]bool {
 	byShare := map[string][]string{} // share path → canonical members
+	want := map[string][]entIdent{}  // share path → identities the scan recorded
 	var shares []string
 	for _, g := range groups {
 		touched := false
@@ -1844,6 +1975,11 @@ func groupExistence(sess *fsSession, groups []Group, requested map[string]bool, 
 					shares = append(shares, sp)
 				}
 				byShare[sp] = append(byShare[sp], cp)
+				if ids := idents[cp]; len(ids) > 0 {
+					want[sp] = append(want[sp], ids...)
+				} else {
+					want[sp] = append(want[sp], identOf(f))
+				}
 			}
 		}
 	}
@@ -1851,15 +1987,20 @@ func groupExistence(sess *fsSession, groups []Group, requested map[string]bool, 
 	if len(shares) == 0 {
 		return out
 	}
-	info, err := sess.getInfo(shares, nil)
+	info, err := sess.getInfo(shares, []string{"size", "time"})
 	if err != nil {
 		return out
 	}
 	for sp, cps := range byShare {
-		if e, ok := info[sp]; ok && e.exists() {
-			for _, cp := range cps {
-				out[cp] = true
-			}
+		e, ok := info[sp]
+		if !ok || !e.exists() {
+			continue
+		}
+		if _, same := identMatches(e, want[sp]); !same {
+			continue
+		}
+		for _, cp := range cps {
+			out[cp] = true
 		}
 	}
 	return out

@@ -117,7 +117,7 @@ func TestWindowedScanMatchesWholeScan(t *testing.T) {
 				t.Fatal("window reported cancellation")
 			}
 		}
-		got, _ := acc.final(s, dupFileCap)
+		got, _ := acc.final(s, dupFileCap, nil)
 		if len(got) != len(whole) {
 			t.Fatalf("%d partitions produced %d groups, whole scan %d", parts, len(got), len(whole))
 		}
@@ -192,7 +192,7 @@ func TestSkewedKeyStillFindsDuplicatesPastTheCap(t *testing.T) {
 		[]*dirHandle{nil}, []string{dir}, make(chan struct{}), acc, 16, 96, &missing); err != nil {
 		t.Fatal(err)
 	}
-	groups, _ := acc.final(s, dupFileCap)
+	groups, _ := acc.final(s, dupFileCap, nil)
 	if len(groups) != 1 {
 		t.Fatalf("want the one duplicate group, got %d", len(groups))
 	}
@@ -251,7 +251,7 @@ func TestSkewedPrefixStillFindsDuplicatesPastTheCap(t *testing.T) {
 		[]*dirHandle{nil}, []string{dir}, make(chan struct{}), acc, 16, 96, &missing); err != nil {
 		t.Fatal(err)
 	}
-	groups, _ := acc.final(s, dupFileCap)
+	groups, _ := acc.final(s, dupFileCap, nil)
 	if len(groups) != 1 {
 		t.Fatalf("want exactly the one real duplicate group, got %d", len(groups))
 	}
@@ -301,7 +301,7 @@ func TestCrowdedLadderPartitionEscalatesInsteadOfDropping(t *testing.T) {
 		[]*dirHandle{nil}, []string{dir}, make(chan struct{}), acc, 16, 96, &missing); err != nil {
 		t.Fatal(err)
 	}
-	groups, trunc := acc.final(s, dupFileCap)
+	groups, trunc := acc.final(s, dupFileCap, nil)
 	if len(groups) != 1 || len(groups[0].Files) != 2 ||
 		groups[0].Files[0].Name != "f08.bin" || groups[0].Files[1].Name != "f09.bin" {
 		t.Fatalf("crowding must not cost the pair: %+v", groups)
@@ -360,7 +360,7 @@ func TestSkewLadderFeedsTheHashCache(t *testing.T) {
 		[]*dirHandle{nil}, []string{dir}, make(chan struct{}), acc, 16, 96, &missing); err != nil {
 		t.Fatal(err)
 	}
-	groups, _ := acc.final(s, dupFileCap)
+	groups, _ := acc.final(s, dupFileCap, nil)
 	if len(groups) != 6 {
 		t.Fatalf("want the six content groups, got %d", len(groups))
 	}
@@ -390,7 +390,7 @@ func TestSkewLadderFeedsTheHashCache(t *testing.T) {
 		[]*dirHandle{nil}, []string{dir}, make(chan struct{}), acc2, 16, 96, &missing); err != nil {
 		t.Fatal(err)
 	}
-	g2, _ := acc2.final(s, dupFileCap)
+	g2, _ := acc2.final(s, dupFileCap, nil)
 	if len(g2) != len(groups) {
 		t.Fatalf("same-scan rerun produced %d groups, first pass %d", len(g2), len(groups))
 	}
@@ -418,7 +418,7 @@ func TestSkewLadderFeedsTheHashCache(t *testing.T) {
 		[]*dirHandle{nil}, []string{dir}, make(chan struct{}), acc3, 16, 96, &missing); err != nil {
 		t.Fatal(err)
 	}
-	g3, _ := acc3.final(s, dupFileCap)
+	g3, _ := acc3.final(s, dupFileCap, nil)
 	if len(g3) != len(groups) {
 		t.Fatalf("rescan re-read produced %d groups, first pass %d", len(g3), len(groups))
 	}
@@ -463,7 +463,7 @@ func TestGroupTopMatchesSortAndCap(t *testing.T) {
 	for _, g := range raw {
 		acc.add(g)
 	}
-	got, trunc := acc.final(&Server{}, budget)
+	got, trunc := acc.final(&Server{}, budget, nil)
 
 	if len(got) != len(wantKept) {
 		t.Fatalf("kept %d groups, sort-then-cap kept %d", len(got), len(wantKept))
@@ -608,7 +608,7 @@ func TestOversizedGroupIsCappedAndReported(t *testing.T) {
 	}
 	huge.extra = 7 // members the scan itself already dropped
 	acc.add(huge)
-	got, trunc := acc.final(&Server{}, budget)
+	got, trunc := acc.final(&Server{}, budget, nil)
 	if len(got) != 1 {
 		t.Fatalf("want the one group kept, got %d", len(got))
 	}

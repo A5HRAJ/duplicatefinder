@@ -46,8 +46,7 @@ type scanMarker struct {
 	Tool string `json:"tool"`
 	// Gen is the hash-store generation the interrupted run was recording
 	// under; a resume continues it. 0 = the run died before opening the
-	// store. Kept after Tool: test/run.sh greps for the marker JSON
-	// beginning {"tool":…, so Tool must stay the first field.
+	// store.
 	Gen uint32 `json:"gen,omitempty"`
 	// The rest of the request the interrupted run was serving, normalized
 	// by normPaths. A resume adopts the dead run's generation, which hands
@@ -106,10 +105,57 @@ func (s *Server) stateDir() string {
 	return devStateDir()
 }
 
+// writeAtomic writes path through a temporary sibling that is synced to disk
+// before it is renamed into place. Temp+rename alone only promises that a
+// reader never sees a half-written file; without the fsync, a power loss
+// shortly after the rename can leave the FINAL name pointing at a zero-length
+// or truncated file — on ext4 and btrfs alike — which the loaders then skip
+// or truncate silently. body writes the content; noReplace makes the final
+// step refuse to clobber an existing file (the token writer's contract).
+func writeAtomic(path string, mode os.FileMode, noReplace bool, body func(*os.File) error) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name) // no-op once renamed
+	if err := body(tmp); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if noReplace {
+		err = renameNoReplace(name, path)
+	} else {
+		err = os.Rename(name, path)
+	}
+	if err != nil {
+		return err
+	}
+	// The rename lives in the directory: sync that too, so the new name
+	// survives the same power loss the data now does.
+	if d, derr := os.Open(dir); derr == nil {
+		d.Sync()
+		d.Close()
+	}
+	return nil
+}
+
 // saveState snapshots the cached results under s.mu and writes them
-// atomically (temp + rename, 0600). Failures are logged, never fatal — a
-// NAS with a full system partition keeps scanning, it just loses restart
-// persistence.
+// atomically (writeAtomic: temp + fsync + rename, 0600). Failures are
+// logged, never fatal — a NAS with a full system partition keeps scanning,
+// it just loses restart persistence.
 func (s *Server) saveState() {
 	dir := s.stateDir()
 	if dir == "" {
@@ -140,34 +186,14 @@ func (s *Server) saveState() {
 	s.persistMu.Lock()
 	defer s.persistMu.Unlock()
 	path := filepath.Join(dir, stateFile)
-	tmp, err := os.CreateTemp(dir, stateFile+".tmp-*")
+	err := writeAtomic(path, 0o600, false, func(tmp *os.File) error {
+		zw, _ := gzip.NewWriterLevel(tmp, gzip.BestSpeed)
+		if err := json.NewEncoder(zw).Encode(&ps); err != nil {
+			return err
+		}
+		return zw.Close()
+	})
 	if err != nil {
-		log.Printf("state save failed: %v", err)
-		return
-	}
-	defer os.Remove(tmp.Name()) // no-op once renamed
-	zw, _ := gzip.NewWriterLevel(tmp, gzip.BestSpeed)
-	enc := json.NewEncoder(zw)
-	if err := enc.Encode(&ps); err != nil {
-		tmp.Close()
-		log.Printf("state save failed: %v", err)
-		return
-	}
-	if err := zw.Close(); err != nil {
-		tmp.Close()
-		log.Printf("state save failed: %v", err)
-		return
-	}
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		log.Printf("state save failed: %v", err)
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		log.Printf("state save failed: %v", err)
-		return
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
 		log.Printf("state save failed: %v", err)
 	}
 }
@@ -206,10 +232,16 @@ func (s *Server) loadState() {
 		// retired tool's rows would stay movable — and a keep-one survivor
 		// listed only there would stay exposed — with no UI able to show
 		// them or rescan them away. Retiring a tool must retire its data.
-		for tool := range ps.Results {
+		for tool, r := range ps.Results {
 			if !validTools[tool] {
 				delete(ps.Results, tool)
 				log.Printf("dropped persisted results for retired tool %q", tool)
+				continue
+			}
+			// A `null` entry (a hand-edited file — the daemon never writes
+			// one) would be a nil pointer every consumer dereferences.
+			if r == nil {
+				delete(ps.Results, tool)
 			}
 		}
 		s.results = ps.Results
@@ -264,7 +296,13 @@ func (s *Server) writeMarker(req *ScanReq, gen uint32) {
 		Dirs: normPaths(req.Dirs), RefDirs: normPaths(req.RefDirs),
 		Recurse: req.Recurse, Match: req.Match,
 		StartedAt: time.Now().Format(time.RFC3339)})
-	if err := os.WriteFile(filepath.Join(dir, markerFile), b, 0o600); err != nil {
+	// Atomic like the state file: a crash mid-write used to leave an
+	// unparsable marker, which loadMarker reads as "no interruption".
+	err := writeAtomic(filepath.Join(dir, markerFile), 0o600, false, func(f *os.File) error {
+		_, err := f.Write(b)
+		return err
+	})
+	if err != nil {
 		log.Printf("scan marker write failed: %v", err)
 	}
 }

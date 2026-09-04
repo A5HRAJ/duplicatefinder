@@ -26,7 +26,7 @@ folder path mirrored inside it; results can be exported as CSV.
 ## How it works
 
 ```
-DSM browser UI (ui/index.html + app.js)
+DSM desktop app (ui/DuplicateFinder.js, shipped under a content-stamped name)
         │  fetch api.cgi/…            (same-origin, DSM login required)
         ▼
 ui/api.cgi  – verifies the DSM session via authenticate.cgi,
@@ -102,7 +102,10 @@ bin/dupfinder -mode daemon  – 127.0.0.1:9807, started by
   speed, and the remembered hashes now serve only as the before-picture that
   convicts a changed file.
 - **Reference folders** are scanned but read-only: their files can't be
-  selected or moved (enforced in the UI *and* the backend).
+  selected or moved. The daemon decides which rows are protected — from the
+  reference folders the stored results were scanned with, on canonical
+  paths — and the UI draws its padlocks from that decision, so the two
+  cannot disagree; changing the list applies at the next scan.
 - **Move** never overwrites: the daemon vets every request, then delegates
   execution to DSM's File Station Web API as the logged-in admin (see
   Notes below) — always without the `overwrite` parameter, so a collision
@@ -144,11 +147,15 @@ aarch64 models, armv7 for 32-bit ARM models incl. armada38x.
 
 Off-NAS testing requires the `dev` build tag, which adds a few env-var hooks
 (present only in dev builds — a release binary ignores every one of them). A
-release binary reads just two variables of its own, neither meant to be set by
-hand: `DUPFINDER_PORT`, the daemon's listen port (the package's start script
-reads the same variable and passes it on), and `DUPFINDER_VAR`, the package
-var directory that `api.cgi` exports so the CGI process can find the daemon's
-auth token. The dev hooks:
+release binary reads exactly one variable of its own, not meant to be set by
+hand: `DUPFINDER_VAR`, the package var directory that `api.cgi` exports so
+the CGI process can find the daemon's auth token. The listen port is fixed
+at 9807 in the daemon, the start script and the CGI shim alike — an
+environment override used to exist, but the shim, exec'd by DSM's web
+server, could never see it, so setting it only produced a daemon nobody
+could reach. On start the daemon writes `var/dupfinder.ready` once it is
+bound and holds its token, and the start script waits for that file rather
+than for a fixed second. The dev hooks:
 
 ```sh
 cd server && go build -tags dev -o ../build/dupfinder-dev .
@@ -268,13 +275,17 @@ runtime via `Ext.util.CSS.createStyleSheet` in `DuplicateFinder.js`.
 - **Long moves and exports don't time out client-side**: a move across
   volumes or onto ext4 copies the data and takes as long as File Station
   needs, so those requests run with an effectively unlimited timeout behind
-  a busy dialog. If the connection is lost mid-operation the app says the
-  outcome is unknown — the NAS keeps working — and refreshes the results
-  rather than falsely reporting failure. A second overlapping move is
-  refused by the app itself ("A move is already running"): the dialog masks
-  only the app window, and a folder chooser opened beforehand sits outside
-  that mask, so the mask alone would not stop one. The daemon also executes
-  move requests strictly one at a time.
+  a busy dialog. If the connection is lost mid-operation (DSM's web server
+  gives up on a request long before that timeout) the app says so, keeps
+  the busy dialog and its progress poll up until the daemon reports the
+  move finished, and only then refreshes the results — the NAS keeps
+  working, and neither failure nor completion is claimed early. A second
+  overlapping move is refused by the app itself ("A move is already
+  running"): the dialog masks only the app window, and a folder chooser
+  opened beforehand sits outside that mask, so the mask alone would not stop
+  one. The daemon refuses one too (409 "a move is already running") rather
+  than queueing it, because a queued request published no progress of its
+  own and its caller's dialog showed the first move's counts as its own.
 - **A move reports its own progress**: `POST /api/move` is a single long
   blocking request and so cannot report anything in its own response. The
   daemon publishes progress separately instead — `{done, total, name}` under
@@ -301,18 +312,25 @@ runtime via `Ext.util.CSS.createStyleSheet` in `DuplicateFinder.js`.
   group rather than the part on screen. As in File Station, a selection belongs to the page it was made
   on. The search box, the magnifier menu's advanced-search options (location,
   file type/extension, a date field with a From–To range, and a size
-  comparison — File Station's own search form), the match refinement, the Big
-  Files ≥ N MB/GB filter and column sorting are all applied by the daemon
-  across the whole result
+  comparison — File Station's own search form), the match refinement and
+  column sorting are all applied by the daemon across the whole result
   set — the grid only ever holds one page — and the toolbar summary always
   describes the full set. The raw localhost API reads results the same way
-  (`POST /api/results` with `{tool, offset, limit, q, match, minSize, sort,
-  dir, refDirs}`, plus the search-options fields `{loc, ftype, extq, dateBy,
-  dateFrom, dateTo, sizeOp, sizeMB}`) or as the legacy full dump
-  (`GET /api/results?tool=…`).
+  (`POST /api/results` with `{tool, offset, limit, q, match, sort, dir}`,
+  plus the search-options fields `{loc, ftype, extq, dateBy, dateFrom,
+  dateTo, sizeOp, sizeMB}`) or as the legacy full dump
+  (`GET /api/results?tool=…`). Reference-folder protection is not a request
+  parameter: each duplicates row carries a `prot` flag the daemon decides on
+  canonical paths from the folders the stored results were scanned with —
+  the same comparison the move refuses with — so the padlocks, the
+  reclaimable totals and the refusals can never describe different sets. A
+  reference folder given through a symlink alias therefore protects exactly
+  what the move protects. Changing the reference folders in the Scope dialog
+  takes effect at the next scan.
 - Stored results are capped, and every cap says how much more it found
   instead of truncating silently — narrowing the scan scope surfaces the
-  rest. Duplicates keep the groups with the most reclaimable space, up to
+  rest. The per-scan list of unreadable locations is capped the same way:
+  fifty entries, then one line saying how many more there were. Duplicates keep the groups with the most reclaimable space, up to
   100 000 files — and no single group exceeds that budget either, so a
   million copies of one file cannot slip through the cap whole; empty/temp
   scans and the empty-folder scan cap at 20 000 rows.
@@ -343,9 +361,13 @@ runtime via `Ext.util.CSS.createStyleSheet` in `DuplicateFinder.js`.
   symlink-aliased scope folders are de-overlapped by canonical path before
   walking, so the same file is never scanned twice under two names.
 - **Results survive a daemon restart.** Finished scans (with the reference
-  folders and keep-one survivor protections) are saved — atomically,
-  private to the package user — into the var directory and restored when
-  the package starts. A scan that a restart or reboot killed is reported
+  folders and keep-one survivor protections) are saved — atomically: written
+  to a temporary file, synced to disk and only then renamed into place, so a
+  power cut can never leave a truncated file under the final name — private
+  to the package user, into the var directory, and restored when the package
+  starts. The results reach the disk before the in-flight marker is
+  cleared, so a crash during that final save is still reported as an
+  interruption rather than vanishing. A scan that a restart or reboot killed is reported
   when the app opens, and — for the duplicates scan, the only one that
   reads file contents and so the only one with progress worth continuing —
   the next Scan click asks what you want: **Resume** or **Start Over**.
@@ -366,9 +388,9 @@ runtime via `Ext.util.CSS.createStyleSheet` in `DuplicateFinder.js`.
   an unchanged-looking file could hide. What IS kept across scans is a
   hash **history** — each scan's full-content hashes, compared against on
   the next scan to catch content that moved while size and mtime stood
-  still. The history is capped at 500 000 entries in memory as well as on
-  disk, oldest scan generations first, so a scan of millions of files
-  cannot grow it without bound. The daemon's log rotates at 2 MB, one
+  still. The history is capped at 500 000 entries on disk and trimmed back
+  to that in memory whenever it grows past 625 000, oldest scan generations
+  first, so a scan of millions of files cannot grow it without bound. The daemon's log rotates at 2 MB, one
   generation kept.
 - The app is admin-only (`allUsers: false` + an administrators check in
   `api.cgi`), because the package user's permissions are shared by everyone

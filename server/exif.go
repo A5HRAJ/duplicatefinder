@@ -180,5 +180,5 @@ func parseTiffDate(t []byte) string {
 	if err != nil {
 		return ""
 	}
-	return ts.Format("2006-01-02 15:04:05")
+	return captureDate(ts)
 }

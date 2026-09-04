@@ -18,9 +18,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 	   whole GROUPS — the keep-one-per-group selection rules need every
 	   displayed group complete, and the daemon never splits one across
 	   pages; the flat tools page in rows, like File Station. Search, match
-	   refinement, the big-files threshold and column sorting are all applied
-	   by the daemon, because filtering or sorting one page locally would
-	   silently act on a fraction of the results.
+	   refinement and column sorting are all applied by the daemon, because
+	   filtering or sorting one page locally would silently act on a
+	   fraction of the results.
 
 	   File Station uses 1000 rows per page; the flat tools match that. The
 	   grouped duplicates grid renders a header plus two-to-many rows per
@@ -81,9 +81,33 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		return (n / 1000000).toFixed(n < 10000000 ? 2 : 1) + 'M';
 	}
 	// Dates render exactly as the backend sends them (YYYY-MM-DD HH:MM:SS) —
-	// the same format File Station uses.
+	// the same format File Station uses. Escaped anyway: every renderer here
+	// lands in innerHTML, and this one was the only one trusting the daemon.
 	function fmtDate(s) {
-		return s || '—';
+		return s ? esc(s) : '—';
+	}
+	// Cleans an absolute path the way the daemon's filepath.Clean does —
+	// collapsed slashes, no "." or trailing "/" — so a comparison against a
+	// list the daemon normalized (the interruption marker) is exact.
+	function cleanPath(p) {
+		var parts = String(p || '').split('/'), out = [], i;
+		for (i = 0; i < parts.length; i++) {
+			if (parts[i] === '' || parts[i] === '.') continue;
+			if (parts[i] === '..') { out.pop(); continue; }
+			out.push(parts[i]);
+		}
+		return '/' + out.join('/');
+	}
+	/* Text destined for an ext:qtip attribute. Ext QuickTips reads the
+	   attribute back — by then the browser has entity-decoded it — and
+	   renders that value as HTML (QuickTip.showAt → body.update). One
+	   htmlEncode therefore protects only the attribute, not the tooltip: a
+	   ZIP member name of "<img onerror=…>" inside a file on the NAS came
+	   through the daemon's evidence text and ran in the tooltip. Encoding
+	   twice makes the decoded value HTML-safe text, so the tooltip shows the
+	   literal characters. */
+	function qtipText(s) {
+		return esc(esc(s));
 	}
 	function pad6(n) {
 		var s = String(n);
@@ -506,35 +530,58 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			DfPagingProxy.superclass.constructor.call(this, { api: api });
 		},
 		doRequest: function (action, rs, params, reader, callback, scope, arg) {
-			var win = this.win, tool = win.state.tool;
+			var proxy = this, win = this.win, tool = win.state.tool;
 			var body = Ext.apply({
 				tool: tool,
 				offset: params.offset || 0,
 				limit: params.limit || win.pageSize(tool)
 			}, win.fetchParams(tool));
+			// Nothing aborts an outstanding request, and Ext does not sequence
+			// them, so a slow earlier page (a search for "a" over a huge set)
+			// could land AFTER the fast later one ("ab") and overwrite the
+			// store, the group ids and the totals with the stale set. Every
+			// request takes a number; a reply that is not the newest is
+			// dropped.
+			var seq = win._pageSeq = (win._pageSeq || 0) + 1;
+			// A failed load must still end the load: Ext's LoadMask hides on
+			// the store's load OR exception event, and Store.loadRecords with
+			// success=false fires neither — so a failed page fetch used to
+			// leave "Loading…" over the grid and its pager for good. Firing
+			// the proxy's exception (the store relays it) is what a stock
+			// proxy does on failure, and what unmasks.
+			var fail = function () {
+				proxy.fireEvent('exception', proxy, 'response', action, arg, null, null);
+				callback.call(scope, null, arg, false);
+			};
+			// A reply that is simply no longer wanted (an older request, or a
+			// tool no longer on screen) is dropped WITHOUT the exception: the
+			// newer load that made it stale ends the mask itself.
+			var drop = function () { callback.call(scope, null, arg, false); };
 			api('/results', 'POST', body, function (err, j) {
+				if (seq !== win._pageSeq) {
+					drop();
+					return;
+				}
 				if (err || !j || !j.scanned) {
 					if (err) win.notify(err);
-					callback.call(scope, null, arg, false);
+					fail();
 					return;
 				}
 				// The rail is not masked during a load (loadMask covers the
 				// grid only), so a tool can be switched while a page is in
-				// flight — and nothing aborts the outstanding request. Two
-				// responses then race into the one shared store, last write
-				// wins, and the loser's rows render under the winner's
-				// header, summary and pager. Drop a page whose tool is no
-				// longer the one on screen; success=false leaves the existing
-				// records untouched and fires no load event.
+				// flight. Two responses then race into the one shared store,
+				// last write wins, and the loser's rows render under the
+				// winner's header, summary and pager. Drop a page whose tool
+				// is no longer the one on screen.
 				if (win.state.tool !== tool) {
-					callback.call(scope, null, arg, false);
+					drop();
 					return;
 				}
 				var page;
 				try {
 					page = win.pageToRows(tool, j);
 				} catch (e) {
-					callback.call(scope, null, arg, false);
+					fail();
 					return;
 				}
 				callback.call(scope, reader.readRecords(page), arg, true);
@@ -774,7 +821,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				items: [this.westPanel, this.centerPanel],
 				listeners: {
 					scope: this,
-					beforedestroy: this.stopPolling,
+					beforedestroy: this.onBeforeDestroy,
 					// the summary's width budget is whatever the toolbar has
 					// left, which changes with the window
 					resize: this.syncSummaryWidth
@@ -806,12 +853,21 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		},
 
 		/* ------------------------------------------------------ helpers */
-		isProtected: function (fullPath) {
-			var refs = this.state.refDirs, i;
-			for (i = 0; i < refs.length; i++) {
-				if (fullPath === refs[i] || fullPath.indexOf(refs[i] + '/') === 0) return true;
+		// Everything this window rendered outside itself. The search menu,
+		// its form and the two date-picker menus render to document.body and
+		// would outlive the window otherwise — one leaked set per open on a
+		// desktop page that lives for days, with handlers still bound to a
+		// destroyed window.
+		onBeforeDestroy: function () {
+			this.stopPolling();
+			if (this.searchMenu) {
+				try { this.searchMenu.destroy(); } catch (e) { /* already gone */ }
+				this.searchMenu = null;
 			}
-			return false;
+			Ext.each(this._dateMenus || [], function (dm) {
+				try { dm.destroy(); } catch (e) { /* already gone */ }
+			});
+			this._dateMenus = null;
 		},
 		fullPath: function (rec) {
 			return (rec.get ? rec.get('path') : rec.path) + '/' + (rec.get ? rec.get('name') : rec.name);
@@ -988,8 +1044,6 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				})
 			});
 			this.summaryText = new Ext.Toolbar.TextItem('');
-			// Search filters the visible result rows by file name or location
-			// (client-side, like File Station's filter box).
 			/* DSM's own search box (a TriggerField with the magnifier). Note
 			   emptyText is deliberately NOT set: SearchField's constructor
 			   installs the LOCALIZED "Search" placeholder, and passing our own
@@ -1233,7 +1287,6 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					// Status column.
 					var v = rec.get('verdict');
 					if (v === 'corrupt') return cls ? cls + ' df-row-corrupt' : 'df-row-corrupt';
-					if (v === 'intact') return cls ? cls + ' df-row-intact' : 'df-row-intact';
 					return cls;
 				},
 				showGroupName: false,
@@ -1286,12 +1339,12 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				{ header: 'Status', dataIndex: 'verdict', width: 110, fixed: true, sortable: false, hidden: true, renderer: function (v, m, r) {
 						if (!v) return '';
 						var ev = r.get('evidence');
-						if (ev) m.attr = 'ext:qtip="' + esc(ev) + '"';
+						if (ev) m.attr = 'ext:qtip="' + qtipText(ev) + '"';
 						return '<span class="df-verdict df-verdict-' + esc(v) + '">' + esc(VERDICT_TEXT[v] || v) + '</span>';
 					} },
 					{ header: 'Evidence', dataIndex: 'evidence', width: 300, sortable: false, hidden: true, renderer: function (v) {
 						if (!v) return '<span class="df-dim">no evidence either way</span>';
-						return '<span ext:qtip="' + esc(v) + '">' + esc(v) + '</span>';
+						return '<span ext:qtip="' + qtipText(v) + '">' + esc(v) + '</span>';
 					} },
 					{ header: 'Location', dataIndex: 'path', width: 260, sortable: true, renderer: function (v) {
 						return '<span class="df-loc" ext:qtip="Open in File Station">' + esc(v) + '</span>';
@@ -1454,6 +1507,10 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 						me.refreshView();
 						return;
 					}
+					// The daemon's list is the one the STORED results were scanned
+					// with: it decides the padlocks and the move's refusals. The
+					// Scope dialog edits a separate list for the NEXT scan.
+					me.state.scanRefDirs = st.refDirs || [];
 					if (st.refDirs && st.refDirs.length && !me.state.refDirs.length) {
 						me.state.refDirs = st.refDirs;
 					}
@@ -1573,14 +1630,15 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		},
 
 		// The display parameters a fetched page depends on. The daemon applies
-		// search, match refinement, the size threshold and sorting so that
-		// totals and row order stay correct across the whole result set, not
-		// just the page on screen.
+		// search, match refinement and sorting so that totals and row order
+		// stay correct across the whole result set, not just the page on
+		// screen. Reference folders are NOT sent: protection (padlocks and
+		// the reclaimable totals) is decided by the daemon from the folders
+		// the stored results were scanned with, so it cannot disagree with
+		// the refusals the move issues.
 		fetchParams: function (tool) {
 			var p = {
-				q: String(this.state.query || '').replace(/^\s+|\s+$/g, ''),
-				// reclaimable totals count protected reference copies as kept
-				refDirs: this.state.refDirs.slice()
+				q: String(this.state.query || '').replace(/^\s+|\s+$/g, '')
 			};
 			// magnifier-menu options ride along with q; the daemon ANDs them
 			// and keeps duplicate groups whole (any-member-match, like q)
@@ -1677,12 +1735,11 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		/* --------------------------------------------------- row building */
 		// Turns one page of the daemon's JSON into grid rows (called by the
 		// store's proxy). Duplicate groups become a run of rows sharing a
-		// group key so the grouped view draws one header per group; flat
-		// tools map straight across. The page's whole-set metadata is kept
-		// for the summary, the badges and the truncation notice. The returned
-		// total is in the pager's unit: groups for duplicates, rows otherwise.
-		pageToRows: function (tool, j) {
-			var me = this, rows = [], ord = 0, grpIds = {};
+		// The one place a fetched page's whole-set metadata is recorded.
+		// pageToRows and fetchMeta used to each carry this literal, and a
+		// field added to one (dateRange was) silently went missing from the
+		// other path. scanned is written here and only here.
+		noteResultMeta: function (tool, j) {
 			var total = j.total || {};
 			this.state.results[tool] = {
 				errors: j.errors || [], scanMatch: j.match || null,
@@ -1691,20 +1748,48 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				dateRange: j.dateRange || null
 			};
 			this.state.scanned[tool] = true;
-			if (tool === 'corrupted_files') {
+		},
+
+		// Group headers. Every value interpolated is escaped: the label is
+		// raw HTML handed to groupTextTpl, and a filename reaches it through
+		// g.ext. g.count is set when the page trimmed the group's rows: the
+		// header must describe the WHOLE group, and say so, rather than the
+		// handful of rows that fit on the page.
+		corruptedGroupLabel: function (g, shown, whole) {
+			return fmtNum(whole) + ' files claim to be the same file &nbsp;·&nbsp; ' +
+				fmtBytes(g.size) + ' each &nbsp;·&nbsp; ' + esc(g.mod || '') +
+				' &nbsp;—&nbsp; <span class="df-group-waste">' + fmtNum(g.variants || 2) +
+				' different contents</span>' +
+				(g.sameName ? '' : ' &nbsp;·&nbsp; <span class="df-group-more">different names</span>') +
+				(whole > shown ? ' &nbsp;·&nbsp; <span class="df-group-more">showing the first ' +
+					fmtNum(shown) + '</span>' : '');
+		},
+		dupGroupLabel: function (g, shown, whole) {
+			// g.prot is the daemon's protected count over the WHOLE group. On
+			// a trimmed group the rows on the page are a subset, so counting
+			// from them and pairing it with `whole` overstated the reclaimable
+			// figure — five protected copies off the page read as one kept.
+			var keep = Math.max(g.prot || 0, 1);
+			var recl = g.size * Math.max(0, whole - keep);
+			return fmtNum(whole) + ' identical files &nbsp;·&nbsp; ' + fmtBytes(g.size) + ' each &nbsp;·&nbsp; ' + esc(g.ext) +
+				' &nbsp;—&nbsp; <span class="df-group-waste">' + fmtBytes(recl) + ' reclaimable</span>' +
+				(whole > shown ? ' &nbsp;·&nbsp; <span class="df-group-more">showing the first ' +
+					fmtNum(shown) + '</span>' : '');
+		},
+
+		// group key so the grouped view draws one header per group; flat
+		// tools map straight across. The page's whole-set metadata is kept
+		// for the summary, the badges and the truncation notice. The returned
+		// total is in the pager's unit: groups for duplicates, rows otherwise.
+		pageToRows: function (tool, j) {
+			var me = this, rows = [], ord = 0, grpIds = {};
+			var total = j.total || {};
+			this.noteResultMeta(tool, j);
+			if (isGrouped(tool)) {
 				Ext.each(j.groups || [], function (g, gi) {
 					var shown = g.files.length;
 					var whole = g.count || shown;
-					// Every value interpolated here is escaped: the label is
-					// raw HTML handed to groupTextTpl, and a filename reaches
-					// it through g.ext.
-					var label = fmtNum(whole) + ' files claim to be the same file &nbsp;·&nbsp; ' +
-						fmtBytes(g.size) + ' each &nbsp;·&nbsp; ' + esc(g.mod || '') +
-						' &nbsp;—&nbsp; <span class="df-group-waste">' + fmtNum(g.variants || 2) +
-						' different contents</span>' +
-						(g.sameName ? '' : ' &nbsp;·&nbsp; <span class="df-group-more">different names</span>') +
-						(whole > shown ? ' &nbsp;·&nbsp; <span class="df-group-more">showing the first ' +
-							fmtNum(shown) + '</span>' : '');
+					var label = tool === 'corrupted_files' ? me.corruptedGroupLabel(g, shown, whole) : me.dupGroupLabel(g, shown, whole);
 					// Keyed by TOOL plus the group's ABSOLUTE position in the
 					// result set — never its slot on the page. Ext's GroupingView
 					// keeps per-group collapse state under this value and clears
@@ -1724,54 +1809,14 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					Ext.each(g.files, function (f) {
 						grpIds[gKey].push(f.id);
 						rows.push(Ext.apply({}, f, {
-							// Nothing on this tool is selectable, so no row is
-							// "protected" in the reference-folder sense — the
-							// veto lives in beforerowselect instead.
-							prot: false,
-							gidx: gKey, grpLabel: label, ord: ord++
-						}));
-					});
-				});
-			} else if (tool === 'duplicates') {
-				Ext.each(j.groups || [], function (g, gi) {
-					var prot = 0;
-					Ext.each(g.files, function (f) { if (me.isProtected(f.path + '/' + f.name)) prot++; });
-					// g.count is set when the page trimmed this group's rows: the
-					// header must describe the WHOLE group, and say so, rather
-					// than the handful of rows that fit on the page.
-					var shown = g.files.length;
-					var total = g.count || shown;
-					// g.prot is the protected count over the WHOLE group. On a
-					// trimmed group the rows on the page are a subset, so
-					// counting protection from them and pairing it with the
-					// true `total` overstated the reclaimable figure — five
-					// protected copies off the page read as one kept, not five.
-					var keep = Math.max(g.prot != null ? g.prot : prot, 1);
-					var recl = g.size * Math.max(0, total - keep);
-					var label = fmtNum(total) + ' identical files &nbsp;·&nbsp; ' + fmtBytes(g.size) + ' each &nbsp;·&nbsp; ' + esc(g.ext) +
-						' &nbsp;—&nbsp; <span class="df-group-waste">' + fmtBytes(recl) + ' reclaimable</span>' +
-						(total > shown ? ' &nbsp;·&nbsp; <span class="df-group-more">showing the first ' +
-							fmtNum(shown) + '</span>' : '');
-					// Keyed by TOOL plus the group's ABSOLUTE position in the
-					// result set — never its slot on the page. Ext's GroupingView
-					// keeps per-group collapse state under this value and clears
-					// it on nothing: not a reload, a page turn or a tool switch.
-					// A per-page index therefore made collapsing the 4th group on
-					// page 1 silently collapse whatever was 4th on page 2, and
-					// those hidden rows stay selectable and movable.
-					//
-					// The tool prefix is the half that on-device testing caught:
-					// both grouped tools page from offset 0, so absolute position
-					// ALONE still collided across them, and a collapse on
-					// Duplicates hid an unrelated set of Conflicting Files. The
-					// prefix is constant within a tool, so the group ordering
-					// GroupingStore derives from this string is unaffected.
-					var gKey = tool + ':' + pad6((j.offset || 0) + gi);
-					grpIds[gKey] = [];
-					Ext.each(g.files, function (f) {
-						grpIds[gKey].push(f.id);
-						rows.push(Ext.apply({}, f, {
-							prot: me.isProtected(f.path + '/' + f.name),
+							// prot comes from the daemon, decided on canonical
+							// paths against the reference folders the results
+							// were scanned with — the same comparison the move
+							// refuses with. Conflicting Files rows are never
+							// selectable at all (the veto lives in
+							// beforerowselect), so nothing there is "protected"
+							// in the reference-folder sense.
+							prot: tool === 'duplicates' && !!f.prot,
 							gidx: gKey, grpLabel: label, ord: ord++
 						}));
 					});
@@ -1779,7 +1824,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			} else {
 				Ext.each(j.files || [], function (f) {
 					rows.push(Ext.apply({}, f, {
-						prot: me.isProtected(f.path + '/' + f.name),
+						prot: !!f.prot,
 						gidx: '', grpLabel: '', ord: ord++
 					}));
 				});
@@ -1845,9 +1890,6 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			else this.summaryTextForFlat(t);
 		},
 
-		// Search asks the daemon (name or location substring): the grid holds
-		// one page, so a local filter would silently miss everything off it.
-		// Results narrow to the matches, from page one.
 		/* ------------------------------------------- magnifier search menu */
 		// The dropdown behind the search box's magnifier, mirroring File
 		// Station's advanced search: Keyword, Location, File Type (+custom
@@ -1899,6 +1941,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					ownerField: field,
 					pickerCfg: field.getPickerCfg ? field.getPickerCfg() : {}
 				}, field.menuCfg));
+				me._dateMenus = (me._dateMenus || []).concat([dm]); // destroyed with the window
 				if (field.onDateMenuHide) field.mon(dm, 'hide', field.onDateMenuHide, field);
 				/* THE reason to pre-build carefully: DateField wires its select
 				   relay inside the same lazy branch that CREATES the menu, so
@@ -2268,6 +2311,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			}
 		},
 
+		// Search asks the daemon (name or location substring): the grid holds
+		// one page, so a local filter would silently miss everything off it.
+		// Results narrow to the matches, from page one.
 		applySearch: function () {
 			if (!this.state.scanned[this.state.tool]) return;
 			this.loadPage(0);
@@ -2378,8 +2424,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				if (!me.state.scanned[id]) {
 					badge = '';
 				} else if (me.state.results[id]) {
-					// grand totals: the whole scan under the current match /
-					// threshold refinement, ignoring the search box
+					// grand totals: the whole scan under the current match
+					// refinement, ignoring the search box
 					badge = fmtNum((me.state.results[id].grand || {}).files || 0);
 				}
 				rec.set('badge', badge);
@@ -2447,8 +2493,12 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					}
 				});
 			}
+			// GroupingView.getRows() rebuilds the row array from every group's
+			// childNodes on each call, and getRow(i) calls it — so asking per row
+			// made this pass quadratic in the page size. Ask once.
+			var rowEls = view.getRows ? view.getRows() : null;
 			this.store.each(function (r, i) {
-				var row = view.getRow(i);
+				var row = rowEls ? rowEls[i] : view.getRow(i);
 				if (!row) return;
 				var capped = isDup && !r.get('prot') && !me.sm.isSelected(r) &&
 					unsel[r.get('gidx')] === 1;
@@ -2465,16 +2515,6 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				if (capped) cell.setAttribute('ext:qtip', 'At least one file in each group must stay unselected');
 				else cell.removeAttribute('ext:qtip');
 			});
-		},
-
-		// notify, but collapse identical messages fired in a burst (bulk
-		// selects veto once per group)
-		notifyOnce: function (msg) {
-			var now = new Date().getTime();
-			if (this._lastToast === msg && now - (this._lastToastAt || 0) < 1500) return;
-			this._lastToast = msg;
-			this._lastToastAt = now;
-			this.notify(msg);
 		},
 
 		// Keep-newest / keep-oldest bulk selection (duplicates only — the
@@ -2511,7 +2551,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			this.store.each(function (r) { if (wanted[r.id]) sel.push(r); });
 			this.bulkSelect(sel);
 			if (this.store.getTotalCount() > this.pageUnitCount()) {
-				this.notifyOnce('Applied to the ' + fmtNum(order.length) +
+				this.notify('Applied to the ' + fmtNum(order.length) +
 					' groups on this page — other pages are unchanged');
 			}
 		},
@@ -2700,10 +2740,14 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				],
 				buttons: [new UxButton({ btnStyle: 'blue', text: 'Close', handler: function () {
 					win.close();
-					// reference folders decide both the row locks and the
-					// server-computed reclaimable totals — reload the page
-					if (me.state.scanned[me.state.tool]) me.reloadPage();
-					me.updateBadges();
+					// The padlocks and the reclaimable totals follow the folders
+					// the stored results were SCANNED with (the daemon's list),
+					// not this dialog's: editing here used to unlock rows the
+					// move then refused as read-only. Say when they differ.
+					var norm = function (a) { return (a || []).slice().sort().join('\n'); };
+					if (norm(me.state.refDirs) !== norm(me.state.scanRefDirs || [])) {
+						me.notify('Reference folder changes take effect at the next scan.');
+					}
 				} })]
 			});
 			win.show();
@@ -2730,6 +2774,17 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// their resume. Any started scan clears the notice on the daemon,
 			// so the offer cannot outlive what it describes.
 			var inter = this._interrupted;
+			// Any admitted scan clears the daemon's notice — and the marker,
+			// and with it the dead run's generation for good. The toast at
+			// startup promised the next Scan would offer to resume it, so a
+			// Scan on some OTHER tool must ask before it makes that promise
+			// false; "resume" is never something the app decides silently, and
+			// neither is "discard".
+			if (inter && inter.tool === 'duplicates' &&
+					scanToolFor(this.state.tool) !== 'duplicates') {
+				this.confirmDiscardResume();
+				return;
+			}
 			if (inter && inter.tool === 'duplicates' &&
 					scanToolFor(this.state.tool) === 'duplicates') {
 				// Revalidate before promising anything: another session may
@@ -2762,8 +2817,14 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		// the safe direction, same as the daemon's.
 		resumeMatchesSettings: function () {
 			var m = this._interrupted || {};
+			// Cleaned like the daemon cleans the marker (filepath.Clean), then
+			// deduplicated and sorted — a trailing slash in a stored preference
+			// used to make this say "changed" for a request the daemon would
+			// have resumed.
 			var norm = function (a) {
-				a = (a || []).slice().sort();
+				a = (a || []).slice();
+				for (var j = 0; j < a.length; j++) a[j] = cleanPath(a[j]);
+				a.sort();
 				var out = [];
 				for (var i = 0; i < a.length; i++) {
 					if (!i || a[i] !== out[out.length - 1]) out.push(a[i]);
@@ -2777,6 +2838,36 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				!!mm.name === !!this.state.match.name &&
 				!!mm.modified === !!this.state.match.modified &&
 				!!mm.created === !!this.state.match.created;
+		},
+
+		// Asked when a Scan on another tool would discard the interrupted
+		// duplicates run. Shares _resumeWin so a second Scan click while it is
+		// open returns instead of starting the scan behind the question.
+		confirmDiscardResume: function () {
+			var me = this;
+			if (liveWin(this._resumeWin)) return;
+			var win = new UxModal({
+				owner: me,
+				title: 'Discard the interrupted scan?',
+				width: 430,
+				autoHeight: true,
+				modal: false,
+				cls: 'df-app',
+				bodyStyle: 'padding:14px;font-size:' + FSMALL + ';',
+				items: [{ xtype: 'panel', border: false,
+					html: 'The last duplicate files scan was interrupted by a restart and can still be resumed.<br/><br/>' +
+						'Scanning ' + esc(TOOL_NAME[scanToolFor(this.state.tool)] || '') + ' now discards that progress: ' +
+						'the next Duplicate Files scan will re-read everything.' }],
+				buttons: [
+					new UxButton({ btnStyle: 'blue', text: 'Scan Anyway', handler: function () {
+						win.close();
+						me.doScan(false);
+					} }),
+					new UxButton({ text: 'Cancel', handler: function () { win.close(); } })
+				]
+			});
+			me._resumeWin = win;
+			win.show();
 		},
 
 		// The Resume / Start Over choice for an interrupted duplicates scan.
@@ -2883,10 +2974,16 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				bodyStyle: 'padding:16px;',
 				items: [this.progressLabel, this.progressBar],
 				buttons: [new UxButton({ text: 'Stop', handler: function () {
-					api('/cancel', 'POST', {}, function () { /* poll notices */ });
+					api('/cancel', 'POST', {}, function (err) {
+						// the poll notices a successful stop; a failed one has
+						// to be said, or the button looks dead
+						if (err) me.notify('Could not stop the scan: ' + err);
+					});
 				} })]
 			});
 			this.progressWin.show();
+			this._pollBusy = false;
+			this._pollErrors = 0;
 			this.pollTask = {
 				run: this.pollStatus,
 				scope: this,
@@ -2920,10 +3017,31 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// the mask when another dialog is still open.
 		},
 
+		// Consecutive failed polls before the dialog is torn down: about half
+		// a minute at the 400 ms cadence — long enough to ride out a package
+		// restart, short enough that a daemon that is not coming back does
+		// not leave the app masked behind an undismissable dialog for ever.
+		pollGiveUp: 60,
+
 		pollStatus: function () {
 			var me = this;
+			// One /state in flight at a time: each call is a full CGI spawn on
+			// the NAS, and on a slow model a reply slower than the interval
+			// stacked them without bound — and at scan end every outstanding
+			// callback then ran the completion refresh again.
+			if (this._pollBusy) return;
+			this._pollBusy = true;
 			api('/state', 'GET', null, function (err, st) {
-				if (err) return; // transient
+				me._pollBusy = false;
+				if (err) {
+					me._pollErrors = (me._pollErrors || 0) + 1;
+					if (me._pollErrors >= me.pollGiveUp) {
+						me.stopPolling();
+						me.notify('Lost contact with the Duplicate Finder service — the scan may still be running on the NAS. Reopen the app to check.');
+					}
+					return; // transient until proven otherwise
+				}
+				me._pollErrors = 0;
 				// The daemon died mid-scan and came back: a poll then sees
 				// running:false WITH the interruption notice (a healthy scan
 				// always has the notice nil — any admission clears it). The
@@ -2952,6 +3070,17 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					}
 					return;
 				}
+				// A run that ENDED without completing — Stop, or a failure the
+				// daemon reported — is no completion: replaying the previous
+				// finished scan's announcements here (its unreadable-locations
+				// toast, a jump back to page 1) was exactly wrong.
+				if (st.lastEnd && st.lastEnd.completed === false) {
+					me.stopPolling();
+					me.notify('Scan stopped.');
+					return;
+				}
+				// The reference folders the new results were scanned with.
+				me.state.scanRefDirs = st.refDirs || [];
 				// lastTool is the scan that actually finished — the running
 				// job is already cleared here, and the user may have switched
 				// tools mid-scan, so the current selection can be wrong
@@ -2990,16 +3119,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			var me = this;
 			var body = Ext.apply({ tool: tool, offset: 0, limit: 1 }, this.fetchParams(tool));
 			api('/results', 'POST', body, function (err, j) {
-				if (!err && j && j.scanned) {
-					var total = j.total || {};
-					me.state.results[tool] = {
-						errors: j.errors || [], scanMatch: j.match || null,
-						total: total, grand: j.grand || total,
-						truncated: j.truncated || null,
-						dateRange: j.dateRange || null
-					};
-					me.state.scanned[tool] = true;
-				}
+				if (!err && j && j.scanned) me.noteResultMeta(tool, j);
 				if (done) done();
 			}, { timeout: PAGE_TIMEOUT });
 		},
@@ -3237,37 +3357,55 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// /api/scan directly. The daemon refuses both directions now
 			// (scanAdmissionLocked / beginMove); do not reintroduce a client
 			// assumption about it.
-			me._movePoll = setInterval(function () {
-				api('/state', 'GET', null, function (err, st) {
-					if (err || !st || !st.move || !st.move.total) return;
-					busy.setProgress(st.move.done, st.move.total,
-						st.move.done + ' of ' + st.move.total +
-							(st.move.name ? ' — ' + st.move.name : ''));
-				});
-			}, 700);
+			me._moveOrphaned = false;
 			var stopPoll = function () {
 				if (me._movePoll) { clearInterval(me._movePoll); me._movePoll = null; }
 			};
+			me._movePoll = setInterval(function () {
+				api('/state', 'GET', null, function (err, st) {
+					if (err || !st) return;
+					if (st.move && st.move.total) {
+						busy.setProgress(st.move.done, st.move.total,
+							st.move.done + ' of ' + st.move.total +
+								(st.move.name ? ' — ' + st.move.name : ''));
+						return;
+					}
+					// The request's own answer was lost (see the transport
+					// branch below) and the daemon has now finished: this is
+					// where the move ends for the user.
+					if (me._moveOrphaned) {
+						me._moveOrphaned = false;
+						me._moveInFlight = false;
+						stopPoll();
+						busy.close();
+						me.sm.clearSelections();
+						me.reloadPage();
+						me.notify('The move finished on the NAS and the results were refreshed. Any per-file issue is in the daemon log (dupfinder.log).');
+					}
+				});
+			}, 700);
 			me._moveInFlight = true;
 			// verify defaults ON when the caller does not say otherwise — the
 			// dialog always says, so this covers programmatic callers, and the
 			// default lands on the safe side.
 			api('/move', 'POST', { files: paths, dest: dest, preserve: preserve, tool: tool, verify: verify !== false }, function (err, j, meta) {
+				if (err && meta && meta.transport) {
+					// The connection died — DSM's web server gave up on the
+					// request long before the 12-hour timeout here — while the
+					// daemon keeps moving, holding its move lock. The outcome is
+					// unknown and claiming failure would be wrong; so would
+					// dropping the dialog and losing sight of a move that is
+					// still running. Keep polling /state until the daemon
+					// reports no move, then refresh (the poller above).
+					me._moveOrphaned = true;
+					me.notify('The connection was interrupted while moving — the NAS is still working on it; waiting for it to finish.');
+					return;
+				}
 				me._moveInFlight = false;
 				stopPoll();
 				busy.close();
 				if (err) {
-					if (meta && meta.transport) {
-						// The connection died with the move possibly still
-						// running server-side: the outcome is unknown, and
-						// claiming failure would be wrong. Refresh what we can
-						// and say exactly that.
-						me.sm.clearSelections();
-						me.reloadPage();
-						me.notify('The connection was interrupted while moving — the NAS may still be finishing in the background. Rescan to see the final state.');
-					} else {
-						me.notify(err);
-					}
+					me.notify(err);
 					return;
 				}
 				me.sm.clearSelections();

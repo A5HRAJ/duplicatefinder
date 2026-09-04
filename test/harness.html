@@ -15,8 +15,14 @@ Ext.namespace('SYNO.SDS', 'SYNO.ux', 'SYNO.SDS.Utils.FileChooser');
 SYNO.ux.Toolbar = Ext.Toolbar;
 // DSM's pager is an Ext.PagingToolbar subclass that swaps the page-number
 // field for numbered buttons and ±5-page jumps; the plain Ext one shares its
-// API and store contract, which is what the app drives.
-SYNO.ux.PagingToolbar = Ext.PagingToolbar;
+// API and store contract, which is what the app drives. The two DSM-only
+// members the app conditionally overrides are stubbed too — without them the
+// app's own guard skipped its override here, so that code ran only on the
+// NAS and no test could catch a regression in it.
+SYNO.ux.PagingToolbar = Ext.extend(Ext.PagingToolbar, {
+	setButtonsVisible: function (visible) { this.navButtonsVisible = !!visible; },
+	getTotalPage: function () { return this.getPageData().pages; }
+});
 SYNO.ux.GridPanel = Ext.grid.GridPanel;
 SYNO.ux.Menu = Ext.menu.Menu;
 // Real DSM tags every button with `syno-ux-button` plus a variant class taken

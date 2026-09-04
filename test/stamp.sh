@@ -65,7 +65,11 @@ check "the config followed the rename" \
 # --- the stamp must track CONTENT, so a forgotten version bump still busts ---
 cp spk/ui/DuplicateFinder.js "$WORK/orig.js"
 restore() { cp "$WORK/orig.js" spk/ui/DuplicateFinder.js; rm -rf "$WORK"; }
-trap restore EXIT
+# INT/TERM too: the source file is mutated below, and an interrupted run
+# must not leave the trailer in the shipped script (a SIGKILL still would —
+# the next build then stamps a file that differs from the source by one
+# comment; check `git status` after any hard kill).
+trap restore EXIT INT TERM
 printf '\n/* stamp test */\n' >> spk/ui/DuplicateFinder.js
 NAME_C=$(./build.sh --stage-ui "$WORK/c")
 check "same version but changed content yields a different filename" \

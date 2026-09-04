@@ -23,8 +23,10 @@ import (
 	"bufio"
 	"container/heap"
 	"encoding/binary"
+	"errors"
 	"hash/fnv"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -92,8 +94,6 @@ var (
 	// 2^28 slots × 2 bits = 64 MB, flat for any volume size.
 	keyCounterTabBits = uint(28)
 )
-
-func newKeyCounter() *keyCounter { return newKeyCounterShare(0) }
 
 // newKeyCounterShare builds a counter entitled to 1/2^share of the memory
 // budget, for use when several counters are fed from one walk.
@@ -252,6 +252,9 @@ type spillRec struct {
 	rel     string
 }
 
+// spillRelMax bounds one record's relative path; PATH_MAX is 4096.
+const spillRelMax = 1 << 16
+
 // each rewinds the spill and streams every record through fn. It never holds
 // more than one record, so it is safe over any volume size.
 func (s *spill) each(fn func(*spillRec) error) error {
@@ -286,6 +289,14 @@ func (s *spill) each(fn func(*spillRec) error) error {
 		relLen, err := binary.ReadUvarint(r)
 		if err != nil {
 			return err
+		}
+		// The spill is the daemon's own private file, but it lives on the
+		// system partition and a corrupt block must fail the scan, not take
+		// the daemon down: a garbage length would be a multi-gigabyte
+		// allocation, and a garbage root index wraps negative in a 32-bit int
+		// and walks straight past the `>= len(rootOf)` guards into a panic.
+		if relLen > spillRelMax || rootIdx > math.MaxInt32 {
+			return errors.New("scan spill file is corrupt")
 		}
 		relB := make([]byte, relLen)
 		if _, err := io.ReadFull(r, relB); err != nil {

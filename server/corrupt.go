@@ -594,6 +594,7 @@ func (t *corruptTop) final(s *Server, budget int, cancel chan struct{}) ([]Group
 		dropF += c.extra
 	}
 	out := make([]Group, 0, cut)
+	var captures []captureSlot
 	for i := range sets[:cut] {
 		c := &sets[i]
 		if len(c.files) > budget {
@@ -606,16 +607,17 @@ func (t *corruptTop) final(s *Server, budget int, cancel chan struct{}) ([]Group
 			Size: c.size, Mod: fmtTime(c.mod), Variants: c.variants,
 			SameName: c.sameName,
 		}
-		for _, m := range c.files {
+		for fi, m := range c.files {
 			fe := s.fileEnt(m.f)
 			fe.Hash = m.hash
 			fe.Verdict = m.verdict
 			fe.Evidence = m.evidence
-			fe.Captured = exifCaptured(m.f.openContent, m.f.name)
 			grp.Files = append(grp.Files, fe)
+			captures = append(captures, captureSlot{gi: len(out), fi: fi, f: m.f})
 		}
 		out = append(out, grp)
 	}
+	s.fillCaptured(out, captures, cancel)
 	if dropS == 0 && dropF == 0 {
 		return out, nil
 	}
@@ -675,7 +677,7 @@ func judgeSet(c *corruptSet, cancel chan struct{}) {
 		if m.readErr != nil {
 			continue
 		}
-		st, why := verifyContent(m.f.openContent, m.f.name, m.f.size)
+		st, why := verifyContent(m.f.openContent, m.f.size)
 		checked[i], proof[i] = st, why
 		if st == damaged && m.verdict == "" {
 			m.verdict, m.evidence = verdictCorrupt, why
@@ -826,7 +828,7 @@ func representatives(c *corruptSet) (int, int) {
 }
 
 func isCancelErr(err error) bool {
-	return err != nil && err.Error() == "cancelled"
+	return errors.Is(err, errCancelled)
 }
 
 // cleanReadErr renders a read failure without leaking the on-disk path (the

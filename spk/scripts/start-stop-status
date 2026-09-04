@@ -6,7 +6,12 @@ PKG_DEST="${SYNOPKG_PKGDEST:-/var/packages/$PKG/target}"
 PKG_VAR="${SYNOPKG_PKGVAR:-/var/packages/$PKG/var}"
 PID_FILE="$PKG_VAR/dupfinder.pid"
 LOG_FILE="$PKG_VAR/dupfinder.log"
-PORT="${DUPFINDER_PORT:-9807}"
+READY_FILE="$PKG_VAR/dupfinder.ready"
+# The one port the daemon, this script and the CGI shim agree on. There is
+# deliberately no environment override: the shim is exec'd by DSM's web
+# server and could never see one, so an override only ever produced a daemon
+# nobody could reach.
+PORT=9807
 
 # fail writes the reason where Package Center surfaces it (SYNOPKG_TEMP_LOGFILE)
 # in addition to stderr, then exits with the given code.
@@ -26,8 +31,11 @@ pid_running() {
 	[ -n "$PID" ] || return 1
 	kill -0 "$PID" 2>/dev/null || return 1
 	[ -r "/proc/$PID/cmdline" ] || return 1
+	# The DAEMON specifically: every UI request is a short-lived
+	# `dupfinder -mode cgi` child running as the same package user, and a
+	# reused PID landing on one of those must not pass as the daemon.
 	case "$(tr '\0' ' ' < "/proc/$PID/cmdline" 2>/dev/null)" in
-		*dupfinder*) return 0 ;;
+		*dupfinder*-mode\ daemon*) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -42,18 +50,34 @@ case "$1" in
 		DAEMON="$PKG_DEST/bin/dupfinder"
 		[ -x "$DAEMON" ] || fail 1 "Daemon binary missing: $DAEMON"
 		mkdir -p "$PKG_VAR" || fail 1 "Cannot create $PKG_VAR"
+		# The log names files in shares other users may not see: private
+		# like every other var-dir artifact (the daemon opens it 0600 too).
+		touch "$LOG_FILE" && chmod 600 "$LOG_FILE"
+		rm -f "$READY_FILE"
 		"$DAEMON" -mode daemon -port "$PORT" -var "$PKG_VAR" >>"$LOG_FILE" 2>&1 &
 		PID=$!
 		echo "$PID" > "$PID_FILE"
-		# A daemon that dies during startup (port taken, unreadable token
-		# file — runDaemon fails fatally on both) must fail the package
-		# start visibly, not leave Package Center showing success while the
-		# UI gets "service is not running".
-		sleep 1
-		if ! kill -0 "$PID" 2>/dev/null; then
-			rm -f "$PID_FILE"
-			fail 1 "Duplicate Finder daemon exited during startup: $(tail -n 3 "$LOG_FILE" 2>/dev/null | tr '\n' ' ')"
-		fi
+		# The daemon writes the ready file once it is bound and has its
+		# token — everything that can still fail fatally has passed. Wait
+		# for THAT, not a fixed second: a daemon that dies during startup
+		# (port taken, unreadable token file) must fail the package start
+		# visibly, and a fixed sleep let a slow start report success and then
+		# leave Package Center showing a running package while the UI got
+		# "service is not running".
+		i=0
+		while [ ! -f "$READY_FILE" ]; do
+			if ! kill -0 "$PID" 2>/dev/null; then
+				rm -f "$PID_FILE"
+				fail 1 "Duplicate Finder daemon exited during startup: $(tail -n 3 "$LOG_FILE" 2>/dev/null | tr '\n' ' ')"
+			fi
+			i=$((i + 1))
+			if [ "$i" -ge 30 ]; then
+				kill "$PID" 2>/dev/null
+				rm -f "$PID_FILE"
+				fail 1 "Duplicate Finder daemon did not become ready within 30 seconds: $(tail -n 3 "$LOG_FILE" 2>/dev/null | tr '\n' ' ')"
+			fi
+			sleep 1
+		done
 		exit 0
 		;;
 	stop)
@@ -63,9 +87,13 @@ case "$1" in
 				kill -0 "$PID" 2>/dev/null || break
 				sleep 1
 			done
-			kill -9 "$PID" 2>/dev/null
+			# Only if it is still there — never fire KILL at a number the
+			# kernel may already have handed to someone else.
+			if kill -0 "$PID" 2>/dev/null; then
+				kill -9 "$PID" 2>/dev/null
+			fi
 		fi
-		rm -f "$PID_FILE"
+		rm -f "$PID_FILE" "$READY_FILE"
 		exit 0
 		;;
 	status)

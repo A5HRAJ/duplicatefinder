@@ -39,7 +39,6 @@ import (
 	"io"
 	"math/bits"
 	"os"
-	"strings"
 )
 
 // intactness is what one file's own structure says about it. Deliberately
@@ -76,11 +75,11 @@ const maxInflate = 8 << 30
 const minZeroBytes = 512
 
 // verifyContent walks one file's container and reports what its own structure
-// proves. name selects the validator only as a hint; the magic bytes decide,
+// proves. The magic bytes alone select the validator — never the file name,
 // because the whole point here is a file whose contents may not match its
 // name. The returned string is user-facing evidence and is empty unless the
 // verdict is meaningful.
-func verifyContent(open func() (*os.File, error), name string, size int64) (intactness, string) {
+func verifyContent(open func() (*os.File, error), size int64) (intactness, string) {
 	if size <= 0 {
 		return unproven, ""
 	}
@@ -113,8 +112,7 @@ func verifyContent(open func() (*os.File, error), name string, size int64) (inta
 		return verifyISOBMFF(f, size)
 	}
 	// GIF and the TIFF family carry no checksum and no end marker worth
-	// testing; naming them here documents that the silence is deliberate.
-	_ = strings.ToLower(name)
+	// testing, so they deliberately have no arm above.
 	return unproven, ""
 }
 
@@ -223,6 +221,13 @@ func verifyZip(f *os.File, size int64) (intactness, string) {
 	if size > maxVerifyBytes {
 		return unproven, ""
 	}
+	// archive/zip materialises one File per central-directory record before
+	// anything is checked, so a directory-only archive near maxVerifyBytes
+	// would cost gigabytes of heap on the scan goroutine. Read the entry
+	// count out of the end-of-central-directory record first.
+	if n, ok := zipEntryCount(f, size); ok && n > maxZipEntries {
+		return unproven, ""
+	}
 	zr, err := zip.NewReader(f, size)
 	if err != nil {
 		return damaged, "ZIP directory is unreadable — the archive is damaged or truncated"
@@ -266,6 +271,52 @@ func verifyZip(f *os.File, size int64) (intactness, string) {
 		return unproven, ""
 	}
 	return proven, "every ZIP entry matches its own CRC32"
+}
+
+// maxZipEntries bounds the archives verifyZip will open: past it the archive
+// is left unproven rather than decoded into memory.
+const maxZipEntries = 1 << 18
+
+// zipEntryCount reads the total entry count from the end-of-central-directory
+// record (and the ZIP64 record it points at when the 16-bit field is
+// saturated). ok is false when no record is found — that case is left to
+// archive/zip, which reports it as damage.
+func zipEntryCount(f *os.File, size int64) (uint64, bool) {
+	// The EOCD is 22 bytes plus a comment of at most 65535 bytes.
+	tail := int64(22 + 65535)
+	if tail > size {
+		tail = size
+	}
+	if tail < 22 {
+		return 0, false
+	}
+	buf := make([]byte, tail)
+	if _, err := f.ReadAt(buf, size-tail); err != nil && err != io.EOF {
+		return 0, false
+	}
+	sig := []byte{'P', 'K', 0x05, 0x06}
+	i := bytes.LastIndex(buf, sig)
+	if i < 0 || i+22 > len(buf) {
+		return 0, false
+	}
+	n := uint64(binary.LittleEndian.Uint16(buf[i+10 : i+12]))
+	if n != 0xFFFF {
+		return n, true
+	}
+	// ZIP64: the locator sits 20 bytes before the EOCD and names the offset of
+	// the ZIP64 EOCD record, whose total-entries field is at +32.
+	if i < 20 || string(buf[i-20:i-16]) != "PK" {
+		return n, true
+	}
+	off := int64(binary.LittleEndian.Uint64(buf[i-12 : i-4]))
+	if off < 0 || off+40 > size {
+		return n, true
+	}
+	var rec [40]byte
+	if _, err := f.ReadAt(rec[:], off); err != nil || string(rec[0:4]) != "PK" {
+		return n, true
+	}
+	return binary.LittleEndian.Uint64(rec[32:40]), true
 }
 
 // verifyJPEG walks the marker segments to the start of scan, then confirms the
@@ -445,7 +496,7 @@ func compareContent(aOpen, bOpen func() (*os.File, error), size int64, cancel ch
 	var off, lastDiff int64
 	for {
 		if cancelled(cancel) {
-			return nil, fmt.Errorf("cancelled")
+			return nil, errCancelled
 		}
 		an, aerr := io.ReadFull(af, ab)
 		bn, berr := io.ReadFull(bf, bb)
@@ -528,16 +579,27 @@ func (d *diffShape) describe(side int) string {
 }
 
 // fmtBytesGo is the daemon-side counterpart of the UI's fmtBytes, used only in
-// evidence strings.
+// evidence strings. It reproduces that function's rounding exactly — whole
+// bytes, then two decimals below 10, one below 100, none above — because the
+// evidence lands in a grid cell beside a Size column the UI formats, and two
+// renderings of one number on one row read as a discrepancy.
 func fmtBytesGo(n int64) string {
-	const u = 1024
-	if n < u {
-		return fmt.Sprintf("%d bytes", n)
+	if n <= 0 {
+		return "0 B"
 	}
-	div, exp := int64(u), 0
-	for v := n / u; v >= u; v /= u {
-		div *= u
-		exp++
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	v, i := float64(n), 0
+	for v >= 1024 && i < len(units)-1 {
+		v /= 1024
+		i++
 	}
-	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+	switch {
+	case i == 0:
+		return fmt.Sprintf("%d B", n)
+	case v >= 100:
+		return fmt.Sprintf("%.0f %s", v, units[i])
+	case v >= 10:
+		return fmt.Sprintf("%.1f %s", v, units[i])
+	}
+	return fmt.Sprintf("%.2f %s", v, units[i])
 }

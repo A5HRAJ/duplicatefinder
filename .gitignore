@@ -9,6 +9,7 @@ test/package-lock.json
 
 # scratch left behind when run-arm.sh is interrupted before its cleanup trap
 test/.armwork.*
+test/.arm-bin/
 
 # local `go build` output in the source dir
 server/dupfinder

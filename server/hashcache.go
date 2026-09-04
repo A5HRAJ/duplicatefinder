@@ -431,43 +431,29 @@ func (c *hashCache) saveTrim(final bool) error {
 		sort.Slice(all, func(i, j int) bool { return all[i].e.Gen > all[j].e.Gen })
 		all = all[:hashCacheMax]
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(c.path), hashCacheFile+".tmp-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name()) // no-op once renamed
-	w := bufio.NewWriterSize(tmp, 256<<10)
-	w.Write(hashCacheMagic[:])
-	var hdr [8]byte
-	binary.LittleEndian.PutUint32(hdr[:4], c.gen)
-	binary.LittleEndian.PutUint32(hdr[4:], uint32(len(all)))
-	w.Write(hdr[:])
-	for _, it := range all {
-		var rec [8 + 8 + 8 + 16 + 16 + 32 + 4]byte
-		binary.LittleEndian.PutUint64(rec[0:], it.key)
-		binary.LittleEndian.PutUint64(rec[8:], uint64(it.e.Size))
-		binary.LittleEndian.PutUint64(rec[16:], uint64(it.e.Mod))
-		copy(rec[24:40], it.e.Tag[:])
-		copy(rec[40:56], it.e.Pfx[:])
-		copy(rec[56:88], it.e.Hash[:])
-		binary.LittleEndian.PutUint32(rec[88:], it.e.Gen)
-		if _, err := w.Write(rec[:]); err != nil {
-			tmp.Close()
-			return err
+	err := writeAtomic(c.path, 0o600, false, func(tmp *os.File) error {
+		w := bufio.NewWriterSize(tmp, 256<<10)
+		w.Write(hashCacheMagic[:])
+		var hdr [8]byte
+		binary.LittleEndian.PutUint32(hdr[:4], c.gen)
+		binary.LittleEndian.PutUint32(hdr[4:], uint32(len(all)))
+		w.Write(hdr[:])
+		for _, it := range all {
+			var rec [8 + 8 + 8 + 16 + 16 + 32 + 4]byte
+			binary.LittleEndian.PutUint64(rec[0:], it.key)
+			binary.LittleEndian.PutUint64(rec[8:], uint64(it.e.Size))
+			binary.LittleEndian.PutUint64(rec[16:], uint64(it.e.Mod))
+			copy(rec[24:40], it.e.Tag[:])
+			copy(rec[40:56], it.e.Pfx[:])
+			copy(rec[56:88], it.e.Hash[:])
+			binary.LittleEndian.PutUint32(rec[88:], it.e.Gen)
+			if _, err := w.Write(rec[:]); err != nil {
+				return err
+			}
 		}
-	}
-	if err := w.Flush(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), c.path); err != nil {
+		return w.Flush()
+	})
+	if err != nil {
 		return err
 	}
 	c.dirty = false

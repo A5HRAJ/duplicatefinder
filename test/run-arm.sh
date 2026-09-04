@@ -43,6 +43,22 @@ mkdir -p "$BINDIR"
 		go build -tags dev -o "$BINDIR/dupfinder.arm" .
 )
 
+# Cleanup on EVERY exit, not only on a function return: an interrupt during
+# the 60 s daemon wait or the smoke pass used to leave the container (still
+# publishing 127.0.0.1:9807 — the next run.sh then failed to bind), the
+# cross-compiled binaries and the work dirs behind.
+CIDS=""
+cleanup() {
+	for c in $CIDS; do docker rm -f "$c" >/dev/null 2>&1; done
+	for d in "$(pwd)"/.armwork.*; do
+		[ -d "$d" ] || continue
+		chmod -R u+rwx "$d" 2>/dev/null
+		rm -rf "$d"
+	done
+	rm -rf "$BINDIR"
+}
+trap cleanup EXIT INT TERM
+
 FAILED=0
 run_one() {
 	local LABEL="$1" PLATFORM="$2" BIN="$3"
@@ -50,16 +66,17 @@ run_one() {
 	echo "==== $LABEL ($PLATFORM) ===="
 	local WORK CID=""
 	WORK="$(mktemp -d "$(pwd)/.armwork.XXXXXX")"
-	# shellcheck disable=SC2064
-	trap "[ -n \"\$CID\" ] && docker rm -f \"\$CID\" >/dev/null 2>&1; chmod -R u+rwx '$WORK' 2>/dev/null; rm -rf '$WORK'" RETURN
 
 	local V="$WORK/volume1"
 	make_fixture "$V" "$WORK/outside" "$WORK/volumeUSB1"
 	local UIDIR="$WORK/ui"
 	mkdir -p "$UIDIR"
-	cp -R "$ROOT/spk/ui/" "$UIDIR/"
+	cp -R "$ROOT/spk/ui/." "$UIDIR/"   # "dir/." — contents on BSD and GNU alike
 	cp harness.html ext/ext-base.js ext/ext-all.js "$UIDIR/"
 	cp "$BIN" "$WORK/dupfinder-dev"
+	# Persistence on too: the state file, hash store and marker are exactly
+	# the binary-layout code a 32-bit runner exists to exercise.
+	mkdir -p "$WORK/state"
 
 	CID="$(docker run -d --rm --platform "$PLATFORM" \
 		-v "$WORK:$WORK" \
@@ -68,7 +85,9 @@ run_one() {
 		-e DUPFINDER_UI="$UIDIR" \
 		-e DUPFINDER_DSM_URL="http://127.0.0.1:$PORT" \
 		-e DUPFINDER_BIND_HOST="0.0.0.0" \
+		-e DUPFINDER_STATE="$WORK/state" \
 		"$IMAGE" "$WORK/dupfinder-dev" -mode daemon -port "$PORT")"
+	CIDS="$CIDS $CID"
 
 	# QEMU startup can be slow; give the daemon up to 60s to answer.
 	local up=0 i
@@ -86,12 +105,14 @@ run_one() {
 	if ! DUPFINDER_TEST_PORT="$PORT" node smoke.js; then
 		FAILED=1
 	fi
+	docker rm -f "$CID" >/dev/null 2>&1
+	chmod -R u+rwx "$WORK" 2>/dev/null
+	rm -rf "$WORK"
 }
 
 run_one "armv8" "linux/arm64" "$BINDIR/dupfinder.arm64"
 run_one "armv7" "linux/arm/v7" "$BINDIR/dupfinder.arm"
 
-rm -rf "$BINDIR"
 echo ""
 if [ "$FAILED" = 1 ]; then
 	echo "ARM SMOKE: FAILURES"

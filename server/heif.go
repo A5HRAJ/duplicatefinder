@@ -54,6 +54,11 @@ func heifCaptured(open func() (*os.File, error)) string {
 // it. Real ones are kilobytes.
 const heifBoxMax = 8 << 20
 
+// heifMaxExtents bounds the iloc extents walked in one file. Real images have
+// a handful; the bound only stops a hostile file from turning the walk into
+// a CPU sink.
+const heifMaxExtents = 1 << 20
+
 // findBox scans [start,end) for a top-level box of the given type and
 // returns its payload bounds.
 func findBox(f *os.File, start, end int64, typ string) (int64, int64, bool) {
@@ -119,7 +124,11 @@ func heifExifItemID(f *os.File, metaStart, metaEnd int64) (uint32, bool) {
 	for pos+8 <= len(buf) {
 		size := int(binary.BigEndian.Uint32(buf[pos : pos+4]))
 		name := string(buf[pos+4 : pos+8])
-		if size < 8 || pos+size > len(buf) {
+		// Written as a subtraction from len(buf), never `pos+size > len(buf)`:
+		// on the 32-bit armv7 build a size just under 2^31 wraps that sum
+		// negative, passes the check and panics in the slice below (and a
+		// size at or above 2^31 is already negative here, caught by < 8).
+		if size < 8 || size > len(buf)-pos {
 			return 0, false
 		}
 		if name == "infe" && size >= 16 {
@@ -172,6 +181,14 @@ func heifItemLocation(f *os.File, metaStart, metaEnd int64, wantID uint32) (int6
 	if ver == 1 || ver == 2 {
 		idxSize = int(buf[5] & 0x0F)
 	}
+	// An extent whose offset, length and index fields all occupy zero bytes
+	// locates nothing, and reading it advances nothing: a file declaring
+	// millions of such extents would have the loop below spin for hours on
+	// a buffer that heifBoxMax keeps small. Refuse the shape outright, and
+	// bound the total extent work regardless.
+	if offSize+lenSize+idxSize == 0 {
+		return 0, 0, false
+	}
 	pos := 6
 	var count uint32
 	if ver < 2 {
@@ -201,6 +218,7 @@ func heifItemLocation(f *os.File, metaStart, metaEnd int64, wantID uint32) (int6
 		pos += n
 		return v, true
 	}
+	var extentsSeen uint64
 	for i := uint32(0); i < count; i++ {
 		var itemID uint32
 		if ver < 2 {
@@ -236,6 +254,10 @@ func heifItemLocation(f *os.File, metaStart, metaEnd int64, wantID uint32) (int6
 			return 0, 0, false
 		}
 		var firstOff, firstLen uint64
+		extentsSeen += extents
+		if extentsSeen > heifMaxExtents {
+			return 0, 0, false
+		}
 		for e := uint64(0); e < extents; e++ {
 			if _, ok3 := readUint(idxSize); !ok3 {
 				return 0, 0, false

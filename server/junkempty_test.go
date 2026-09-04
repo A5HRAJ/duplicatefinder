@@ -27,9 +27,9 @@ func driveEF(t *testing.T, ents []fEnt, answer func(string) bool) (offered, repo
 	for _, f := range ents {
 		sc.visit(0, f)
 	}
-	files, _ := sc.finish(&Server{}, func(p string) bool {
+	files, _, _ := sc.finish(&Server{}, nil, func(p string) (bool, error) {
 		offered = append(offered, p)
-		return answer(p)
+		return answer(p), nil
 	})
 	for _, f := range files {
 		reported = append(reported, f.Dir+"/"+f.Name)
@@ -185,7 +185,7 @@ func TestPruneMovedDropsRowsUnderAMovedFolder(t *testing.T) {
 			{ID: "e2", Dir: "/v/photo", Name: "other", IsDir: true},
 		}},
 	}}
-	s.pruneMoved([]string{"/v/photo/junkonly"}, []string{"/v/photo/junkonly"})
+	s.pruneMoved([]string{"/v/photo/junkonly"}, []string{"/v/photo/junkonly"}, nil)
 	var tempLeft, efLeft []string
 	for _, f := range s.results["temp_files"].Files {
 		tempLeft = append(tempLeft, f.ID)

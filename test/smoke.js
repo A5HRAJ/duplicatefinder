@@ -800,19 +800,88 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   win.sm.clearSelections();
   check('disabled state clears with selection', doc.querySelectorAll('.df-row-capped').length === 0);
 
-  // reference-folder protection: mark a dir read-only, reload, bulk-select
+  // ---- tooltips are TEXT, whatever the daemon's evidence contains ---------
+  // Ext QuickTips reads the ext:qtip attribute back (entity-decoded by the
+  // browser) and renders it as HTML, so a ZIP member named "<img onerror=…>"
+  // inside a scanned file reached the tooltip as markup. The attribute must
+  // decode to HTML-safe text: no raw "<" survives one decoding.
+  {
+    const hostile = '<img src=x onerror=alert(1)>';
+    const cm = win.grid.getColumnModel();
+    const decodeAttr = (attrText) => {
+      const d = doc.createElement('div');
+      d.innerHTML = '<span ' + attrText + '></span>';
+      return d.firstChild.getAttribute('ext:qtip') || '';
+    };
+    const evR = cm.getRenderer(cm.findColumnIndex('evidence'));
+    const evHtml = evR(hostile, {}, win.store.getAt(0));
+    const evDiv = doc.createElement('div');
+    evDiv.innerHTML = evHtml;
+    const evTip = evDiv.querySelector('span').getAttribute('ext:qtip') || '';
+    check('evidence tooltip decodes to text, never markup', evTip.length > 0 && evTip.indexOf('<') < 0 && /&lt;img/.test(evTip));
+    check('evidence cell text is escaped', !evDiv.querySelector('img'));
+    const meta = {};
+    const vR = cm.getRenderer(cm.findColumnIndex('verdict'));
+    const fakeRec = { get: (k) => (k === 'evidence' ? hostile : 'corrupt') };
+    vR('corrupt', meta, fakeRec);
+    const vTip = decodeAttr(meta.attr || '');
+    check('status tooltip decodes to text, never markup', vTip.indexOf('<') < 0 && /&lt;img/.test(vTip));
+  }
+
+  // ---- a failed page load still ENDS the load ----------------------------
+  // Ext's LoadMask hides on the store's load or exception event; a failure
+  // reported only through the callback fired neither, and "Loading…" stayed
+  // over the grid and the pager for good.
+  {
+    let exceptions = 0;
+    const onExc = () => { exceptions++; };
+    win.store.on('exception', onExc);
+    const toolBefore = win.state.tool;
+    win.state.tool = 'no_such_tool';
+    win.state.scanned.no_such_tool = true;
+    win.loadPage(0);
+    await sleep(600);
+    win.store.un('exception', onExc);
+    delete win.state.scanned.no_such_tool;
+    win.state.tool = toolBefore;
+    check('a failed page load fires the store exception (the mask can hide)', exceptions >= 1);
+    check('the grid is not left masked after a failed load',
+      !win.grid.loadMask || !win.grid.loadMask.el || !win.grid.loadMask.el.isMasked());
+    const seq = win.__loads;
+    win.loadPage(0);
+    await waitForLoadAfter(win, seq, 4);
+  }
+
+  // ---- reference-folder protection --------------------------------------
+  // Decided by the DAEMON from the folders the stored results were scanned
+  // with, on canonical paths — the same comparison the move refuses with.
+  // Editing the Scope list therefore changes nothing until the next scan:
+  // it used to unlock rows on the spot, and the move then refused every one
+  // of them as read-only.
   const someDir = win.store.getAt(0).get('path');
   win.state.refDirs.push(someDir);
   win.reloadPage();
-  for (let i = 0; i < 30; i++) {
+  await sleep(600);
+  {
     let n = 0;
     win.store.each((r) => { if (r.get('prot')) n++; });
-    if (n > 0) break;
-    await sleep(150);
+    check('editing the Scope list alone protects nothing until a rescan', n === 0);
+  }
+  {
+    const seq = win.__loads;
+    win.startScan();
+    for (let i = 0; i < 100; i++) {
+      let n = 0;
+      if (win.__loads > seq) win.store.each((r) => { if (r.get('prot')) n++; });
+      if (n > 0) break;
+      await sleep(200);
+    }
   }
   let protRows = 0;
   win.store.each((r) => { if (r.get('prot')) protRows++; });
-  check('protected rows flagged after marking reference', protRows >= 1);
+  check('protected rows flagged after scanning with a reference folder', protRows >= 1);
+  check('the app records the reference folders the results were scanned with',
+    Array.isArray(win.state.scanRefDirs) && win.state.scanRefDirs.indexOf(someDir) >= 0);
   // Protected (read-only reference) rows carry a padlock where the checkbox
   // would be — they are never candidates for selection, so there is no control
   // to disable, and an inert box would misdescribe that. DSM publishes no
@@ -850,13 +919,22 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   let selProt = 0;
   win.sm.getSelections().forEach((r) => { if (r.get('prot')) selProt++; });
   check('bulk select never selects protected rows', win.sm.getSelections().length >= 1 && selProt === 0);
+  // Back to no reference folders — by rescanning, which is what applies it.
   win.state.refDirs.pop();
-  win.reloadPage();
-  for (let i = 0; i < 30; i++) {
+  {
+    const seq = win.__loads;
+    win.startScan();
+    for (let i = 0; i < 100; i++) {
+      let n = 0;
+      if (win.__loads > seq) win.store.each((r) => { if (r.get('prot')) n++; });
+      if (win.__loads > seq && n === 0 && win.store.getCount() > 0) break;
+      await sleep(200);
+    }
+  }
+  {
     let n = 0;
     win.store.each((r) => { if (r.get('prot')) n++; });
-    if (n === 0 && win.store.getCount() > 0) break;
-    await sleep(150);
+    check('rescanning without the reference folder clears the padlocks', n === 0 && win.store.getCount() > 0);
   }
 
   // location links open File Station at the folder (opendir), using a
@@ -1536,6 +1614,28 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
       !!win._interrupted && win._interrupted.gen === 5);
     check('and is announced as an interruption, not a completion',
       /interrupted by a restart/.test(toastMsg || ''));
+    // A Scan on a DIFFERENT tool clears the daemon's notice — and the dead
+    // run's generation with it — so it must ask first, never discard
+    // silently behind the toast's promise of a resume offer.
+    stateNotice = noticeFor();
+    win._interrupted = noticeFor();
+    scanBody = null;
+    const toolBefore = win.state.tool;
+    win.state.tool = 'empty_folders';
+    win.startScan();
+    await sleep(100);
+    check('a Scan on another tool asks before discarding the interrupted run',
+      scanBody === null && /Discard the interrupted scan\?/.test(doc.body.textContent));
+    clickBtn(/^Cancel$/);
+    await sleep(100);
+    check('Cancel keeps the resumable run and starts nothing',
+      scanBody === null && !!win._interrupted && !/Discard the interrupted scan\?/.test(doc.body.textContent));
+    win.startScan();
+    await sleep(100);
+    clickBtn(/^Scan Anyway$/);
+    await sleep(100);
+    check("Scan Anyway runs the other tool's scan", !!scanBody && scanBody.tool === 'empty_folders');
+    win.state.tool = toolBefore;
     win._interrupted = null;
     window.Ext.Ajax.request = oaScan;
   }

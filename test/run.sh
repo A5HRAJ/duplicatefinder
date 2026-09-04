@@ -33,7 +33,9 @@ echo "== dev daemon"
 (cd "$ROOT/server" && go build -tags dev -o "$WORK/dupfinder-dev" .)
 UIDIR="$WORK/ui"
 mkdir -p "$UIDIR"
-cp -R "$ROOT/spk/ui/" "$UIDIR/"
+# "dir/." copies the CONTENTS on BSD and GNU cp alike; a trailing slash
+# alone means contents only on BSD and nests a "ui" directory on Linux.
+cp -R "$ROOT/spk/ui/." "$UIDIR/"
 cp harness.html ext/ext-base.js ext/ext-all.js "$UIDIR/"
 # DUPFINDER_DSM_URL: the daemon delegates file mutations to the File Station
 # Web API; in dev that is the daemon's own mock (see dev.go).
@@ -41,17 +43,18 @@ cp harness.html ext/ext-base.js ext/ext-all.js "$UIDIR/"
 # (results, hash cache, scan marker) is exercised without arming the token.
 STATE="$WORK/state"
 mkdir -p "$STATE"
-DUPFINDER_ROOTS="$V:$WORK/volumeUSB1" DUPFINDER_UI="$UIDIR" DUPFINDER_DSM_URL="http://127.0.0.1:$PORT" \
-	DUPFINDER_STATE="$STATE" \
-	"$WORK/dupfinder-dev" -mode daemon -port "$PORT" > "$WORK/daemon.log" 2>&1 &
-DPID=$!
-disown
-sleep 1
-if ! curl -sf "http://localhost:$PORT/api/info" >/dev/null; then
-	echo "daemon failed to start:" >&2
-	cat "$WORK/daemon.log" >&2
-	exit 1
-fi
+# start_daemon <logfile>: one launcher for every (re)start below, with the
+# readiness wait — the block used to be pasted five times, and only the
+# first copy waited for the daemon to answer.
+start_daemon() {
+	DUPFINDER_ROOTS="$V:$WORK/volumeUSB1" DUPFINDER_UI="$UIDIR" DUPFINDER_DSM_URL="http://127.0.0.1:$PORT" \
+		DUPFINDER_STATE="$STATE" \
+		"$WORK/dupfinder-dev" -mode daemon -port "$PORT" > "$1" 2>&1 &
+	DPID=$!
+	disown
+	wait_daemon "$PORT" "$1" || exit 1
+}
+start_daemon "$WORK/daemon.log"
 
 echo "== smoke suite"
 DUPFINDER_TEST_PORT="$PORT" node smoke.js
@@ -62,15 +65,19 @@ echo "== persistence across restart"
 kill "$DPID" 2>/dev/null
 wait "$DPID" 2>/dev/null || true
 echo '{"tool":"duplicates","startedAt":"2026-07-29T00:00:00Z"}' > "$STATE/scan.interrupted"
-DUPFINDER_ROOTS="$V:$WORK/volumeUSB1" DUPFINDER_UI="$UIDIR" DUPFINDER_DSM_URL="http://127.0.0.1:$PORT" \
-	DUPFINDER_STATE="$STATE" \
-	"$WORK/dupfinder-dev" -mode daemon -port "$PORT" > "$WORK/daemon2.log" 2>&1 &
-DPID=$!
-disown
-sleep 1
-RESTATE="$(curl -sf "http://localhost:$PORT/api/state")"
-echo "$RESTATE" | grep -q '"interrupted":{"tool":"duplicates"' \
-	|| { echo "FAIL: interrupted marker not reported: $RESTATE" >&2; exit 1; }
+start_daemon "$WORK/daemon2.log"
+# state_field <json-path>: prints one value from /api/state, parsed rather
+# than grepped — a grep on the raw JSON froze the marker struct's field order.
+state_field() {
+	curl -sf "http://localhost:$PORT/api/state" | python3 -c '
+import json,sys
+v=json.load(sys.stdin)
+for k in sys.argv[1].split("."):
+    v=v.get(k) if isinstance(v,dict) else None
+print("" if v is None else v)' "$1"
+}
+[ "$(state_field interrupted.tool)" = "duplicates" ] \
+	|| { echo "FAIL: interrupted marker not reported: $(curl -sf "http://localhost:$PORT/api/state")" >&2; exit 1; }
 curl -sf "http://localhost:$PORT/api/results?tool=duplicates" | grep -q '"scanned":true' \
 	|| { echo "FAIL: results did not survive the restart" >&2; exit 1; }
 curl -sf "http://localhost:$PORT/api/results?tool=duplicates" | grep -q '"groups":\[{' \
@@ -100,13 +107,8 @@ G1="$(hc_gen)"
 kill "$DPID" 2>/dev/null
 wait "$DPID" 2>/dev/null || true
 echo "{\"tool\":\"duplicates\",\"gen\":$G1,\"dirs\":[\"$V/spare/ct-src\"],\"recurse\":true,\"match\":{},\"startedAt\":\"2026-07-29T00:00:00Z\"}" > "$STATE/scan.interrupted"
-DUPFINDER_ROOTS="$V:$WORK/volumeUSB1" DUPFINDER_UI="$UIDIR" DUPFINDER_DSM_URL="http://127.0.0.1:$PORT" \
-	DUPFINDER_STATE="$STATE" \
-	"$WORK/dupfinder-dev" -mode daemon -port "$PORT" > "$WORK/daemon3.log" 2>&1 &
-DPID=$!
-disown
-sleep 1
-curl -sf "http://localhost:$PORT/api/state" | grep -q "\"interrupted\":{\"tool\":\"duplicates\",\"gen\":$G1" \
+start_daemon "$WORK/daemon3.log"
+[ "$(state_field interrupted.tool)" = "duplicates" ] && [ "$(state_field interrupted.gen)" = "$G1" ] \
 	|| { echo "FAIL: marker generation not reported" >&2; exit 1; }
 curl -sf -X POST -H 'Content-Type: application/json' \
 	-d "{\"tool\":\"duplicates\",\"dirs\":[\"$V/spare/ct-src\"],\"recurse\":true,\"match\":{},\"resume\":true}" \
@@ -115,6 +117,10 @@ wait_idle
 G2="$(hc_gen)"
 [ "$G2" = "$G1" ] || { echo "FAIL: resume did not continue gen $G1 (got $G2)" >&2; exit 1; }
 echo "PASS  resume continues the interrupted generation ($G1)"
+# The UI tells a Stop from a finish by this field; a completed run reports it.
+[ "$(state_field lastEnd.completed)" = "True" ] && [ "$(state_field lastEnd.tool)" = "duplicates" ] \
+	|| { echo "FAIL: /state does not report how the last run ended" >&2; exit 1; }
+echo "PASS  /state reports the completed run's outcome"
 curl -sf -X POST -H 'Content-Type: application/json' \
 	-d "{\"tool\":\"duplicates\",\"dirs\":[\"$V/spare/ct-src\"],\"recurse\":true,\"match\":{},\"resume\":true}" \
 	"http://localhost:$PORT/api/scan" >/dev/null
@@ -127,12 +133,7 @@ echo "PASS  resume without an interruption notice is inert (gen advanced to $G3)
 kill "$DPID" 2>/dev/null
 wait "$DPID" 2>/dev/null || true
 echo "{\"tool\":\"temp_files\",\"gen\":$G3,\"startedAt\":\"2026-07-29T00:00:00Z\"}" > "$STATE/scan.interrupted"
-DUPFINDER_ROOTS="$V:$WORK/volumeUSB1" DUPFINDER_UI="$UIDIR" DUPFINDER_DSM_URL="http://127.0.0.1:$PORT" \
-	DUPFINDER_STATE="$STATE" \
-	"$WORK/dupfinder-dev" -mode daemon -port "$PORT" > "$WORK/daemon4.log" 2>&1 &
-DPID=$!
-disown
-sleep 1
+start_daemon "$WORK/daemon4.log"
 curl -sf -X POST -H 'Content-Type: application/json' \
 	-d "{\"tool\":\"duplicates\",\"dirs\":[\"$V/spare/ct-src\"],\"recurse\":true,\"match\":{},\"resume\":true}" \
 	"http://localhost:$PORT/api/scan" >/dev/null
@@ -148,12 +149,7 @@ echo "PASS  a foreign tool's interruption cannot be resumed into (gen advanced t
 kill "$DPID" 2>/dev/null
 wait "$DPID" 2>/dev/null || true
 echo "{\"tool\":\"duplicates\",\"gen\":$G4,\"dirs\":[\"$V/spare\"],\"recurse\":true,\"match\":{},\"startedAt\":\"2026-07-29T00:00:00Z\"}" > "$STATE/scan.interrupted"
-DUPFINDER_ROOTS="$V:$WORK/volumeUSB1" DUPFINDER_UI="$UIDIR" DUPFINDER_DSM_URL="http://127.0.0.1:$PORT" \
-	DUPFINDER_STATE="$STATE" \
-	"$WORK/dupfinder-dev" -mode daemon -port "$PORT" > "$WORK/daemon5.log" 2>&1 &
-DPID=$!
-disown
-sleep 1
+start_daemon "$WORK/daemon5.log"
 curl -sf -X POST -H 'Content-Type: application/json' \
 	-d "{\"tool\":\"duplicates\",\"dirs\":[\"$V/spare/ct-src\"],\"recurse\":true,\"match\":{},\"resume\":true}" \
 	"http://localhost:$PORT/api/scan" >/dev/null

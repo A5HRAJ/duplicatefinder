@@ -55,10 +55,20 @@ func qtMvhdDate(f *os.File, moovStart, moovEnd int64) string {
 		return ""
 	}
 	t := time.Unix(int64(secs)-2082844800, 0).UTC() // 1904 → unix epoch
-	if t.Year() < 1971 || t.Year() > 2100 {
+	return captureDate(t)
+}
+
+// captureDate is the one formatter for capture dates read out of media
+// metadata. A file can carry any well-formed date at all — a QuickTime
+// creationdate of 1904 (its own epoch), an EXIF field of year 0001 — and
+// such a value would become the minimum of the Captured Date range the
+// search pickers are bounded by. Outside the years a digital camera could
+// have produced, the date is treated as absent.
+func captureDate(t time.Time) string {
+	if t.IsZero() || t.Year() < 1971 || t.Year() > 2100 {
 		return ""
 	}
-	return t.Format("2006-01-02 15:04:05")
+	return fmtTime(t)
 }
 
 // qtAppleCreationDate reads moov/meta/{keys,ilst}. The meta box has a
@@ -96,7 +106,7 @@ func qtKeysIlst(f *os.File, base, end int64) string {
 	pos, wantIdx := 8, 0
 	for i := 1; i <= count && pos+8 <= len(kb); i++ {
 		sz := int(binary.BigEndian.Uint32(kb[pos : pos+4]))
-		if sz < 8 || pos+sz > len(kb) {
+		if sz < 8 || sz > len(kb)-pos { // subtraction form: 32-bit safe, see heif.go
 			break
 		}
 		ns := string(kb[pos+4 : pos+8])
@@ -123,7 +133,7 @@ func qtKeysIlst(f *os.File, base, end int64) string {
 	for pos+8 <= len(ib) {
 		sz := int(binary.BigEndian.Uint32(ib[pos : pos+4]))
 		idx := int(binary.BigEndian.Uint32(ib[pos+4 : pos+8]))
-		if sz < 8 || pos+sz > len(ib) {
+		if sz < 8 || sz > len(ib)-pos {
 			break
 		}
 		if idx == wantIdx {
@@ -148,7 +158,7 @@ func parseISODate(v string) string {
 		"2006-01-02T15:04:05",
 	} {
 		if t, err := time.Parse(layout, v); err == nil {
-			return t.Format("2006-01-02 15:04:05")
+			return captureDate(t)
 		}
 	}
 	return ""

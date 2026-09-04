@@ -129,16 +129,31 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 			// Deliberately the REQUESTED tool, not the side-effect one: the
 			// UI's completion poll opens whatever lastTool names.
 			s.lastTool = req.Tool
+			// The reference folders a move must respect are the ones the
+			// STORED results were scanned with — published here, at
+			// completion, never at admission: a cancelled scan leaves the
+			// old results on screen, so it must leave their protection too.
+			s.refDirs = uniquePaths(req.RefDirs)
 			if req.Tool == "duplicates" {
 				s.keepers = nil // fresh groups supersede recorded survivors
 			}
 		}
-		s.job = jobState{}
+		// How this run ended, for /api/state: the UI's poller has to tell a
+		// stop from a finish, and lastTool alone cannot.
+		s.lastEnd = scanEnd{Tool: req.Tool, Completed: completed}
 		s.mu.Unlock()
-		s.clearMarker()
+		// Results reach the disk BEFORE the marker goes and BEFORE the job
+		// slot is released: a crash inside saveState must still find the
+		// marker, so the loss is reported rather than silent — and a scan
+		// admitted in between must not have ITS fresh marker deleted by
+		// this one's os.Remove.
 		if completed {
 			s.saveState() // a finished scan survives a daemon restart
 		}
+		s.clearMarker()
+		s.mu.Lock()
+		s.job = jobState{}
+		s.mu.Unlock()
 	}()
 
 	s.setProgress(2, "Enumerating directories…")
@@ -174,6 +189,7 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 		if !covered {
 			canons = append(canons, wr.canon)
 			safeRoots = append(safeRoots, wr.raw)
+			res.Roots = append(res.Roots, RootMap{Raw: wr.raw, Canon: wr.canon})
 		}
 	}
 
@@ -188,7 +204,7 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 
 	switch req.Tool {
 	case "duplicates":
-		corrRes = &toolResult{Tool: "corrupted_files"}
+		corrRes = &toolResult{Tool: "corrupted_files", Roots: res.Roots}
 		// Pass 1: stream the walk into a compact spill file plus a bounded
 		// candidate-key counter — nothing per-file stays in RAM.
 		sp, err := newSpill(s.stateDir())
@@ -382,7 +398,7 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 			res.Errors = append(res.Errors, fmt.Sprintf(
 				"%d files had no File Station creation time and were excluded from created-date matching", missingCreated))
 		}
-		res.Groups, res.Truncated = acc.final(s, dupFileCap)
+		res.Groups, res.Truncated = acc.final(s, dupFileCap, cancel)
 		m := req.Match
 		res.Match = &m
 		// The corrupted-files pass, over its own candidates. It runs after the
@@ -416,7 +432,7 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 			return
 		}
 		ents, trunc := top.final()
-		res.Files = s.fileEnts(ents, false)
+		res.Files = s.fileEnts(ents)
 		res.Truncated = trunc
 	case "empty_folders":
 		// The walk is consumed as it arrives: a stack of open directories,
@@ -430,9 +446,11 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 		if cancelled(cancel) {
 			return
 		}
-		res.Files, res.Truncated = ef.finish(s, func(p string) bool {
+		var confirmErrs []string
+		res.Files, res.Truncated, confirmErrs = ef.finish(s, cancel, func(p string) (bool, error) {
 			return confirmEmpty(p, sess)
 		})
+		res.Errors = append(res.Errors, confirmErrs...)
 	default:
 		// This switch is the only thing that decides what a scan DOES, and it
 		// is reached with any id validTools accepts. Without this arm, adding a
@@ -482,11 +500,22 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 // must already be de-overlapped (runScan) — there is no seen-set here.
 func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan struct{}, visit func(rootIdx int, f fEnt), unreadable func(path string)) (errs []string, handles []*dirHandle, rootOf []string) {
 	count := 0
+	// The error list is capped so a volume full of permission-denied
+	// subtrees cannot grow it without bound — but no cap here is silent, so
+	// the overflow is counted and reported as one closing line.
+	dropped := 0
 	addErr := func(e string) {
 		if len(errs) < 50 {
 			errs = append(errs, e)
+		} else {
+			dropped++
 		}
 	}
+	defer func() {
+		if dropped > 0 {
+			errs = append(errs, fmt.Sprintf("… and %d more locations could not be read", dropped))
+		}
+	}()
 	// Only the empty-folder scan takes the unreadable callback (a directory
 	// whose contents cannot be read must never be called empty), and it takes
 	// it INTERLEAVED with the entries: its accumulator tracks where the walk
@@ -934,7 +963,7 @@ func (s *Server) scanDuplicates(files []fEnt, match MatchOpts, cache *hashCache,
 	if !s.dupWindow(files, match, cache, cancel, acc, 16, 96) {
 		return nil, nil
 	}
-	return acc.final(s, dupFileCap)
+	return acc.final(s, dupFileCap, nil)
 }
 
 // dupWindow hashes and groups one window of candidates, folding whatever it
@@ -1119,7 +1148,7 @@ type pEnt struct {
 // the user will actually see. Groups the accumulator itself had to drop are
 // added into the truncation report, so the cut stays honest whatever path
 // dropped a group.
-func (t *groupTop) final(s *Server, budget int) ([]Group, *TruncInfo) {
+func (t *groupTop) final(s *Server, budget int, cancel chan struct{}) ([]Group, *TruncInfo) {
 	gs := t.sorted()
 	cut := capCutIndex(len(gs), func(i int) int { return len(gs[i].files) }, budget)
 	dropG, dropF := t.droppedGroups, t.droppedFiles
@@ -1131,6 +1160,7 @@ func (t *groupTop) final(s *Server, budget int) ([]Group, *TruncInfo) {
 		dropF += g.extra // members the per-group cap dropped, kept or not
 	}
 	out := make([]Group, 0, cut)
+	var captures []captureSlot
 	for i, g := range gs[:cut] {
 		// No single group may exceed the whole budget. dupWindow already caps
 		// what it adds, but capCutIndex deliberately keeps the first group
@@ -1141,19 +1171,44 @@ func (t *groupTop) final(s *Server, budget int) ([]Group, *TruncInfo) {
 			g.files = g.files[:budget]
 		}
 		grp := Group{ID: "g" + strconv.Itoa(i), Ext: extOf(g.files[0].name), Size: g.size, Hash: g.hash}
-		for _, f := range g.files {
+		for fi, f := range g.files {
 			fe := s.fileEnt(f)
 			fe.Hash = g.hash
 			fe.Pfx = g.pfx
-			fe.Captured = exifCaptured(f.openContent, f.name)
 			grp.Files = append(grp.Files, fe)
+			captures = append(captures, captureSlot{gi: i, fi: fi, f: f})
 		}
 		out = append(out, grp)
 	}
+	s.fillCaptured(out, captures, cancel)
 	if dropG == 0 && dropF == 0 {
 		return out, nil
 	}
 	return out, &TruncInfo{Groups: dropG, Files: dropF, Cap: budget}
+}
+
+// captureSlot names one result row whose capture date is still to be read:
+// the row's position in the finished groups plus the walk entry that can
+// open it through its pinned root.
+type captureSlot struct {
+	gi, fi int
+	f      fEnt
+}
+
+// fillCaptured reads the capture date of every listed row, in parallel and
+// cancellably, with its own progress label. It used to happen inline, one
+// row after another on the scan goroutine, with no cancel check: up to 100k
+// re-opens that Stop could not interrupt, sitting under a label that still
+// said the hashes were being computed.
+func (s *Server) fillCaptured(out []Group, slots []captureSlot, cancel chan struct{}) {
+	if len(slots) == 0 {
+		return
+	}
+	parallelEach(slots, cancel, func(sl captureSlot) {
+		out[sl.gi].Files[sl.fi].Captured = exifCaptured(sl.f.openContent, sl.f.name)
+	}, func(done, total int) {
+		s.setProgress(-1, "Reading capture dates… ("+humanCount(done)+" of "+humanCount(total)+")")
+	})
 }
 
 // Stored-result caps. The results live in daemon memory on NAS hardware that
@@ -1270,6 +1325,11 @@ func contentPrefixUnchanged(cp, want string) bool {
 	return h[:len(want)] == want
 }
 
+// hashBufPool recycles hashFile's read buffer. Allocating (and zeroing) a
+// fresh megabyte per call cost as much as the warm 64 KiB prefix read it
+// wrapped, and put a GC cycle every hundred files under the hashing workers.
+var hashBufPool = sync.Pool{New: func() any { b := make([]byte, 1024*1024); return &b }}
+
 // hashFile hashes up to limit bytes of a file (-1 = whole file). open is
 // the entry's pinned-handle opener (fEnt.openContent), so the bytes hashed
 // are read from inside the vetted tree — never through a symlink swapped
@@ -1285,10 +1345,12 @@ func hashFile(open func() (*os.File, error), limit int64, cancel chan struct{}) 
 	if limit > 0 {
 		r = io.LimitReader(f, limit)
 	}
-	buf := make([]byte, 1024*1024)
+	bp := hashBufPool.Get().(*[]byte)
+	defer hashBufPool.Put(bp)
+	buf := *bp
 	for {
 		if cancelled(cancel) {
-			return "", fmt.Errorf("cancelled")
+			return "", errCancelled
 		}
 		n, err := r.Read(buf)
 		if n > 0 {
@@ -1336,17 +1398,18 @@ func isTempName(name string) bool {
 // could miss, per File Station's own listing (see folderHoldsOnlyJunk):
 // zero entries, or entries that are all junk — files the Temporary Files
 // tool itself would list, plus Synology's @eaDir thumbnail cache. Any other
-// entry, any error, and any path share space cannot address all count as
-// "not empty": this gate must never over-report emptiness. Candidates
+// entry counts as "not empty": this gate must never over-report emptiness.
+// An error is returned rather than folded into "not empty", because the
+// caller has to REPORT it: a File Station outage mid-confirmation must read
+// as "these could not be checked", not as "these were not empty". Candidates
 // always sit inside a shared folder — scan roots must, and candidates lie
 // strictly below the roots — so share space can always address them.
-func confirmEmpty(p string, sess *fsSession) bool {
+func confirmEmpty(p string, sess *fsSession) (bool, error) {
 	sp, err := sess.shareSpacePath(p)
 	if err != nil {
-		return false
+		return false, err
 	}
-	empty, err := sess.folderHoldsOnlyJunk(sp)
-	return err == nil && empty
+	return sess.folderHoldsOnlyJunk(sp)
 }
 
 // emptyFolderScan turns the walk's entry stream into topmost-empty-folder
@@ -1543,7 +1606,7 @@ func (e *emptyFolderScan) noteUnreadable(p string) {
 // finish closes the remaining frames, then confirms the candidates through
 // File Station. Confirmation happens only for the capped set, so the round
 // trips are bounded along with the result.
-func (e *emptyFolderScan) finish(s *Server, confirm func(string) bool) ([]FileEnt, *TruncInfo) {
+func (e *emptyFolderScan) finish(s *Server, cancel chan struct{}, confirm func(string) (bool, error)) ([]FileEnt, *TruncInfo, []string) {
 	for len(e.stack) > 0 {
 		e.pop()
 	}
@@ -1555,12 +1618,35 @@ func (e *emptyFolderScan) finish(s *Server, confirm func(string) bool) ([]FileEn
 		trunc.Files += e.dropped
 	}
 	out := make([]FileEnt, 0, len(cands))
-	for _, c := range cands {
+	failed, firstErr := 0, ""
+	for i, c := range cands {
+		// One File Station round trip per candidate, up to the cap: this
+		// loop has to answer Stop and move the bar, or twenty thousand
+		// sequential calls read as a hung scan that cannot be stopped.
+		if cancelled(cancel) {
+			break // runScan discards the result; nothing left to confirm
+		}
+		if i%25 == 0 {
+			s.setProgress(15+81*float64(i)/float64(max(len(cands), 1)),
+				"Confirming empty folders… ("+humanCount(i)+" of "+humanCount(len(cands))+")")
+		}
 		// Hard confirmation: re-check the directory itself. Any entry at all
-		// (hidden, system) or any error means it is not safely empty. This
-		// also closes the gap for entries whose Info() failed during the
-		// walk and shrinks the scan→move staleness window.
-		if !confirm(c.path) {
+		// (hidden, system) means it is not safely empty. This also closes the
+		// gap for entries whose Info() failed during the walk and shrinks the
+		// scan→move staleness window.
+		empty, err := confirm(c.path)
+		if err != nil {
+			// Not empty as far as this scan is concerned — the gate never
+			// over-reports — but counted and reported: an expired session
+			// mid-confirmation must not read as "700 empty folders" when the
+			// truth is "700 confirmed, 3,300 never checked".
+			failed++
+			if firstErr == "" {
+				firstErr = err.Error()
+			}
+			continue
+		}
+		if !empty {
 			continue
 		}
 		fe := s.fileEnt(c)
@@ -1568,16 +1654,29 @@ func (e *emptyFolderScan) finish(s *Server, confirm func(string) bool) ([]FileEn
 		fe.Ext = "DIR"
 		out = append(out, fe)
 	}
-	return out, trunc
+	var errs []string
+	if failed > 0 {
+		errs = append(errs, fmt.Sprintf("%d empty-folder candidates could not be confirmed through File Station and were left out (%s)", failed, firstErr))
+	}
+	return out, trunc, errs
 }
 
 // ---------------------------------------------------------------- helpers
 
 func (s *Server) fileEnt(f fEnt) FileEnt {
+	// nextID is persisted under mu; take it here too rather than relying on
+	// the scan/move protocol to keep every caller off the same field.
+	s.mu.Lock()
 	s.nextID++
+	id := s.nextID
+	s.mu.Unlock()
+	var modUnix int64
+	if !f.mod.IsZero() {
+		modUnix = f.mod.Unix()
+	}
 	return FileEnt{
-		ID: "f" + strconv.Itoa(s.nextID), Name: f.name, Dir: f.dir,
-		Size: f.size, Mod: fmtTime(f.mod), Created: fmtTime(f.created),
+		ID: "f" + strconv.Itoa(id), Name: f.name, Dir: f.dir,
+		Size: f.size, Mod: fmtTime(f.mod), ModUnix: modUnix, Created: fmtTime(f.created),
 		Ext: extOf(f.name),
 		// Set here rather than per tool: it is a property of the NAME, true
 		// of any row any tool surfaces, so every one of them gets it right
@@ -1586,14 +1685,10 @@ func (s *Server) fileEnt(f fEnt) FileEnt {
 	}
 }
 
-func (s *Server) fileEnts(in []fEnt, withExif bool) []FileEnt {
+func (s *Server) fileEnts(in []fEnt) []FileEnt {
 	out := make([]FileEnt, 0, len(in))
 	for _, f := range in {
-		fe := s.fileEnt(f)
-		if withExif {
-			fe.Captured = exifCaptured(f.openContent, f.name)
-		}
-		out = append(out, fe)
+		out = append(out, s.fileEnt(f))
 	}
 	return out
 }
@@ -1653,11 +1748,6 @@ func scrubErr(err error, repl map[string]string) error {
 }
 
 var procFdRe = regexp.MustCompile(`/proc/self/fd/\d+`)
-
-func pathExists(p string) bool {
-	_, err := os.Lstat(p)
-	return err == nil
-}
 
 // ----------------------------------------------------------------- export
 

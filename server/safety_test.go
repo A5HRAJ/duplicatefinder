@@ -66,7 +66,8 @@ func efRun(t *testing.T, steps []efStep, confirm func(string) bool) ([]FileEnt, 
 		ef.visit(0, fEnt{path: st.path, name: filepath.Base(st.path),
 			dir: filepath.Dir(st.path), isDir: st.isDir})
 	}
-	return ef.finish(&Server{}, confirm)
+	files, trunc, _ := ef.finish(&Server{}, nil, func(p string) (bool, error) { return confirm(p), nil })
+	return files, trunc
 }
 
 func efNames(ents []FileEnt) []string {

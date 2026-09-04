@@ -25,25 +25,38 @@ urldecode() {
 	printf '%b' "$(printf '%s' "$1" | sed -e 's/+/ /g' -e 's/%\([0-9a-fA-F][0-9a-fA-F]\)/\\x\1/g')"
 }
 TOKEN=""
-case "$QUERY_STRING" in
-	*SynoToken=*)
-		TOKEN="$(urldecode "$(printf '%s' "$QUERY_STRING" | sed -n 's/.*SynoToken=\([^&]*\).*/\1/p')")"
+TOKEN_SENT=0
+# The parameter is matched as a whole name at the start of the string or
+# after '&' — never as a substring — and the FIRST occurrence wins, so a
+# second empty "SynoToken=" cannot blank out the real one.
+case "&$QUERY_STRING" in
+	*\&SynoToken=*)
+		TOKEN_SENT=1
+		TOKEN="$(urldecode "$(printf '&%s' "$QUERY_STRING" | sed -n 's/^.*[&]SynoToken=\([^&]*\).*$/\1/p' | head -n 1)")"
 		;;
 esac
-[ -z "$TOKEN" ] && [ -n "$HTTP_X_SYNO_TOKEN" ] && TOKEN="$HTTP_X_SYNO_TOKEN"
+if [ -n "$HTTP_X_SYNO_TOKEN" ]; then
+	TOKEN_SENT=1
+	[ -z "$TOKEN" ] && TOKEN="$HTTP_X_SYNO_TOKEN"
+fi
 
 # --- resolve the logged-in user -----------------------------------------
 # Fail closed on the token: when the request carries a SynoToken, it must
 # validate — a bad or expired token never falls back to cookie-only auth.
 # Cookie-only validation is reserved for requests that carry no token at
 # all (DSM configurations with CSRF protection disabled send none).
+# A request that NAMED a token but sent an empty one is not a token-less
+# request: it fails closed too, rather than sliding into the cookie-only
+# branch. Both invocations get /dev/null for stdin — the request body is
+# for the daemon, and an authenticate.cgi that peeked at it on a POST would
+# leave the proxied request with a truncated body.
 USER=""
 if [ -x "$AUTH" ]; then
 	if [ -n "$TOKEN" ]; then
 		USER="$(QUERY_STRING="SynoToken=$TOKEN" REQUEST_METHOD=GET \
-			HTTP_X_SYNO_TOKEN="$TOKEN" "$AUTH" 2>/dev/null | head -n 1 | tr -d '\r\n')"
-	else
-		USER="$("$AUTH" 2>/dev/null | head -n 1 | tr -d '\r\n')"
+			HTTP_X_SYNO_TOKEN="$TOKEN" "$AUTH" 2>/dev/null </dev/null | head -n 1 | tr -d '\r\n')"
+	elif [ "$TOKEN_SENT" = 0 ]; then
+		USER="$(REQUEST_METHOD=GET CONTENT_LENGTH= "$AUTH" 2>/dev/null </dev/null | head -n 1 | tr -d '\r\n')"
 	fi
 fi
 

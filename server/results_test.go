@@ -226,7 +226,7 @@ func TestBuildViewSearchOptsTotalsAndGrand(t *testing.T) {
 			FileEnt{Name: "d.mov", Dir: "/v/vids", Ext: "MOV", Size: 10}),
 	}}
 	q := &resultsQuery{Tool: "duplicates", FType: "pic"}
-	v := buildView(res, q, q.viewKey())
+	v := buildView(res, q, q.viewKey(), newRefMatcher(nil, nil))
 	if v.total.Groups != 1 || v.grand.Groups != 2 {
 		t.Fatalf("ftype filter: total=%+v grand=%+v", v.total, v.grand)
 	}
@@ -247,7 +247,7 @@ func TestDupTotalsReclaimable(t *testing.T) {
 		// 2 copies, one protected under /v/ref: 1 reclaimable
 		mkGroup("g1", 7, FileEnt{Name: "b", Dir: "/v/ref/sub"}, FileEnt{Name: "b", Dir: "/v/q"}),
 	}
-	tot := dupTotals(groups, []string{"/v/ref"})
+	tot := dupTotals(groups, newRefMatcher([]string{"/v/ref"}, nil))
 	if tot.Groups != 2 || tot.Files != 5 {
 		t.Fatalf("bad counts: %+v", tot)
 	}
@@ -255,7 +255,7 @@ func TestDupTotalsReclaimable(t *testing.T) {
 		t.Fatalf("reclaimable = %d, want %d", tot.Reclaimable, want)
 	}
 	// Both copies protected: the whole group is kept, nothing reclaimable.
-	tot = dupTotals(groups[1:], []string{"/v/ref", "/v/q"})
+	tot = dupTotals(groups[1:], newRefMatcher([]string{"/v/ref", "/v/q"}, nil))
 	if tot.Reclaimable != 0 {
 		t.Fatalf("fully protected group must reclaim nothing: %+v", tot)
 	}
@@ -461,7 +461,7 @@ func TestPagedResultsViewCacheInvalidation(t *testing.T) {
 		t.Fatalf("view not rebuilt for new params: %+v", s.view)
 	}
 	// pruneMoved must drop the cached view (rows may have moved).
-	s.pruneMoved([]string{"/v/a/f1.bin"}, nil)
+	s.pruneMoved([]string{"/v/a/f1.bin"}, nil, nil)
 	if s.view != nil {
 		t.Fatal("pruneMoved left a stale view cached")
 	}
