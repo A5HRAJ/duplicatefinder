@@ -38,6 +38,15 @@ docker run --rm -v spksrc-work:/spksrc -v "$PWD/dist":/out alpine cp /spksrc/pac
 one-off image pull: toolchain download and extraction, native Go, then the
 package. The volume keeps the toolchains and Go for later builds.
 
+Behind an HTTPS proxy two spksrc habits get in the way. Its toolchain stage
+installs a Rust toolchain through `curl https://sh.rustup.rs | sh` even for
+a Go-only package, so that host (and `static.rust-lang.org`) must be
+reachable, or `rustup-init` from the latter must be installed into
+`distrib/cargo` and `distrib/rustup` beforehand. And every `native/`
+dependency builds under `env -i`, which drops the proxy variables, so
+`native/go` cannot fetch its tarball; drop `go<version>.linux-amd64.tar.gz`
+into `distrib/` first and spksrc verifies it against its own digests.
+
 What was checked on the results, per arch: INFO fields (`package`,
 `version`, `arch` family, `os_min_ver`, `dsmuidir`, `dsmappname`, the
 description with its parentheses intact), the checksum against
@@ -121,10 +130,13 @@ the next it is an ordinary DSM upgrade, and the var dir stays (the
 - Built through the spksrc toolchain on 2026-09-04 for x64, aarch64 and
   armv7 as 1.0.0-1 (`duplicatefinder_<arch>-7.1_1.0.0-1.spk`, the build the
   per-arch checks under "Building it" describe), then again as 1.0.1-2 for
-  x64, the DS916+'s arch. Whether the aarch64 and armv7 1.0.1-2 builds were
-  run was not recorded, so all three should be rebuilt and checked before
-  the pull request. Note `os_min_ver` comes out as 7.1 from those
-  toolchains, against the hand-built package's 7.0.
+  x64, the DS916+'s arch, and on 2026-09-05 as 1.0.1-2 for all three
+  (`duplicatefinder_<arch>-7.1_1.0.1-2.spk`, stamped script
+  `DuplicateFinder-1-0-1-2-b8a45bb7.js`) with the per-arch checks repeated
+  and passing on each and the x64 daemon started as before (token and
+  ready file, 401 without the token, `/api/info` version `1.0.1`). Note
+  `os_min_ver` comes out as 7.1 from those toolchains, against the
+  hand-built package's 7.0.
 - DS916+ trial, 2026-09-04:
   - 1.0.0-1 installed after the hand-built package was uninstalled (the
     two cannot coexist: same port 9807, same `dsmappname`). Verified:
