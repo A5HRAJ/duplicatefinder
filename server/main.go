@@ -990,39 +990,9 @@ type MoveReq struct {
 }
 
 func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeErr(w, 405, "POST required")
+	req, folderName, ok := decodeMoveRequest(w, r)
+	if !ok {
 		return
-	}
-	var req MoveReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, 400, "bad request body")
-		return
-	}
-	if len(req.Files) == 0 {
-		writeErr(w, 400, "no files to move")
-		return
-	}
-	// A read-only tool's rows are a report, not a work list. Refused here, at
-	// the trust boundary, so hiding the button in the UI is presentation
-	// rather than the whole enforcement.
-	if readOnlyTools[req.Tool] {
-		writeErr(w, 400, "Conflicting Files is a report — move these files from File Station once you have decided which copy to keep")
-		return
-	}
-	// Resolved before anything can be created: the destination is not open
-	// yet, no DSM session is needed and moveMu is not held, so an unrecognised
-	// tool cannot leave a half-built state or an orphaned folder behind. Only
-	// preserve mode needs a name, so plain moves keep working without the
-	// field. An upgraded daemon serving a browser that still has the previous
-	// build's JS cached is the likely source of a miss, so say so.
-	folderName := ""
-	if req.Preserve {
-		var ok bool
-		if folderName, ok = moveFolderNames[req.Tool]; !ok {
-			writeErr(w, 400, "unknown tool — reload Duplicate Finder, the package was upgraded")
-			return
-		}
 	}
 	// A move is vetted against the STORED results, and a scan in flight is
 	// about to replace them: acting on the outgoing set while the incoming
@@ -1045,7 +1015,6 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer destH.Close()
-	vols := volumeRootsResolved()
 
 	// One move request at a time: the keep-one vetting below is only sound
 	// when vet → execute → prune runs as an uninterrupted critical section,
@@ -1075,6 +1044,161 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.endMove()
 
+	v := s.newMoveVet(req, sess)
+
+	// In preserve mode the whole batch moves into ONE new folder at the
+	// destination (batchFolder). It is allocated here, inside moveMu, not
+	// earlier: probing and creating before the lock would let two overlapping
+	// requests both see the name free and end up sharing a folder. moveMu
+	// only covers this daemon, so allocBatchFolder still re-probes against
+	// outside writers.
+	var batch *batchFolder
+	var batchFn func() (string, error)
+	if req.Preserve {
+		batch = &batchFolder{sess: sess, destShare: destShare, base: folderName}
+		batchFn = batch.share
+	}
+
+	// Publish per-file progress for /api/state. Set before the first file so a
+	// poll that lands early sees 0-of-N rather than "no move running", and
+	// cleared on every exit path — including a panic, which would otherwise
+	// leave the UI showing a move that is no longer happening.
+	s.setMoveProgress(true, 0, len(req.Files), "")
+	defer s.setMoveProgress(false, 0, 0, "")
+
+	moved := []string{}
+	var movedCanon, movedDirs []string
+	errs := []map[string]string{}
+	for i, src := range req.Files {
+		src = filepath.Clean(src)
+		// Announce the file BEFORE working on it: the whole point is to name
+		// what is currently taking the time, and a large cross-volume copy
+		// sits on this iteration for minutes. note lets the per-file step say
+		// when the time is going into verification rather than the move.
+		base := filepath.Base(src)
+		note := func(stage string) {
+			s.setMoveProgress(true, i, len(req.Files), base+stage)
+		}
+		note("")
+		cp, gone, err := s.moveOne(v, batchFn, sess, destShare, destCanon, req.Verify, note, src)
+		if gone {
+			movedCanon = append(movedCanon, cp)
+			// A moved DIRECTORY takes everything under it (a junk-only "empty"
+			// folder moves with its junk inside), so pruneMoved must also drop
+			// rows beneath it. The scan's own record says what moved: any ident
+			// for this path being a directory is enough — a path that was a dir
+			// to one tool and a file to another has changed since some scan, and
+			// the identity check would have refused the move. BOTH forms, and the
+			// display path is not redundant: once the directory is gone,
+			// dirResolver.dir() can no longer resolve it, so every row beneath it
+			// falls back to its raw stored path (that fallback is deliberate — see
+			// dir()). Matching only the canonical form then silently prunes
+			// nothing wherever the two differ: a symlinked share, or a scope
+			// naming an alias of a real directory.
+			if isDirIdent(v.idents[cp]) {
+				movedDirs = append(movedDirs, cp, src)
+			}
+		}
+		if err != nil {
+			errs = append(errs, map[string]string{"path": src, "error": err.Error()})
+			if gone {
+				// A failure AFTER File Station completed the move — a
+				// verification mismatch, or an entry parked in the staging
+				// folder — leaves the source gone: the row prunes like any moved
+				// row (above), or it would linger pointing at a path that no
+				// longer exists and count as a phantom keep-one survivor. It
+				// stays out of `moved` — the response's error entry is the truth
+				// about this entry — and the daemon log is the durable record of
+				// a move that left the source but did not end clean.
+				log.Printf("move of %s: %v", src, err)
+			}
+			continue
+		}
+		moved = append(moved, src)
+	}
+	// Every file accounted for — report the full count before the response is
+	// written, so a poll racing the last file cannot show N-1 of N and then
+	// jump straight to "no move running".
+	s.setMoveProgress(true, len(req.Files), len(req.Files), "")
+
+	if len(movedCanon) > 0 {
+		s.pruneMoved(movedCanon, movedDirs, v.canon)
+		// Pruned rows and new keep-one survivors must survive a restart too,
+		// or a reboot would resurrect moved rows and forget protections.
+		s.saveState()
+	}
+	out := map[string]any{"moved": moved, "errors": errs}
+	if batch != nil && batch.name != "" {
+		// Name the folder the files actually landed in: under preserve they
+		// are NOT at the path the caller picked, and only the daemon knows
+		// which " (n)" variant it ended up allocating. Reported in the same
+		// namespace as the request's own paths. Absent when nothing was
+		// created — an all-refused request or a failed allocation.
+		out["folder"] = filepath.Join(req.Dest, batch.name)
+	}
+	writeJSON(w, 200, out)
+}
+
+// decodeMoveRequest reads and vets the body of POST /api/move as far as it
+// can before anything is created and before any lock is held: the method, the
+// body, the tool, and — for preserve mode — the folder name the tool maps to.
+// It writes the refusal itself and reports false.
+func decodeMoveRequest(w http.ResponseWriter, r *http.Request) (req MoveReq, folderName string, ok bool) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "POST required")
+		return req, "", false
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "bad request body")
+		return req, "", false
+	}
+	if len(req.Files) == 0 {
+		writeErr(w, 400, "no files to move")
+		return req, "", false
+	}
+	// A read-only tool's rows are a report, not a work list. Refused here, at
+	// the trust boundary, so hiding the button in the UI is presentation
+	// rather than the whole enforcement.
+	if readOnlyTools[req.Tool] {
+		writeErr(w, 400, "Conflicting Files is a report — move these files from File Station once you have decided which copy to keep")
+		return req, "", false
+	}
+	// Resolved before anything can be created: the destination is not open
+	// yet, no DSM session is needed and moveMu is not held, so an unrecognised
+	// tool cannot leave a half-built state or an orphaned folder behind. Only
+	// preserve mode needs a name, so plain moves keep working without the
+	// field. An upgraded daemon serving a browser that still has the previous
+	// build's JS cached is the likely source of a miss, so say so.
+	if req.Preserve {
+		var found bool
+		if folderName, found = moveFolderNames[req.Tool]; !found {
+			writeErr(w, 400, "unknown tool — reload Duplicate Finder, the package was upgraded")
+			return req, "", false
+		}
+	}
+	return req, folderName, true
+}
+
+// moveVet is everything one move request is checked against, computed once
+// under the move lock: the reference folders, the allowlist of paths some scan
+// surfaced and the identities it recorded for them, the keep-one survivors of
+// earlier requests, the copies this request must hold back, and the volume
+// walls. Every path in it is canonical (symlink-resolved): a client could
+// otherwise alias a protected reference file or a duplicate-group member
+// through a symlink and slip past the string-prefix guards. Responses still
+// carry the paths as the client sent them.
+type moveVet struct {
+	canon     *dirResolver
+	canonRefs []string
+	allowed   map[string]bool
+	idents    map[string][]entIdent
+	keepers   map[string]bool
+	drops     map[string]bool
+	vols      []string
+}
+
+// newMoveVet snapshots the stored results and derives the vetting sets.
+func (s *Server) newMoveVet(req MoveReq, sess *fsSession) *moveVet {
 	refDirs, groups, keepers, cachedEnts := func() ([]string, []Group, map[string]bool, []FileEnt) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -1103,10 +1227,6 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		return append([]string{}, s.refDirs...), snapshotGroupsLocked(s.results["duplicates"]), k, ents
 	}()
 
-	// Every invariant below compares symlink-resolved paths: a client could
-	// otherwise alias a protected reference file or a duplicate-group member
-	// through a symlink and slip past the string-prefix guards. Responses
-	// still carry the paths as the client sent them.
 	canon := newDirResolver()
 	canonRefs := make([]string, 0, len(refDirs))
 	for _, d := range refDirs {
@@ -1148,7 +1268,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	// those members are requested too as far as keep-one is concerned — or
 	// two junk-only folders holding the same Thumbs.db could be moved one
 	// after the other and drain the group in place. The directory itself is
-	// then refused below when a held-back copy lives inside it.
+	// then refused (refuse) when a held-back copy lives inside it.
 	if len(reqDirs) > 0 {
 		for _, g := range groups {
 			for _, f := range g.Files {
@@ -1164,186 +1284,124 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	// group's CONTENT either — so File Station is asked which members of
 	// the touched groups still exist as recorded.
 	exists := groupExistence(sess, groups, requested, canon, idents)
-	drops := keepOneDrops(groups, requested, canonRefs, canon, exists)
-	// holdsUnder reports whether any held-back path lies inside dir.
-	holdsUnder := func(dir string, held map[string]bool) bool {
-		for p := range held {
-			if strings.HasPrefix(p, dir+"/") {
-				return true
-			}
-		}
-		return false
+	return &moveVet{
+		canon:     canon,
+		canonRefs: canonRefs,
+		allowed:   allowed,
+		idents:    idents,
+		keepers:   keepers,
+		drops:     keepOneDrops(groups, requested, canonRefs, canon, exists),
+		vols:      volumeRootsResolved(),
 	}
+}
 
-	// In preserve mode the whole batch moves into ONE new folder at the
-	// destination, allocated LAZILY and at most ONCE per request.
-	//
-	// Lazily, because every per-file guard below — the allowlist, keep-one,
-	// reference folders, and execMoveFS's own identity and fingerprint checks
-	// — refuses before anything is written, and a request whose files are all
-	// refused must not leave an empty "Duplicates" behind.
-	//
-	// Once, because execMoveFS runs per file: allocating there would produce
-	// Duplicates, Duplicates (1), Duplicates (2)… one per file, which is the
-	// exact scatter this folder exists to prevent. The error is memoized
-	// alongside the name, so a destination that refuses folder creation costs
-	// one failed attempt for the request rather than one per file.
-	//
-	// The allocation runs here, inside moveMu, not earlier: probing and
-	// creating before the lock would let two overlapping requests both see the
-	// name free and end up sharing a folder. moveMu only covers this daemon,
-	// so allocBatchFolder still re-probes against outside writers.
-	var batchName string
-	var batchErr error
-	var batchTried bool
-	var batchFn func() (string, error)
-	if req.Preserve {
-		batchFn = func() (string, error) {
-			if !batchTried {
-				batchTried = true
-				batchName, batchErr = sess.allocBatchFolder(destShare, folderName)
-			}
-			if batchErr != nil {
-				return "", batchErr
-			}
-			return destShare + "/" + batchName, nil
+// holdsUnder reports whether any held-back path lies inside dir.
+func holdsUnder(dir string, held map[string]bool) bool {
+	for p := range held {
+		if strings.HasPrefix(p, dir+"/") {
+			return true
 		}
 	}
+	return false
+}
 
-	// Publish per-file progress for /api/state. Set before the first file so a
-	// poll that lands early sees 0-of-N rather than "no move running", and
-	// cleared on every exit path — including a panic, which would otherwise
-	// leave the UI showing a move that is no longer happening.
-	s.setMoveProgress(true, 0, len(req.Files), "")
-	defer s.setMoveProgress(false, 0, 0, "")
+// refuse returns why the canonical path cp may not move at all, or nil when
+// the request-level checks pass and execMoveFS's own identity checks decide.
+func (v *moveVet) refuse(cp string) error {
+	switch {
+	case !isUnder(cp, v.vols):
+		return errors.New("outside allowed volumes")
+	// drops: this request would take a group's last unrequested copy.
+	// keepers: an earlier request already dissolved the group — its
+	// survivor stays held back until the next duplicates scan.
+	case v.drops[cp] || v.keepers[cp]:
+		return errors.New("keeping one copy of this duplicate group")
+	case isDirIdent(v.idents[cp]) && (holdsUnder(cp, v.drops) || holdsUnder(cp, v.keepers)):
+		return errors.New("keeping one copy of a duplicate group that lives inside this folder")
+	case isUnder(cp, v.canonRefs):
+		return errors.New("read-only reference file")
+	// Refused BEFORE File Station is asked, because asking produces "no
+	// such file or folder" for a file that plainly exists — a refusal
+	// that sends the user looking for a vanished file instead of telling
+	// them what is actually true. Checked on the base name of the path
+	// being moved, matching what the scan recorded in NoMove.
+	case fsCannotAddress(filepath.Base(cp)):
+		return errors.New("DSM's File Station cannot see this file, so it cannot be moved — delete it from the Mac that made it, or move the whole folder that holds it")
+	case !v.allowed[cp]:
+		return errors.New("not part of the current scan results — rescan and try again")
+	}
+	return nil
+}
 
-	moved := []string{}
-	var movedCanon, movedDirs []string
-	errs := []map[string]string{}
-	for i, src := range req.Files {
-		src = filepath.Clean(src)
-		// Announce the file BEFORE working on it: the whole point is to name
-		// what is currently taking the time, and a large cross-volume copy
-		// sits on this iteration for minutes.
-		s.setMoveProgress(true, i, len(req.Files), filepath.Base(src))
-		if !allowedPath(src) {
-			errs = append(errs, map[string]string{"path": src, "error": "outside allowed volumes"})
-			continue
-		}
-		// Pin the source's parent (src itself may be a symlink; the move
-		// takes the link, never what it points at) and derive the canonical
-		// path from the pinned handle: the guards below AND the File Station
-		// move all act on that one canonical path, so the vetted path and
-		// the executed path are never two different strings, and a parent
-		// swapped for a symlink after the checks cannot redirect the
-		// operation to files living elsewhere. (File Station is an external
-		// process, so the handle itself cannot carry the move — acting on
-		// the handle's canonical path is the strongest available guarantee.)
-		parentH, err := dirhandle.Open(filepath.Dir(src))
-		if err != nil {
-			errs = append(errs, map[string]string{"path": src, "error": "cannot resolve path"})
-			continue
-		}
-		pCanon, err := parentH.Canon()
-		if err != nil {
-			parentH.Close()
-			errs = append(errs, map[string]string{"path": src, "error": "cannot resolve path"})
-			continue
-		}
-		cp := filepath.Join(pCanon, filepath.Base(src))
-		var moveErr error
-		switch {
-		case !isUnder(cp, vols):
-			moveErr = errors.New("outside allowed volumes")
-		// drops: this request would take a group's last unrequested copy.
-		// keepers: an earlier request already dissolved the group — its
-		// survivor stays held back until the next duplicates scan.
-		case drops[cp] || keepers[cp]:
-			moveErr = errors.New("keeping one copy of this duplicate group")
-		case isDirIdent(idents[cp]) && (holdsUnder(cp, drops) || holdsUnder(cp, keepers)):
-			moveErr = errors.New("keeping one copy of a duplicate group that lives inside this folder")
-		case isUnder(cp, canonRefs):
-			moveErr = errors.New("read-only reference file")
-		// Refused BEFORE File Station is asked, because asking produces "no
-		// such file or folder" for a file that plainly exists — a refusal
-		// that sends the user looking for a vanished file instead of telling
-		// them what is actually true. Checked on the base name of the path
-		// being moved, matching what the scan recorded in NoMove.
-		case fsCannotAddress(filepath.Base(cp)):
-			moveErr = errors.New("DSM's File Station cannot see this file, so it cannot be moved — delete it from the Mac that made it, or move the whole folder that holds it")
-		case !allowed[cp]:
-			moveErr = errors.New("not part of the current scan results — rescan and try again")
-		default:
-			base := filepath.Base(src)
-			note := func(stage string) {
-				s.setMoveProgress(true, i, len(req.Files), base+stage)
-			}
-			moveErr = execMoveFS(sess, src, cp, destShare, destCanon, idents[cp], batchFn, req.Verify, note)
-		}
-		parentH.Close()
-		// A moved DIRECTORY takes everything under it (a junk-only "empty"
-		// folder moves with its junk inside), so pruneMoved must also drop
-		// rows beneath it. The scan's own record says what moved: any ident
-		// for this path being a directory is enough — a path that was a dir
-		// to one tool and a file to another has changed since some scan, and
-		// the identity check would have refused the move. BOTH forms, and the
-		// display path is not redundant: once the directory is gone,
-		// dirResolver.dir() can no longer resolve it, so every row beneath it
-		// falls back to its raw stored path (that fallback is deliberate — see
-		// dir()). Matching only the canonical form then silently prunes
-		// nothing wherever the two differ: a symlinked share, or a scope
-		// naming an alias of a real directory.
-		noteMovedDir := func() {
-			if isDirIdent(idents[cp]) {
-				movedDirs = append(movedDirs, cp, filepath.Clean(src))
-			}
-		}
-		if moveErr != nil {
-			errs = append(errs, map[string]string{"path": src, "error": moveErr.Error()})
-			// A failure AFTER File Station completed the move — a verification
-			// mismatch, or an entry parked in the staging folder — leaves the
-			// source gone: the row must prune like any moved row, or it would
-			// linger pointing at a path that no longer exists and count as a
-			// phantom keep-one survivor. It stays out of `moved` — the
-			// response's error entry is the truth about this entry. A parked
-			// DIRECTORY took its contents with it, so its rows beneath prune
-			// too.
-			var mbe movedButError
-			if errors.As(moveErr, &mbe) {
-				movedCanon = append(movedCanon, cp)
-				noteMovedDir()
-				// The toast is transient and the row is about to prune: the
-				// daemon log is the durable record of a move that left the
-				// source but did not end clean.
-				log.Printf("move of %s: %v", src, moveErr)
-			}
-			continue
-		}
-		moved = append(moved, src)
-		movedCanon = append(movedCanon, cp)
-		noteMovedDir()
-	}
-	// Every file accounted for — report the full count before the response is
-	// written, so a poll racing the last file cannot show N-1 of N and then
-	// jump straight to "no move running".
-	s.setMoveProgress(true, len(req.Files), len(req.Files), "")
+// batchFolder is the preserve-mode tool folder, allocated LAZILY and at most
+// ONCE per request.
+//
+// Lazily, because every per-file guard — the allowlist, keep-one, reference
+// folders, and execMoveFS's own identity and fingerprint checks — refuses
+// before anything is written, and a request whose files are all refused must
+// not leave an empty "Duplicates" behind.
+//
+// Once, because execMoveFS runs per file: allocating there would produce
+// Duplicates, Duplicates (1), Duplicates (2)… one per file, which is the exact
+// scatter this folder exists to prevent. The error is memoized alongside the
+// name, so a destination that refuses folder creation costs one failed attempt
+// for the request rather than one per file.
+type batchFolder struct {
+	sess      *fsSession
+	destShare string
+	base      string
+	tried     bool
+	name      string
+	err       error
+}
 
-	if len(movedCanon) > 0 {
-		s.pruneMoved(movedCanon, movedDirs, canon)
-		// Pruned rows and new keep-one survivors must survive a restart too,
-		// or a reboot would resurrect moved rows and forget protections.
-		s.saveState()
+// share returns the folder's share-space path, creating it on the first call.
+func (b *batchFolder) share() (string, error) {
+	if !b.tried {
+		b.tried = true
+		b.name, b.err = b.sess.allocBatchFolder(b.destShare, b.base)
 	}
-	out := map[string]any{"moved": moved, "errors": errs}
-	if batchName != "" {
-		// Name the folder the files actually landed in: under preserve they
-		// are NOT at the path the caller picked, and only the daemon knows
-		// which " (n)" variant it ended up allocating. Reported in the same
-		// namespace as the request's own paths. Absent when nothing was
-		// created — an all-refused request or a failed allocation.
-		out["folder"] = filepath.Join(req.Dest, batchName)
+	if b.err != nil {
+		return "", b.err
 	}
-	writeJSON(w, 200, out)
+	return b.destShare + "/" + b.name, nil
+}
+
+// moveOne vets and executes one requested path. It pins the source's parent,
+// derives the canonical path that every check and the move itself act on,
+// applies the request-level refusals and hands the rest to execMoveFS. gone
+// reports that the source left its place — a clean move, or a failure after
+// File Station had already moved it — so the caller prunes the row either way.
+func (s *Server) moveOne(v *moveVet, batch func() (string, error), sess *fsSession, destShare, destCanon string, verify bool, note func(string), src string) (cp string, gone bool, err error) {
+	if !allowedPath(src) {
+		return "", false, errors.New("outside allowed volumes")
+	}
+	// Pin the source's parent (src itself may be a symlink; the move takes
+	// the link, never what it points at) and derive the canonical path from
+	// the pinned handle: the guards below AND the File Station move all act
+	// on that one canonical path, so the vetted path and the executed path
+	// are never two different strings, and a parent swapped for a symlink
+	// after the checks cannot redirect the operation to files living
+	// elsewhere. (File Station is an external process, so the handle itself
+	// cannot carry the move — acting on the handle's canonical path is the
+	// strongest available guarantee.)
+	parentH, err := dirhandle.Open(filepath.Dir(src))
+	if err != nil {
+		return "", false, errors.New("cannot resolve path")
+	}
+	defer parentH.Close()
+	pCanon, err := parentH.Canon()
+	if err != nil {
+		return "", false, errors.New("cannot resolve path")
+	}
+	cp = filepath.Join(pCanon, filepath.Base(src))
+	if err := v.refuse(cp); err != nil {
+		return cp, false, err
+	}
+	err = execMoveFS(sess, src, cp, destShare, destCanon, v.idents[cp], batch, verify, note)
+	var mbe movedButError
+	gone = err == nil || errors.As(err, &mbe)
+	return cp, gone, err
 }
 
 // setMoveProgress publishes how far the move in flight has got. It takes mu
@@ -1499,8 +1557,7 @@ func execMoveFS(sess *fsSession, src, cp, destShare, destCanon string, wants []e
 	if want.pfx != "" && !contentPrefixUnchanged(cp, want.pfx) {
 		return errors.New("file contents changed since the scan — rescan and try again")
 	}
-	isdir := e.IsDir
-	if isdir && (destCanon == cp || strings.HasPrefix(destCanon+"/", cp+"/")) {
+	if e.IsDir && (destCanon == cp || strings.HasPrefix(destCanon+"/", cp+"/")) {
 		return errors.New("destination is inside the folder being moved")
 	}
 	// Hoisted above the allocation below, so that no purely LOCAL refusal can
@@ -1512,106 +1569,129 @@ func execMoveFS(sess *fsSession, src, cp, destShare, destCanon string, wants []e
 	if batch == nil && filepath.Dir(srcShare) == destShare {
 		return errors.New("file is already in the destination")
 	}
-	// Full verification, half one: prove the SOURCE is still exactly the
-	// content the scan verified, while it still exists. Where the scan
-	// recorded a full hash (duplicates), the fresh hash must equal it —
-	// this closes the scan→move window the 64 KiB fingerprint above cannot
-	// (rot past the prefix with size and mtime standing). For rows without
-	// a recorded hash, the fresh hash becomes the reference the destination
-	// must reproduce. Directories are skipped: their move is a rename, and
+	// Directories are never content-verified: their move is a rename, and
 	// there is no single content to hash. Placed above batch() with every
 	// other refusal, so a verify refusal creates nothing.
 	preHash := ""
 	if verify && !e.IsDir {
-		if note != nil {
-			note(" — verifying")
-		}
-		h, herr := verifyRead(cp)
-		if herr != nil {
-			return errors.New("could not read the file to verify it — nothing was moved")
-		}
-		if want.hash != "" && h != want.hash {
-			return errors.New("file contents changed since the scan — rescan and try again")
-		}
-		preHash = h
-		if note != nil {
-			note("")
+		if preHash, err = preMoveHash(cp, want, note); err != nil {
+			return err
 		}
 	}
 	outShare := destShare
 	if batch != nil {
-		// The first side effect in this function, and deliberately the last
-		// statement before the move: every refusal above is local and must
-		// stay above it.
-		root, err := batch()
-		if err != nil {
-			return err
-		}
-		rel := strings.TrimPrefix(filepath.Dir(src), "/")
-		if rel == "" {
-			// Unreachable while shareSpacePath refuses volume roots, but a
-			// bare join would silently aim the move at the batch folder's
-			// own parent — refuse rather than depend on that.
-			return errors.New("cannot mirror the folder path of a volume root")
-		}
-		outShare = filepath.Join(root, rel)
-		if err := sess.createFolder(filepath.Dir(outShare), filepath.Base(outShare), true); err != nil {
+		if outShare, err = batchTarget(sess, batch, src); err != nil {
 			return err
 		}
 	}
 	finalName, err := moveViaFS(sess, srcShare, outShare)
 	if err != nil {
-		// A PARKED outcome means the source is gone and the only copy sits in
-		// the destination's staging folder — the exact "moved but" condition:
-		// the row must prune, the message must carry where the file is, and
-		// when verification was asked for it happens HERE, against the parked
-		// copy. The risky transit has already happened; "parked" must never
-		// mean "unverified".
 		var pe parkedError
 		if errors.As(err, &pe) {
-			msg := err.Error()
-			if verify && !e.IsDir && preHash != "" {
-				parkedFS := filepath.Join(destCanon, strings.TrimPrefix(pe.tmpShare, destShare), pe.name)
-				if h, herr := verifyRead(parkedFS); herr != nil {
-					msg += "; the parked copy could not be read back to verify it"
-				} else if h != preHash {
-					msg += "; the parked copy does NOT match the original content — check it before deleting any other copy"
-				} else {
-					msg += "; the parked copy verified intact"
-				}
-			}
-			return movedButError{msg}
+			return parkedOutcome(pe, destShare, destCanon, preHash)
 		}
 		return err
 	}
-	// Full verification, half two: read the DESTINATION back and require the
-	// exact content that left. Within one volume a move is a rename of
-	// pointers and this re-reads the same blocks; across volumes or onto a
-	// remote mount it is the only proof the data survived the transit. The
-	// destination path is derived, never guessed: outShare always extends
-	// destShare, so grafting that extension onto the picker's canonical
-	// folder plus the name moveViaFS reports (a collision may have forced a
-	// " (n)" variant) is exactly where File Station put the file.
-	//
-	// Both failure modes below happen AFTER the move — the source is gone —
-	// so they are reported as movedButError: the row prunes, the message
-	// carries the truth. "Could not be read back" is kept distinct from "does
-	// not match": the first is almost always the package user lacking read
-	// access to the destination share, and telling the user their data was
-	// damaged when the daemon merely could not look would be a false alarm
-	// with real consequences.
 	if verify && !e.IsDir {
-		if note != nil {
-			note(" — verifying the moved copy")
+		return verifyMoved(destCanon, destShare, outShare, finalName, preHash, note)
+	}
+	return nil
+}
+
+// preMoveHash is verification's first half: prove the SOURCE is still exactly
+// the content the scan verified, while it still exists. Where the scan
+// recorded a full hash (duplicates), the fresh hash must equal it — this
+// closes the scan→move window the 64 KiB fingerprint cannot (rot past the
+// prefix with size and mtime standing). For rows without a recorded hash, the
+// fresh hash becomes the reference the destination must reproduce.
+func preMoveHash(cp string, want entIdent, note func(string)) (string, error) {
+	if note != nil {
+		note(" — verifying")
+	}
+	h, err := verifyRead(cp)
+	if err != nil {
+		return "", errors.New("could not read the file to verify it — nothing was moved")
+	}
+	if want.hash != "" && h != want.hash {
+		return "", errors.New("file contents changed since the scan — rescan and try again")
+	}
+	if note != nil {
+		note("")
+	}
+	return h, nil
+}
+
+// batchTarget allocates the batch folder (its first side effect, and
+// deliberately the last step before the move: every refusal above it is
+// local) and mirrors the source's directory chain — as the user knows it, so
+// the raw src — inside it via CreateFolder(force_parent), so the file's origin
+// is always recorded. It returns the share-space folder the file moves into.
+func batchTarget(sess *fsSession, batch func() (string, error), src string) (string, error) {
+	root, err := batch()
+	if err != nil {
+		return "", err
+	}
+	rel := strings.TrimPrefix(filepath.Dir(src), "/")
+	if rel == "" {
+		// Unreachable while shareSpacePath refuses volume roots, but a bare
+		// join would silently aim the move at the batch folder's own parent
+		// — refuse rather than depend on that.
+		return "", errors.New("cannot mirror the folder path of a volume root")
+	}
+	outShare := filepath.Join(root, rel)
+	if err := sess.createFolder(filepath.Dir(outShare), filepath.Base(outShare), true); err != nil {
+		return "", err
+	}
+	return outShare, nil
+}
+
+// parkedOutcome reports a move that ended with the file inside the
+// destination's staging folder. The source is gone and the only copy sits in
+// the staging folder — the exact "moved but" condition: the row must prune,
+// the message must carry where the file is, and when verification was asked
+// for (preHash is set) it happens HERE, against the parked copy. The risky
+// transit has already happened; "parked" must never mean "unverified".
+func parkedOutcome(pe parkedError, destShare, destCanon, preHash string) movedButError {
+	msg := pe.Error()
+	if preHash != "" {
+		parkedFS := filepath.Join(destCanon, strings.TrimPrefix(pe.tmpShare, destShare), pe.name)
+		if h, herr := verifyRead(parkedFS); herr != nil {
+			msg += "; the parked copy could not be read back to verify it"
+		} else if h != preHash {
+			msg += "; the parked copy does NOT match the original content — check it before deleting any other copy"
+		} else {
+			msg += "; the parked copy verified intact"
 		}
-		destFS := filepath.Join(destCanon, strings.TrimPrefix(outShare, destShare), finalName)
-		h, herr := verifyRead(destFS)
-		if herr != nil {
-			return movedButError{"moved, but the copy could not be read back to verify it — grant the package user read access to the destination share, or compare the copies yourself before deleting anything"}
-		}
-		if h != preHash {
-			return movedButError{"moved, but the copy at the destination does not match the original content — the data may have been damaged in transit; check it before deleting any other copy"}
-		}
+	}
+	return movedButError{msg}
+}
+
+// verifyMoved is verification's second half: read the DESTINATION back and
+// require the exact content that left. Within one volume a move is a rename
+// of pointers and this re-reads the same blocks; across volumes or onto a
+// remote mount it is the only proof the data survived the transit. The
+// destination path is derived, never guessed: outShare always extends
+// destShare, so grafting that extension onto the picker's canonical folder
+// plus the name moveViaFS reports (a collision may have forced a " (n)"
+// variant) is exactly where File Station put the file.
+//
+// Both failure modes happen AFTER the move — the source is gone — so they are
+// reported as movedButError: the row prunes, the message carries the truth.
+// "Could not be read back" is kept distinct from "does not match": the first
+// is almost always the package user lacking read access to the destination
+// share, and telling the user their data was damaged when the daemon merely
+// could not look would be a false alarm with real consequences.
+func verifyMoved(destCanon, destShare, outShare, finalName, preHash string, note func(string)) error {
+	if note != nil {
+		note(" — verifying the moved copy")
+	}
+	destFS := filepath.Join(destCanon, strings.TrimPrefix(outShare, destShare), finalName)
+	h, herr := verifyRead(destFS)
+	if herr != nil {
+		return movedButError{"moved, but the copy could not be read back to verify it — grant the package user read access to the destination share, or compare the copies yourself before deleting anything"}
+	}
+	if h != preHash {
+		return movedButError{"moved, but the copy at the destination does not match the original content — the data may have been damaged in transit; check it before deleting any other copy"}
 	}
 	return nil
 }

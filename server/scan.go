@@ -85,6 +85,17 @@ func cancelled(cancel chan struct{}) bool {
 	}
 }
 
+// scanOutcome is how one tool's pass ended: finished, so the result is
+// stored; cancelled, so it is dropped; or aborted, so the error the pass
+// recorded is stored as the result.
+type scanOutcome int
+
+const (
+	scanFinished scanOutcome = iota
+	scanCancelled
+	scanAborted
+)
+
 // resumeGen, when non-zero, is the hash-store generation of an interrupted
 // scan the user chose to RESUME: the duplicates pass adopts it instead of
 // advancing, so files the dead run already read in full are not read again.
@@ -159,15 +170,63 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 	}()
 
 	s.setProgress(2, "Enumerating directories…")
-	// The roots were validated when the scan was requested, but the walk
-	// happens here, later and asynchronously: re-resolve them so a root
-	// swapped for an outside-pointing symlink in between is refused rather
-	// than enumerated. The resolved roots are then de-overlapped
-	// canonically: the streaming walk has no global seen-set, so a root
-	// that duplicates — or, when recursing, sits inside — another kept root
-	// would visit the same files twice under different display paths and
-	// fabricate phantom duplicate pairs (an aliased scope would pair every
-	// file with itself).
+	safeRoots := scanRoots(req, roots, res)
+
+	// The pinned root handles must outlive every content read below —
+	// hashing and EXIF open entries through them, never by raw path. Each
+	// pass stores its handles here the moment its walk returns, so this
+	// close covers a panic anywhere after that point.
+	var handles []*dirhandle.Handle
+	defer func() {
+		for _, h := range handles {
+			h.Close()
+		}
+	}()
+
+	var outcome scanOutcome
+	switch req.Tool {
+	case "duplicates":
+		corrRes = &toolResult{Tool: "corrupted_files", Roots: res.Roots}
+		outcome = s.scanDuplicatesTool(req, safeRoots, sess, cancel, resumeGen, res, corrRes, &handles)
+	case "empty_files", "temp_files":
+		outcome = s.scanFlatTool(req, safeRoots, cancel, res, &handles)
+	case "empty_folders":
+		outcome = s.scanEmptyFoldersTool(req, safeRoots, sess, cancel, res, &handles)
+	default:
+		// This switch is the only thing that decides what a scan DOES, and it
+		// is reached with any id validTools accepts. Without this arm, adding a
+		// tool id and forgetting its case would run nothing, fall through to
+		// completed = true below, and store an EMPTY result over whatever the
+		// tool had — silent data loss caused by registration alone. Refusing
+		// leaves the existing result untouched (completed stays false).
+		log.Printf("scan requested for tool %q, which has no scan implementation", req.Tool)
+		return
+	}
+	switch outcome {
+	case scanCancelled:
+		return // partial results are dropped
+	case scanAborted:
+		completed = true // the pass recorded why; that error is the result
+		return
+	}
+	if cancelled(cancel) {
+		return // cancelled mid-scan: partial results are dropped
+	}
+	completed = true
+	s.fetchCreatedDates(sess, res, corrRes, cancel)
+	s.setProgress(100, "Finalizing results…")
+}
+
+// scanRoots re-resolves the requested roots and de-overlaps them by canonical
+// path, recording each kept root's raw and canonical form in res. The roots
+// were validated when the scan was requested, but the walk happens later and
+// asynchronously: re-resolving refuses a root swapped for an outside-pointing
+// symlink in between rather than enumerating it. De-overlapping matters
+// because the streaming walk has no global seen-set: a root that duplicates —
+// or, when recursing, sits inside — another kept root would visit the same
+// files twice under different display paths and fabricate phantom duplicate
+// pairs (an aliased scope would pair every file with itself).
+func scanRoots(req ScanReq, roots []string, res *toolResult) []string {
 	type walkRoot struct{ raw, canon string }
 	var wroots []walkRoot
 	for _, r := range roots {
@@ -194,298 +253,300 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 			res.Roots = append(res.Roots, RootMap{Raw: wr.raw, Canon: wr.canon})
 		}
 	}
+	return safeRoots
+}
 
-	// The pinned root handles must outlive every content read below —
-	// hashing and EXIF open entries through them, never by raw path.
-	var handles []*dirhandle.Handle
-	defer func() {
-		for _, h := range handles {
-			h.Close()
+// scanFlatTool is the empty-files or temporary-files scan: a filter over the
+// walk into a bounded, path-ordered list.
+func (s *Server) scanFlatTool(req ScanReq, roots []string, cancel chan struct{}, res *toolResult, handles *[]*dirhandle.Handle) scanOutcome {
+	keep := func(f *fEnt) bool { return f.size == 0 }
+	if req.Tool == "temp_files" {
+		keep = func(f *fEnt) bool { return isTempName(f.name) }
+	}
+	top := newBoundedTop(flatFileCap, func(a, b *fEnt) bool { return a.path < b.path })
+	walkErrs, hs, _ := s.walkStream(roots, req.Recurse, false, cancel, func(_ int, f fEnt) {
+		if !f.isDir && keep(&f) {
+			top.add(f)
 		}
-	}()
+	}, nil)
+	*handles = hs
+	res.Errors = append(res.Errors, walkErrs...)
+	if cancelled(cancel) {
+		return scanCancelled
+	}
+	ents, trunc := top.final()
+	res.Files = s.fileEnts(ents)
+	res.Truncated = trunc
+	return scanFinished
+}
 
-	switch req.Tool {
-	case "duplicates":
-		corrRes = &toolResult{Tool: "corrupted_files", Roots: res.Roots}
-		// Pass 1: stream the walk into a compact spill file plus a bounded
-		// candidate-key counter — nothing per-file stays in RAM.
-		sp, err := newSpill(s.stateDir())
-		if err != nil {
-			res.Errors = append(res.Errors, "scan aborted — cannot create the scan spill file: "+err.Error())
-			completed = true
+// scanEmptyFoldersTool is the empty-folders scan. The walk is consumed as it
+// arrives: a stack of open directories, one frame per level, decides
+// topmost-emptiness on the way back up, and nothing proportional to the
+// directory count is ever held. Candidates are then confirmed through File
+// Station's own listing.
+func (s *Server) scanEmptyFoldersTool(req ScanReq, roots []string, sess *fsSession, cancel chan struct{}, res *toolResult, handles *[]*dirhandle.Handle) scanOutcome {
+	ef := newEmptyFolderScan()
+	walkErrs, hs, _ := s.walkStream(roots, req.Recurse, true, cancel, ef.visit, ef.noteUnreadable)
+	*handles = hs
+	res.Errors = append(res.Errors, walkErrs...)
+	if cancelled(cancel) {
+		return scanCancelled
+	}
+	var confirmErrs []string
+	res.Files, res.Truncated, confirmErrs = ef.finish(s, cancel, func(p string) (bool, error) {
+		return confirmEmpty(p, sess)
+	})
+	res.Errors = append(res.Errors, confirmErrs...)
+	return scanFinished
+}
+
+// scanDuplicatesTool is the duplicates scan, and the conflicting-files pass
+// that rides on its walk. It fills res and corrRes; the pinned root handles go
+// to handles the moment the walk returns, so the caller's deferred close
+// covers every later step.
+func (s *Server) scanDuplicatesTool(req ScanReq, roots []string, sess *fsSession, cancel chan struct{}, resumeGen uint32, res, corrRes *toolResult, handles *[]*dirhandle.Handle) scanOutcome {
+	// Pass 1: stream the walk into a compact spill file plus a bounded
+	// candidate-key counter — nothing per-file stays in RAM.
+	sp, err := newSpill(s.stateDir())
+	if err != nil {
+		res.Errors = append(res.Errors, "scan aborted — cannot create the scan spill file: "+err.Error())
+		return scanAborted
+	}
+	defer sp.close()
+	// Two candidate keys are counted over the one walk: the duplicates key,
+	// which folds in whatever match criteria were requested, and the
+	// corrupted-files key, which is size + modified time and nothing else.
+	// They share the counter's fixed memory budget rather than doubling it.
+	counter := newKeyCounterShare(1)
+	corrCounter := newKeyCounterShare(1)
+	var spillErr error
+	walkErrs, hs, rootOf := s.walkStream(roots, req.Recurse, false, cancel, func(idx int, f fEnt) {
+		if f.isDir || f.size == 0 {
 			return
 		}
-		defer sp.close()
-		// Two candidate keys are counted over the one walk: the duplicates key,
-		// which folds in whatever match criteria were requested, and the
-		// corrupted-files key, which is size + modified time and nothing else.
-		// They share the counter's fixed memory budget rather than doubling it.
-		counter := newKeyCounterShare(1)
-		corrCounter := newKeyCounterShare(1)
-		var spillErr error
-		var walkErrs []string
-		var rootOf []string
-		walkErrs, handles, rootOf = s.walkStream(safeRoots, req.Recurse, false, cancel, func(idx int, f fEnt) {
-			if f.isDir || f.size == 0 {
-				return
-			}
-			counter.add(candHash(&f, req.Match))
-			corrCounter.add(candHash(&f, corruptMatch))
-			if spillErr == nil {
-				spillErr = sp.add(idx, &f)
-			}
-		}, nil)
-		res.Errors = append(res.Errors, walkErrs...)
-		if cancelled(cancel) {
-			return
+		counter.add(candHash(&f, req.Match))
+		corrCounter.add(candHash(&f, corruptMatch))
+		if spillErr == nil {
+			spillErr = sp.add(idx, &f)
 		}
-		if spillErr != nil {
-			res.Errors = append(res.Errors, "scan aborted — cannot write the scan spill file (disk full?): "+spillErr.Error())
-			completed = true
-			return
+	}, nil)
+	*handles = hs
+	res.Errors = append(res.Errors, walkErrs...)
+	if cancelled(cancel) {
+		return scanCancelled
+	}
+	if spillErr != nil {
+		res.Errors = append(res.Errors, "scan aborted — cannot write the scan spill file (disk full?): "+spillErr.Error())
+		return scanAborted
+	}
+	// Pass 2: distil the collision candidates into a second, much smaller
+	// spill — still one record at a time, so the candidate population never
+	// has to fit in RAM to be identified.
+	cs, nCand, ccs, nCorr, ok := s.distilCandidates(req, sp, counter, corrCounter, res, corrRes)
+	if !ok {
+		return scanAborted
+	}
+	defer cs.close()
+	if ccs != nil {
+		defer ccs.close()
+	}
+	// The persistent hash store lives in RAM only for the scan's duration. It
+	// never lets this scan skip a read — every candidate is hashed in full
+	// every scan — but it carries earlier scans' hashes, which is what lets
+	// record() catch content that moved under an unchanged size and mtime:
+	// bit rot. The one exception is an explicit RESUME of an interrupted
+	// scan: continuing the dead run's generation makes its own reads servable
+	// again, because resuming is that same scan carrying on, not a new scan
+	// borrowing old answers.
+	var cache *hashCache
+	if resumeGen != 0 {
+		cache = loadHashCacheResume(s.stateDir(), resumeGen)
+	} else {
+		cache = loadHashCache(s.stateDir())
+	}
+	// Rewrite the marker with the live generation: if THIS run dies, a
+	// resume of it must continue this generation — and without the rewrite a
+	// resume could only ever degenerate to a full re-read.
+	s.writeMarker(&req, cache.gen)
+	acc := newGroupTop(dupFileCap)
+	if outcome := s.hashCandidateWindows(req, cs, nCand, sess, cache, hs, rootOf, cancel, acc, res); outcome != scanFinished {
+		return outcome
+	}
+	res.Groups, res.Truncated = acc.final(s, dupFileCap, cancel)
+	m := req.Match
+	res.Match = &m
+	// The corrupted-files pass, over its own candidates. It runs after the
+	// duplicates result is complete so a failure here can never cost that
+	// result, and it shares the hash cache — most of the content it needs
+	// has just been read.
+	if corrRes != nil && ccs != nil {
+		cacc := newCorruptTop(corruptFileCap)
+		if !s.scanCorrupted(ccs, nCorr, hs, rootOf, cache, cancel, cacc, corrRes, 78, 96) {
+			return scanCancelled
 		}
-		// Pass 2: distil the collision candidates into a second, much
-		// smaller spill — still one record at a time, so the candidate
-		// population never has to fit in RAM to be identified.
-		s.setProgress(15, "Indexing duplicate candidates…")
-		sp.onEach = func(done, total int) {
-			s.setProgress(15+float64(done)/float64(max(total, 1)),
-				"Indexing duplicate candidates… ("+humanCount(done)+" of "+humanCount(total)+")")
+		corrRes.Groups, corrRes.Truncated = cacc.final(s, corruptFileCap, cancel)
+		if err := cache.save(); err != nil {
+			log.Printf("hash cache save failed: %v", err)
 		}
-		cs, err := newSpill(s.stateDir())
-		if err != nil {
-			res.Errors = append(res.Errors, "scan aborted — cannot create the candidate spill file: "+err.Error())
-			completed = true
-			return
+	}
+	return scanFinished
+}
+
+// distilCandidates streams the walk log twice — once for the duplicates
+// candidates under the requested criteria, once for the conflicting-files
+// candidates under size and modified time alone — and then releases the log.
+// The duplicates spill is required: a failure there records the error on res
+// and reports !ok. The conflicting-files sweep is not: its key is (size,
+// mtime) whatever req.Match says, so the category means the same thing however
+// the duplicates criteria are set, and a failure building it is recorded on
+// corrRes and reported as a nil ccs — the duplicates result is complete and
+// worth keeping on its own.
+func (s *Server) distilCandidates(req ScanReq, sp *spill, counter, corrCounter *keyCounter, res, corrRes *toolResult) (cs *spill, nCand int, ccs *spill, nCorr int, ok bool) {
+	s.setProgress(15, "Indexing duplicate candidates…")
+	sp.onEach = func(done, total int) {
+		s.setProgress(15+float64(done)/float64(max(total, 1)),
+			"Indexing duplicate candidates… ("+humanCount(done)+" of "+humanCount(total)+")")
+	}
+	cs, err := newSpill(s.stateDir())
+	if err != nil {
+		res.Errors = append(res.Errors, "scan aborted — cannot create the candidate spill file: "+err.Error())
+		return nil, 0, nil, 0, false
+	}
+	nCand, err = sp.distil(counter, req.Match, cs)
+	counter.release()
+	if err != nil {
+		cs.close()
+		res.Errors = append(res.Errors, "scan aborted — cannot read the scan spill file: "+err.Error())
+		return nil, 0, nil, 0, false
+	}
+	// The label follows the work: without this the second sweep replays the
+	// first one's progress band saying "Indexing duplicate candidates…",
+	// which is a different thing entirely.
+	sp.onEach = func(done, total int) {
+		s.setProgress(16, "Indexing files to check for corruption… ("+humanCount(done)+" of "+humanCount(total)+")")
+	}
+	var cerr error
+	if ccs, cerr = newSpill(s.stateDir()); cerr != nil {
+		cerr = fmt.Errorf("the candidate spill file could not be created: %w", cerr)
+	} else if nCorr, cerr = sp.distil(corrCounter, corruptMatch, ccs); cerr != nil {
+		cerr = fmt.Errorf("the scan spill file could not be re-read: %w", cerr)
+	}
+	if cerr != nil {
+		// corrRes is kept, not discarded: it is stored under the same
+		// completed gate as the duplicates result, so dropping it here would
+		// leave the PREVIOUS scan's corrupted listing on screen beside fresh
+		// duplicates — and the error explaining why would have gone into the
+		// struct being thrown away.
+		corrRes.Errors = append(corrRes.Errors, "could not check for corrupted copies — "+cerr.Error())
+		if ccs != nil {
+			ccs.close()
 		}
-		defer cs.close()
-		nCand, err := sp.distil(counter, req.Match, cs)
-		counter.release()
-		if err != nil {
-			sp.close()
-			res.Errors = append(res.Errors, "scan aborted — cannot read the scan spill file: "+err.Error())
-			completed = true
-			return
+		ccs, nCorr = nil, 0
+	}
+	sp.onEach = nil
+	corrCounter.release()
+	sp.close() // the walk log's blocks come back now, not at scan end
+	return cs, nCand, ccs, nCorr, true
+}
+
+// hashCandidateWindows is pass 3: hash and group the candidates one PARTITION
+// of the key space at a time, folding every group into acc. Every file sharing
+// a candidate key shares its partition, so a duplicate group is never split
+// across windows — while peak memory follows the window, not the number of
+// duplicates on the volume. The price is one re-read of the compact candidate
+// spill per partition, which is nothing next to reading the files those
+// records point at. Keys too big for one window get their own
+// prefix-partitioned pass (resolveSkewedKey), so none of their members go
+// unexamined.
+func (s *Server) hashCandidateWindows(req ScanReq, cs *spill, nCand int, sess *fsSession, cache *hashCache, handles []*dirhandle.Handle, rootOf []string, cancel chan struct{}, acc *groupTop, res *toolResult) scanOutcome {
+	parts := 1
+	if nCand > dupWindowFiles {
+		parts = (nCand + dupWindowFiles - 1) / dupWindowFiles
+	}
+	missingCreated := 0
+	// Progress budget for the rest of this scan: the duplicates windows own
+	// 16→78, the corrupted-files pass 78→96, and the finalize created-date
+	// fetch 96→100.
+	const dupLo, dupSpan = 16.0, 62.0
+	for p := 0; p < parts; p++ {
+		lo0 := dupLo + dupSpan*float64(p)/float64(parts)
+		cs.onEach = func(done, total int) {
+			s.setProgress(lo0, "Indexing duplicate candidates… ("+humanCount(done)+" of "+humanCount(total)+")")
 		}
-		// The corrupted-files candidates come out of the SAME walk log, in a
-		// second sweep taken before it is released. Its key is (size, mtime)
-		// whatever req.Match says, so the category means the same thing however
-		// the duplicates criteria are set. A failure here is never fatal: the
-		// duplicates result is complete and worth keeping on its own.
-		var ccs *spill
-		nCorr := 0
-		{
-			// The label follows the work: without this the second sweep replays
-			// the first one's progress band saying "Indexing duplicate
-			// candidates…", which is a different thing entirely.
-			sp.onEach = func(done, total int) {
-				s.setProgress(16, "Indexing files to check for corruption… ("+humanCount(done)+" of "+humanCount(total)+")")
-			}
-			var cerr error
-			if ccs, cerr = newSpill(s.stateDir()); cerr != nil {
-				cerr = fmt.Errorf("the candidate spill file could not be created: %w", cerr)
-			} else if nCorr, cerr = sp.distil(corrCounter, corruptMatch, ccs); cerr != nil {
-				cerr = fmt.Errorf("the scan spill file could not be re-read: %w", cerr)
-			}
-			if ccs != nil {
-				defer ccs.close()
-			}
-			if cerr != nil {
-				// corrRes is kept, not discarded: it is stored under the same
-				// completed gate as the duplicates result, so dropping it here
-				// would leave the PREVIOUS scan's corrupted listing on screen
-				// beside fresh duplicates — and the error explaining why would
-				// have gone into the struct being thrown away.
-				corrRes.Errors = append(corrRes.Errors,
-					"could not check for corrupted copies — "+cerr.Error())
-				ccs = nil
-			}
-			sp.onEach = nil
+		cands, over, skipped, werr := cs.window(p, parts, req.Match, handles, rootOf, dupKeyFileCap, dupWindowMax)
+		cs.onEach = nil
+		acc.noteSkipped(skipped)
+		if werr != nil {
+			res.Errors = append(res.Errors, "scan aborted — cannot read the candidate spill file: "+werr.Error())
+			return scanAborted
 		}
-		corrCounter.release()
-		sp.close() // the walk log's blocks come back now, not at scan end
-		// Pass 3: hash and group the candidates one PARTITION of the key
-		// space at a time. Every file sharing a candidate key shares its
-		// partition, so a duplicate group is never split across windows —
-		// while peak memory follows the window, not the number of duplicates
-		// on the volume. The price is one re-read of the compact candidate
-		// spill per partition, which is nothing next to reading the files
-		// those records point at.
-		parts := 1
-		if nCand > dupWindowFiles {
-			parts = (nCand + dupWindowFiles - 1) / dupWindowFiles
+		// Matching by created date must compare the same values the UI shows:
+		// enrich this window's candidates (the only files whose created time
+		// can influence grouping) from File Station.
+		if sess != nil && req.Match.Created {
+			missingCreated += s.enrichCreated(sess, cands, cancel, p, parts)
 		}
-		// The persistent hash store lives in RAM only for the scan's
-		// duration. It never lets this scan skip a read — every candidate is
-		// hashed in full every scan — but it carries earlier scans' hashes,
-		// which is what lets record() catch content that moved under an
-		// unchanged size and mtime: bit rot. The one exception is an
-		// explicit RESUME of an interrupted scan: continuing the dead run's
-		// generation makes its own reads servable again, because resuming
-		// is that same scan carrying on, not a new scan borrowing old
-		// answers.
-		var cache *hashCache
-		if resumeGen != 0 {
-			cache = loadHashCacheResume(s.stateDir(), resumeGen)
-		} else {
-			cache = loadHashCache(s.stateDir())
+		lo := dupLo + dupSpan*float64(p)/float64(parts)
+		hi := dupLo + dupSpan*float64(p+1)/float64(parts)
+		span := hi - lo
+		if len(over) > 0 {
+			span = (hi - lo) / float64(len(over)+1)
 		}
-		// Rewrite the marker with the live generation: if THIS run dies, a
-		// resume of it must continue this generation — and without the
-		// rewrite a resume could only ever degenerate to a full re-read.
-		s.writeMarker(&req, cache.gen)
-		acc := newGroupTop(dupFileCap)
-		missingCreated := 0
-		// Progress budget for the rest of this scan: the duplicates windows
-		// own 16→78, the corrupted-files pass 78→96, and the finalize
-		// created-date fetch 96→100.
-		const dupLo, dupSpan = 16.0, 62.0
-		for p := 0; p < parts; p++ {
-			lo0 := dupLo + dupSpan*float64(p)/float64(parts)
-			cs.onEach = func(done, total int) {
-				s.setProgress(lo0, "Indexing duplicate candidates… ("+humanCount(done)+" of "+humanCount(total)+")")
-			}
-			cands, over, skipped, werr := cs.window(p, parts, req.Match, handles, rootOf, dupKeyFileCap, dupWindowMax)
-			cs.onEach = nil
-			acc.noteSkipped(skipped)
-			if werr != nil {
-				res.Errors = append(res.Errors, "scan aborted — cannot read the candidate spill file: "+werr.Error())
-				completed = true
-				return
-			}
-			// Matching by created date must compare the same values the UI
-			// shows: enrich this window's candidates (the only files whose
-			// created time can influence grouping) from File Station.
-			if sess != nil && req.Match.Created {
-				missingCreated += s.enrichCreated(sess, cands, cancel, p, parts)
-			}
-			lo := dupLo + dupSpan*float64(p)/float64(parts)
-			hi := dupLo + dupSpan*float64(p+1)/float64(parts)
-			span := hi - lo
-			if len(over) > 0 {
-				span = (hi - lo) / float64(len(over)+1)
-			}
-			if !s.dupWindow(cands, req.Match, cache, cancel, acc, lo, lo+span) {
-				return // cancelled mid-window
-			}
-			cands = nil
-			// Keys too big for one window get their own prefix-partitioned
-			// pass, so none of their members go unexamined.
-			for i, k := range over {
-				klo := lo + span*float64(i+1)
-				serr := s.resolveSkewedKey(cs, k, req, sess, cache, handles, rootOf, cancel, acc,
-					klo, klo+span, &missingCreated)
-				if serr != nil {
-					res.Errors = append(res.Errors, "scan aborted — "+serr.Error())
-					completed = true
-					return
-				}
-				if cancelled(cancel) {
-					return
-				}
-			}
-			// Saving per window bounds what a crash can lose of the NEXT
-			// scan's rot-detection baseline — the hashes themselves are
-			// re-read every scan regardless. saveMid, not save: the final
-			// trim must not run while the corrupted-files pass still needs
-			// the in-RAM history.
-			if err := cache.saveMid(); err != nil {
-				log.Printf("hash cache save failed: %v", err)
-			}
+		if !s.dupWindow(cands, req.Match, cache, cancel, acc, lo, lo+span) {
+			return scanCancelled // cancelled mid-window
 		}
-		// Candidates File Station could not answer for never group under
-		// created-date matching (candKey gives them a per-path sentinel)
-		// — tell the user rather than silently thinning the results.
-		if missingCreated > 0 && !cancelled(cancel) {
-			res.Errors = append(res.Errors, fmt.Sprintf(
-				"%d files had no File Station creation time and were excluded from created-date matching", missingCreated))
-		}
-		res.Groups, res.Truncated = acc.final(s, dupFileCap, cancel)
-		m := req.Match
-		res.Match = &m
-		// The corrupted-files pass, over its own candidates. It runs after the
-		// duplicates result is complete so a failure here can never cost that
-		// result, and it shares the hash cache — most of the content it needs
-		// has just been read.
-		if corrRes != nil && ccs != nil {
-			cacc := newCorruptTop(corruptFileCap)
-			if !s.scanCorrupted(ccs, nCorr, handles, rootOf, cache, cancel, cacc, corrRes, 78, 96) {
-				return // cancelled mid-pass
+		cands = nil
+		for i, k := range over {
+			klo := lo + span*float64(i+1)
+			serr := s.resolveSkewedKey(cs, k, req, sess, cache, handles, rootOf, cancel, acc,
+				klo, klo+span, &missingCreated)
+			if serr != nil {
+				res.Errors = append(res.Errors, "scan aborted — "+serr.Error())
+				return scanAborted
 			}
-			corrRes.Groups, corrRes.Truncated = cacc.final(s, corruptFileCap, cancel)
-			if err := cache.save(); err != nil {
-				log.Printf("hash cache save failed: %v", err)
+			if cancelled(cancel) {
+				return scanCancelled
 			}
 		}
-	case "empty_files", "temp_files":
-		keep := func(f *fEnt) bool { return f.size == 0 }
-		if req.Tool == "temp_files" {
-			keep = func(f *fEnt) bool { return isTempName(f.name) }
+		// Saving per window bounds what a crash can lose of the NEXT scan's
+		// rot-detection baseline — the hashes themselves are re-read every
+		// scan regardless. saveMid, not save: the final trim must not run
+		// while the corrupted-files pass still needs the in-RAM history.
+		if err := cache.saveMid(); err != nil {
+			log.Printf("hash cache save failed: %v", err)
 		}
-		top := newBoundedTop(flatFileCap, func(a, b *fEnt) bool { return a.path < b.path })
-		var walkErrs []string
-		walkErrs, handles, _ = s.walkStream(safeRoots, req.Recurse, false, cancel, func(_ int, f fEnt) {
-			if !f.isDir && keep(&f) {
-				top.add(f)
-			}
-		}, nil)
-		res.Errors = append(res.Errors, walkErrs...)
-		if cancelled(cancel) {
-			return
-		}
-		ents, trunc := top.final()
-		res.Files = s.fileEnts(ents)
-		res.Truncated = trunc
-	case "empty_folders":
-		// The walk is consumed as it arrives: a stack of open directories,
-		// one frame per level, decides topmost-emptiness on the way back up.
-		// Nothing proportional to the directory count is ever held.
-		ef := newEmptyFolderScan()
-		var walkErrs []string
-		walkErrs, handles, _ = s.walkStream(safeRoots, req.Recurse, true, cancel,
-			ef.visit, ef.noteUnreadable)
-		res.Errors = append(res.Errors, walkErrs...)
-		if cancelled(cancel) {
-			return
-		}
-		var confirmErrs []string
-		res.Files, res.Truncated, confirmErrs = ef.finish(s, cancel, func(p string) (bool, error) {
-			return confirmEmpty(p, sess)
-		})
-		res.Errors = append(res.Errors, confirmErrs...)
-	default:
-		// This switch is the only thing that decides what a scan DOES, and it
-		// is reached with any id validTools accepts. Without this arm, adding a
-		// tool id and forgetting its case would run nothing, fall through to
-		// completed = true below, and store an EMPTY result over whatever the
-		// tool had — silent data loss caused by registration alone. Refusing
-		// leaves the existing result untouched (completed stays false).
-		log.Printf("scan requested for tool %q, which has no scan implementation", req.Tool)
+	}
+	// Candidates File Station could not answer for never group under
+	// created-date matching (candKey gives them a per-path sentinel) — tell
+	// the user rather than silently thinning the results.
+	if missingCreated > 0 && !cancelled(cancel) {
+		res.Errors = append(res.Errors, fmt.Sprintf(
+			"%d files had no File Station creation time and were excluded from created-date matching", missingCreated))
+	}
+	return scanFinished
+}
+
+// fetchCreatedDates fills the Created column of a finished scan from File
+// Station. Hashing tops out at 96%; this fills 96–100 so a large result set
+// never looks stuck on a silent "Finalizing…". The corrupted-files rows carry
+// the same column, filled from the same place, and go FIRST, holding the bar
+// at 96: their sets are a small fraction of the duplicates result, and running
+// them afterwards would let the bar reach 100 and then fall back to 96, which
+// reads as a scan that restarted itself.
+func (s *Server) fetchCreatedDates(sess *fsSession, res, corrRes *toolResult, cancel chan struct{}) {
+	if sess == nil {
 		return
 	}
-	if cancelled(cancel) {
-		return // cancelled mid-scan: partial results are dropped
-	}
-	completed = true
-	// Hashing tops out at 96%; the finalize crtime fetch fills 96–100 so a
-	// large result set never looks stuck on a silent "Finalizing…".
-	if sess != nil {
-		// The corrupted-files rows carry the same Created column, filled from
-		// the same place. It goes FIRST, holding the bar at 96: its sets are a
-		// small fraction of the duplicates result, and running it afterwards
-		// let the bar reach 100 and then fall back to 96, which reads as a
-		// scan that restarted itself.
-		if corrRes != nil {
-			applyCrtimes(sess, corrRes, cancel, func(done, total int) {
-				s.setProgress(96, "Fetching creation times… ("+humanCount(done)+" of "+humanCount(total)+")")
-			})
-		}
-		applyCrtimes(sess, res, cancel, func(done, total int) {
-			s.setProgress(96+4*float64(done)/float64(max(total, 1)),
-				"Fetching creation times… ("+humanCount(done)+" of "+humanCount(total)+")")
+	if corrRes != nil {
+		applyCrtimes(sess, corrRes, cancel, func(done, total int) {
+			s.setProgress(96, "Fetching creation times… ("+humanCount(done)+" of "+humanCount(total)+")")
 		})
 	}
-	s.setProgress(100, "Finalizing results…")
+	applyCrtimes(sess, res, cancel, func(done, total int) {
+		s.setProgress(96+4*float64(done)/float64(max(total, 1)),
+			"Fetching creation times… ("+humanCount(done)+" of "+humanCount(total)+")")
+	})
 }
 
 // walkStream enumerates entries under each root, handing every one to visit
