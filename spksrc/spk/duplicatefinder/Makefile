@@ -13,13 +13,12 @@ UNSUPPORTED_ARCHS = $(PPC_ARCHS) $(ARMv5_ARCHS)
 # authenticate.cgi, so DSM 6 toolchains are not a target.
 REQUIRED_MIN_DSM = 7.0
 
-MAINTAINER = ashwinrajani
+MAINTAINER = A5HRAJ
 DISPLAY_NAME = Duplicate Finder
 DESCRIPTION = Find and clean up duplicate files, empty folders, empty files and temporary junk on your DiskStation, and spot conflicting files: copies that share a size and modified time but no longer hold the same content. Duplicates are matched by BLAKE3 content hash; selected files are moved (never deleted) to a folder you choose.
 CHANGELOG = "Initial package release."
 
-# TODO(before submission): HOMEPAGE needs the public repository to exist.
-HOMEPAGE = https://github.com/ashwinrajani/duplicatefinder
+HOMEPAGE = https://github.com/A5HRAJ/duplicatefinder
 LICENSE  = MIT
 
 STARTABLE = yes

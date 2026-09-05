@@ -60,11 +60,10 @@ scan state, does not carry over).
 
 ## Placeholders to fill before submitting
 
-- `MAINTAINER` must be a real GitHub user (spksrc resolves it against the
-  GitHub API); `ashwinrajani` is a guess.
-- `HOMEPAGE`, `PKG_DIST_SITE` and the tag archive name need the public
-  repository. Push it, tag `v1.0.0`, then run `make digests` in
-  `cross/duplicatefinder` to replace the zeroed `digests` file.
+- `MAINTAINER`, `HOMEPAGE` and `PKG_DIST_SITE` name the public repository,
+  https://github.com/A5HRAJ/duplicatefinder. Tag `v1.0.0` there, then run
+  `make digests` in `cross/duplicatefinder` to replace the zeroed `digests`
+  file.
 - `LICENSE = MIT` matches the repository's LICENSE file (added 2026-09-04),
   which satisfies SynoCommunity's open-source requirement.
 - The daemon's `/api/info` will report `1.0.0`, not `1.0.0-1`: the cross

@@ -1,10 +1,10 @@
 PKG_NAME = duplicatefinder
 PKG_VERS = 1.0.0
 PKG_EXT = tar.gz
-# TODO(before submission): point at the tagged release archive of the public
-# repository and regenerate `digests` (make digests) from that exact file.
+# TODO(before submission): tag v$(PKG_VERS) in the repository and regenerate
+# `digests` (make digests) from the archive GitHub serves for it.
 PKG_DIST_NAME = v$(PKG_VERS).$(PKG_EXT)
-PKG_DIST_SITE = https://github.com/ashwinrajani/duplicatefinder/archive/refs/tags
+PKG_DIST_SITE = https://github.com/A5HRAJ/duplicatefinder/archive/refs/tags
 PKG_DIST_FILE = $(PKG_NAME)-$(PKG_VERS).$(PKG_EXT)
 PKG_DIR = $(PKG_NAME)-$(PKG_VERS)
 
@@ -15,7 +15,7 @@ BUILD_DEPENDS = native/go
 # tools/make_icons.py needs only the Python standard library; the spksrc
 # build image ships python3 (and jq), so no native/python3xx dependency.
 
-HOMEPAGE = https://github.com/ashwinrajani/duplicatefinder
+HOMEPAGE = https://github.com/A5HRAJ/duplicatefinder
 COMMENT  = Find duplicate, conflicting, empty and junk files on a Synology NAS from a native DSM desktop app.
 LICENSE  = MIT
 
