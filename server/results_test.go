@@ -1,7 +1,7 @@
 package main
 
-// Tests for the paged results delivery (scale phase 1): display-time match
-// refinement, group-level search, flat sorting, group-boundary paging, the
+// Tests for the paged results delivery: display-time match refinement,
+// group-level search, flat sorting, group-boundary paging, the
 // stored-results caps, and the aggregate totals the UI's summary and badges
 // rely on.
 
@@ -314,7 +314,7 @@ func TestCapDuplicateGroups(t *testing.T) {
 }
 
 // boundedTop must reproduce sort-then-cap exactly: same kept set, same
-// order, same truncation report — it replaced that code path (phase 3).
+// order, same truncation report — it stands in for that code path.
 func TestBoundedTopMatchesSortAndCap(t *testing.T) {
 	bigOrder := func(a, b *fEnt) bool {
 		if a.size != b.size {
@@ -509,8 +509,8 @@ func TestLegacyGetDumpUnchanged(t *testing.T) {
 }
 
 // A duplicates page counts GROUPS, and a group is never split across pages —
-// so without a row budget one enormous group is one enormous page. On the
-// DS916+ a 25,600-file group came back as 6.7 MB of JSON and locked the
+// so without a row budget one enormous group is one enormous page. On a
+// test NAS a 25,600-file group came back as 6.7 MB of JSON and locked the
 // browser for half a minute. Every requested group must still appear (the
 // pager's arithmetic is in groups), but their rows are capped and any group
 // that was shortened reports its true size.

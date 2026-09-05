@@ -306,7 +306,7 @@ func TestFetchCrtimesShares(t *testing.T) {
 	}
 }
 
-// Creation-time batches fan out to a small worker pool (scale phase 2):
+// Creation-time batches fan out to a small worker pool:
 // verify the batches genuinely overlap, results stay complete across many
 // batches, progress is monotonic and reaches the end, and a cancelled scan
 // stops the fetch.
@@ -440,7 +440,7 @@ func TestExportCSVContent(t *testing.T) {
 	}
 	// The read-only tool keeps the id corrupted_files — persisted state and the
 	// readOnlyTools/groupedTools maps are keyed on it — but everything the user
-	// reads says "conflicting" since 0123, and the export filename is one of
+	// reads says "conflicting", and the export filename is one of
 	// those things. The id and the name are deliberately allowed to differ here;
 	// this pins the name so a later reader does not "fix" it back to the id.
 	name, _, err = exportCSV("corrupted_files", &toolResult{Tool: "corrupted_files"})
@@ -643,8 +643,8 @@ func TestAllocBatchFolderReportsGenuineFailureWithoutSpinning(t *testing.T) {
 // only by list_share: internal shares happen to agree ("Backups" at
 // /volume1/Backups) but external ones do not ("usbshare1" at
 // /volumeUSB1/usbshare). Deriving either side from the other by string
-// surgery is the bug that made USB destinations unusable — this pins the
-// mapping to the table.
+// surgery makes USB destinations unusable — this pins the mapping to the
+// table.
 func TestShareSpacePathUsesShareNamesNotDirectories(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.ParseForm()

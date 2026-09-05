@@ -32,19 +32,18 @@ import (
 	"time"
 )
 
-// appVersion is overwritten at build time with the package's full version
-// (build.sh's VERSION, e.g. "1.0.0-0104") via -ldflags -X. It is a var, not a
-// const, because -X cannot write a const — and it matters: a daemon that
-// cannot name its own build makes "which version is actually installed?"
-// answerable only through Package Center, which is exactly the question this
-// project has got wrong before. The bare fallback is what a plain `go build`
-// (dev runs, tests) produces.
+// appVersion is the package's full version, stamped at build time with
+// -ldflags -X (build.sh's VERSION). A var rather than a const because -X
+// cannot write a const. /api/info reports it, so the installed build can be
+// identified without going through Package Center. The bare fallback is what
+// a plain `go build` (dev runs, tests) produces.
 var appVersion = "1.0.0-dev"
 
 // defaultPort is the one port the daemon, the package's start script and the
-// CGI shim agree on. An environment override used to exist, but only the
-// daemon and the start script could see it — the CGI shim, exec'd by DSM's
-// web server, never did, so setting it produced a daemon nobody could reach.
+// CGI shim agree on. There is deliberately no environment override: the CGI
+// shim is exec'd by DSM's web server with an environment the package does not
+// control, so a port read from the environment by the daemon and the start
+// script would be one the shim could never learn.
 const defaultPort = 9807
 
 func main() {
@@ -204,8 +203,8 @@ type Server struct {
 // Scans and moves must not overlap in EITHER direction. A move mutates the
 // tree a scan is enumerating and hashing: relocated files fail their pinned
 // re-open and are silently dropped, so the scan under-reports, and a group
-// that falls below two members is discarded whole. The move side has been
-// guarded since 0095; this is the reverse direction, which was not.
+// that falls below two members is discarded whole. handleMove guards the
+// other direction through beginMove.
 func (s *Server) scanAdmissionLocked() string {
 	if s.job.Running {
 		return "a scan is already running"
@@ -250,7 +249,7 @@ type jobState struct {
 // moveState is how far the /api/move in flight has got. A move is one long
 // blocking request — File Station copies the bytes when the destination is on
 // another volume or an ext4 one, so a single large file can take minutes —
-// and until this existed the UI could only show an indeterminate spinner for
+// and this is what lets the UI show more than an indeterminate spinner for
 // the whole batch. It is written under mu (never moveMu), so /api/state can
 // report it while the move itself holds moveMu for the entire run.
 type moveState struct {
@@ -283,10 +282,10 @@ type RootMap struct {
 	Canon string `json:"canon"`
 }
 
-// scanEnd records how the most recent scan run ended, whatever the outcome —
-// lastTool names only the last scan that COMPLETED, so a poller watching a
-// run stop could not tell a cancel from a finish and replayed the previous
-// finish's announcements.
+// scanEnd records how the most recent scan run ended, whatever the outcome.
+// lastTool names only the last scan that COMPLETED, so on its own a poller
+// that sees a run stop cannot tell a cancel from a finish, and would replay
+// the previous finish's announcements after a Stop.
 type scanEnd struct {
 	Tool      string
 	Completed bool
@@ -496,8 +495,8 @@ func runDaemon(port int, varDir string) {
 	// Results persisted by an earlier run come back before serving starts —
 	// a day-long scan survives a package upgrade or NAS reboot. Loaded AFTER
 	// the bind: the load of a 100k-row state file can outlast the start
-	// script's patience, and a bind that then failed left Package Center
-	// showing a running package with no daemon behind it. Connections
+	// script's patience, and a bind that failed afterwards would leave Package
+	// Center showing a running package with no daemon behind it. Connections
 	// arriving meanwhile simply wait in the listen backlog. A scan marker
 	// left behind means a scan died with the daemon; /api/state reports it
 	// so the UI can offer a resume.
@@ -606,8 +605,8 @@ type volInfo struct {
 // their name as the directory (/volume1/Backups ↔ "Backups"), but external
 // ones do not (share "usbshare1" lives at /volumeUSB1/usbshare). Every
 // mapping between share space and volume space must go through a table of
-// these pairs — building either side by concatenation is the bug that made
-// USB destinations unusable.
+// these pairs; building either side by concatenation makes USB destinations
+// unusable.
 type shareRef struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
@@ -681,8 +680,8 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	if s.move.Running {
 		out["move"] = s.move
 	}
-	// A scan the previous daemon run never finished: the UI offers a rescan
-	// (a complete re-read — a dead scan's hashes are never reused).
+	// A scan the previous daemon run never finished: the UI offers to resume
+	// it or start over (see scanMarker).
 	if s.interrupted != nil {
 		out["interrupted"] = s.interrupted
 	}
@@ -741,8 +740,7 @@ var readOnlyTools = map[string]bool{
 }
 
 // groupedTools produce Groups rather than a flat Files list. Paging, totals,
-// state counts and prune all branch on this rather than on a literal
-// "duplicates", which used to be the only one.
+// state counts and prune all branch on this rather than on a literal tool id.
 var groupedTools = map[string]bool{
 	"duplicates":      true,
 	"corrupted_files": true,
@@ -826,8 +824,8 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	cancel := make(chan struct{})
 	s.job = jobState{Running: true, Tool: req.Tool, Label: "Initializing scan…", cancel: cancel}
 	// s.refDirs is NOT updated here. It describes the stored results, so it
-	// changes when results do — at completion, in runScan's defer. Publishing
-	// it at admission let a cancelled scan (of any tool) silently change
+	// changes when results do — at completion, in runScan's defer. Published
+	// at admission, a cancelled scan (of any tool) would silently change
 	// which files the OLD results' moves refuse.
 	// Resume is decided here, under mu, against the notice this scan is
 	// about to supersede: the request must MATCH the dead run's — same
@@ -930,8 +928,8 @@ func (s *Server) snapshotResult(tool string) *toolResult {
 	cp := *res
 	cp.Groups = snapshotGroupsLocked(res)
 	// make(...,0,n) rather than append to a nil slice: appending NOTHING to
-	// nil leaves nil, which marshals as `null`, so the legacy GET dump used
-	// to answer "files": null for any empty result — a raw caller reading
+	// nil leaves nil, which marshals as `null`, and the GET dump would then
+	// answer "files": null for any empty result — a raw caller reading
 	// .files.length crashes on it, and the paged POST beside it guarantees
 	// [] (see slicePage). An empty result set is a real, ordinary answer:
 	// every tool reports one before its first scan, and a move that prunes
@@ -983,9 +981,10 @@ type MoveReq struct {
 	// source is re-read and hashed before the move (and must still match the
 	// scan's recorded hash where one exists), and the destination is read
 	// back and hashed after it. The dialog sends it explicitly (checked by
-	// default); absent means false so a raw caller keeps the old behavior.
-	// Directories are moved without content verification — their move is a
-	// single rename and their contents are the junk the tools exist to shed.
+	// default); absent means false, so a caller that does not know the field
+	// gets an unverified move. Directories are moved without content
+	// verification — their move is a single rename and their contents are the
+	// junk the tools exist to shed.
 	Verify bool `json:"verify"`
 }
 
@@ -1307,8 +1306,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			// phantom keep-one survivor. It stays out of `moved` — the
 			// response's error entry is the truth about this entry. A parked
 			// DIRECTORY took its contents with it, so its rows beneath prune
-			// too; the branch used to skip that on the assumption that only
-			// files reach here.
+			// too.
 			var mbe movedButError
 			if errors.As(moveErr, &mbe) {
 				movedCanon = append(movedCanon, cp)
@@ -1713,8 +1711,7 @@ func (s *Server) pruneMoved(canonPaths, dirPaths []string, canon *dirResolver) {
 // vetDestination pins and vets a move or export destination and returns the
 // pinned handle (the caller closes it), its canonical and share-space paths
 // and the caller's session. One implementation for both handlers, so the
-// checks — and their wording — cannot drift apart: the two copies it
-// replaced already disagreed about what an unopenable destination was.
+// checks — and their wording — cannot drift apart.
 //
 // Containment is decided from the pinned object's canonical path, and the
 // File Station operation later targets that same canonical path — so
@@ -1804,12 +1801,11 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 // listVolumes returns the Synology volume roots. In dev builds devVolumeRoots
 // can override this (see dev.go); it returns nil in release builds.
 //
-// External devices are included deliberately (2026-08-02, maintainer's
-// directive): USB and eSATA volumes mount at /volumeUSB<n> and /volumeSATA<n>,
-// and moving unwanted files onto an external disk is a primary use of the
-// move flow. These globs are the security walls every vetted path must stay
-// inside, so widening them widens what scans may walk and moves may target —
-// which is exactly the intent.
+// External devices are included deliberately: USB and eSATA volumes mount at
+// /volumeUSB<n> and /volumeSATA<n>, and moving unwanted files onto an
+// external disk is a primary use of the move flow. These globs are the
+// security walls every vetted path must stay inside, so widening them widens
+// what scans may walk and moves may target — which is exactly the intent.
 func listVolumes() []string {
 	if roots := devVolumeRoots(); roots != nil {
 		return roots
@@ -1834,9 +1830,9 @@ func allowedPath(p string) bool {
 		return false
 	}
 	// Clean FIRST, then reject ".." as a path COMPONENT — never as a
-	// substring. The old substring test refused every legitimate name
+	// substring. A substring test would refuse every legitimate name
 	// containing an ellipsis or a double dot ("Wait... What.mp4",
-	// "Season 1..2"), so such a file could be listed by a scan and then
+	// "Season 1..2"): such a file would be listed by a scan and then
 	// refused at move time as "outside allowed volumes", and no folder
 	// named that way could be a destination or a scan root. Traversal is
 	// still impossible: Clean resolves interior ".." on an absolute path

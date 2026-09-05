@@ -1,16 +1,15 @@
 package main
 
-// On-disk result persistence (scale phase 3): a day-long scan must survive a
-// daemon restart (package upgrade, NAS reboot, crash). The daemon persists
-// its cached results — together with the reference dirs, the keep-one
-// survivors and the ID counter, so every move-safety invariant carries
-// across the restart — as gzipped JSON in the state dir, written atomically
-// after each scan and after each move's prune. A marker file records a scan
-// in flight; if the daemon comes back up with the marker still present, the
-// scan was interrupted and /api/state says so (the UI offers a rescan, which
-// re-reads every candidate in full — nothing a dead scan hashed is ever
-// trusted by the next one). Scans themselves are never auto-restarted — they
-// require the caller's DSM session.
+// On-disk result persistence: a day-long scan must survive a daemon restart
+// (package upgrade, NAS reboot, crash). The daemon persists its cached
+// results — together with the reference dirs, the keep-one survivors and the
+// ID counter, so every move-safety invariant carries across the restart — as
+// gzipped JSON in the state dir, written atomically after each scan and after
+// each move's prune. A marker file records a scan in flight; if the daemon
+// comes back up with the marker still present, the scan was interrupted and
+// /api/state says so, and the UI offers to resume it or start over (see
+// scanMarker). Scans themselves are never auto-restarted — they require the
+// caller's DSM session.
 
 import (
 	"compress/gzip"
@@ -296,7 +295,7 @@ func (s *Server) writeMarker(req *ScanReq, gen uint32) {
 		Dirs: normPaths(req.Dirs), RefDirs: normPaths(req.RefDirs),
 		Recurse: req.Recurse, Match: req.Match,
 		StartedAt: time.Now().Format(time.RFC3339)})
-	// Atomic like the state file: a crash mid-write used to leave an
+	// Atomic like the state file: a crash mid-write would otherwise leave an
 	// unparsable marker, which loadMarker reads as "no interruption".
 	err := writeAtomic(filepath.Join(dir, markerFile), 0o600, false, func(f *os.File) error {
 		_, err := f.Write(b)

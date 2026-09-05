@@ -164,8 +164,8 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 	// canonically: the streaming walk has no global seen-set, so a root
 	// that duplicates — or, when recursing, sits inside — another kept root
 	// would visit the same files twice under different display paths and
-	// fabricate phantom duplicate pairs (an aliased scope used to pair
-	// every file with itself).
+	// fabricate phantom duplicate pairs (an aliased scope would pair every
+	// file with itself).
 	type walkRoot struct{ raw, canon string }
 	var wroots []walkRoot
 	for _, r := range roots {
@@ -487,9 +487,9 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 }
 
 // walkStream enumerates entries under each root, handing every one to visit
-// instead of materializing the tree in memory (scale phase 3): what a scan
-// keeps is decided by its accumulator, so daemon memory no longer grows
-// with the volume. When recurse is false only the direct children of each
+// instead of materializing the tree in memory: what a scan keeps is decided
+// by its accumulator, so daemon memory does not grow with the volume. When
+// recurse is false only the direct children of each
 // root are visited; directories are visited only when withDirs is true
 // (empty-folder scan). The unreadable result lists paths whose contents
 // could not be read (permission denied etc.) — such directories have
@@ -520,8 +520,7 @@ func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan 
 	// whose contents cannot be read must never be called empty), and it takes
 	// it INTERLEAVED with the entries: its accumulator tracks where the walk
 	// currently is, so an unreadable path has to arrive in walk order rather
-	// than in a list afterwards. The list is gone with it — on a volume with
-	// many permission-denied paths it grew for nothing.
+	// than in a list afterwards.
 	noteUnreadable := func(p string) {
 		if unreadable != nil {
 			unreadable(p)
@@ -819,10 +818,10 @@ func (s *Server) resolveSkewedPrefix(sub *spill, keep func(*spillRec) bool, req 
 			}
 			// REPLACE, don't append: tagsIn applies the same partition
 			// predicate as tagWindow but no cap filter, so it already
-			// contains every tag `over` holds. Appending listed the
-			// over-cap tags twice and emitted their groups twice — the
-			// same duplicate group under two ids, double-counted
-			// reclaimable space, and a doubled truncation report.
+			// contains every tag `over` holds. Appending would list the
+			// over-cap tags twice and emit their groups twice — the same
+			// duplicate group under two ids, double-counted reclaimable
+			// space, and a doubled truncation report.
 			over = tags
 		}
 		if !s.runSkewWindow(win, req, sess, cache, cancel, acc, klo, klo+span, p, parts, missingCreated) {
@@ -855,8 +854,7 @@ func (s *Server) resolveSkewedPrefix(sub *spill, keep func(*spillRec) bool, req 
 // can never vouch for today's bytes), so what this buys is strictly
 // deduplication within the run: a file this rung reads in full is recorded,
 // and dupWindow's own lookup then hits it instead of reading the whole file
-// a second time. Before this the ladder read a skewed key's files at full
-// length twice, once to tag them and once to group them.
+// a second time.
 // skipNoter is whatever accumulator the current pass is filling. Both groupTop
 // (duplicates) and corruptTop (corrupted files) record the candidates a cap
 // meant were never examined, and hashSubSpill needs nothing else from either.
@@ -1048,7 +1046,7 @@ func (s *Server) dupWindow(files []fEnt, match MatchOpts, cache *hashCache, canc
 	// ladder and earlier windows share it); nothing from a previous scan is
 	// ever served, so every group reported below rests on bytes read during
 	// this scan — a rescan re-reads everything by design, because a stale
-	// hash is exactly where rot beyond the 64 KiB prefix used to hide.
+	// hash is exactly where rot beyond the 64 KiB prefix could hide.
 	var hmu sync.Mutex
 	byHash := map[string][]fEnt{}
 	// Every file in a content-hash bucket has the same content, so they share
@@ -1196,10 +1194,9 @@ type captureSlot struct {
 }
 
 // fillCaptured reads the capture date of every listed row, in parallel and
-// cancellably, with its own progress label. It used to happen inline, one
-// row after another on the scan goroutine, with no cancel check: up to 100k
-// re-opens that Stop could not interrupt, sitting under a label that still
-// said the hashes were being computed.
+// cancellably, with its own progress label. Done inline on the scan
+// goroutine it would be up to 100k re-opens that Stop could not interrupt,
+// under a label still saying the hashes were being computed.
 func (s *Server) fillCaptured(out []Group, slots []captureSlot, cancel chan struct{}) {
 	if len(slots) == 0 {
 		return
@@ -1326,8 +1323,8 @@ func contentPrefixUnchanged(cp, want string) bool {
 }
 
 // hashBufPool recycles hashFile's read buffer. Allocating (and zeroing) a
-// fresh megabyte per call cost as much as the warm 64 KiB prefix read it
-// wrapped, and put a GC cycle every hundred files under the hashing workers.
+// fresh megabyte per call would cost as much as the warm 64 KiB prefix read
+// it wraps, and put a GC cycle every hundred files under the hashing workers.
 var hashBufPool = sync.Pool{New: func() any { b := make([]byte, 1024*1024); return &b }}
 
 // hashFile hashes up to limit bytes of a file (-1 = whole file). open is
@@ -1426,20 +1423,19 @@ func confirmEmpty(p string, sess *fsSession) (bool, error) {
 // so a candidate may hold one — confirmation accepts @eaDir (Synology's
 // thumbnail cache, regenerated on demand) and rejects every other
 // directory: a folder whose only child is .git is a repository, not
-// clutter, and a folder holding just an empty folder reports neither (the
-// long-standing b/c rule — data-safe for a tool that must never cause
-// loss). Directories whose contents could not be read have unknown contents
+// clutter, and a folder holding just an empty folder reports neither —
+// data-safe for a tool that must never cause loss. Directories whose
+// contents could not be read have unknown contents
 // — e.g. a Hyper Backup .hbk vault the package user cannot open — so they
 // and their ancestors count as non-empty rather than being offered for
 // moving.
 //
-// The old form built maps of every directory, every file-holding directory
-// and every ancestor mark; on a volume with millions of directories that was
-// the last accumulator here that grew with the filesystem. This one keeps a
-// frame per OPEN directory — tree depth, not tree size — because fs.WalkDir
-// hands entries out depth-first: a directory's fate is decided when the walk
-// leaves it, and leaving is visible as the first entry that is no longer
-// underneath it.
+// Maps of every directory, every file-holding directory and every ancestor
+// mark would grow with the filesystem — millions of entries on a large
+// volume. This keeps a frame per OPEN directory instead — tree depth, not
+// tree size — because fs.WalkDir hands entries out depth-first: a
+// directory's fate is decided when the walk leaves it, and leaving is
+// visible as the first entry that is no longer underneath it.
 type emptyFolderScan struct {
 	stack   []efFrame
 	top     *boundedTop // topmost-empty candidates, first emptyFolderCap by path
@@ -1575,9 +1571,9 @@ func (e *emptyFolderScan) visit(rootIdx int, f fEnt) {
 		e.stack = append(e.stack, efFrame{path: f.path, size: f.size, mod: f.mod})
 		return
 	}
-	// A junk file does not make its folder non-empty (maintainer directive,
-	// 2026-08-10): a folder holding nothing but the Temporary Files tool's
-	// own junk — .DS_Store, Thumbs.db, desktop.ini, editor droppings — is as
+	// A junk file does not make its folder non-empty: a folder holding
+	// nothing but the Temporary Files tool's own junk — .DS_Store,
+	// Thumbs.db, desktop.ini, editor droppings — is as
 	// disposable as a bare one, and the junk simply rides along when the
 	// folder is moved. The definition is shared with that tool on purpose:
 	// one list decides what "useless" means everywhere.

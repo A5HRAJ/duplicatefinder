@@ -1,7 +1,7 @@
 package main
 
-// Junk-only folders count as empty (maintainer directive, 2026-08-10): a
-// folder holding nothing but the Temporary Files tool's own junk names — or
+// Junk-only folders count as empty: a folder holding nothing but the
+// Temporary Files tool's own junk names — or
 // Synology's regenerable @eaDir thumbnail cache — is as disposable as a bare
 // one. These tests pin the three halves of that: the walk-side candidacy
 // (visit must not let junk mark a folder non-empty), the File Station

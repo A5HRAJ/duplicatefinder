@@ -1,7 +1,7 @@
 package main
 
 // Rows File Station cannot address (fsCannotAddress), pinned against DSM 7.4
-// on the DS916+ (2026-08-10). The .DS_Store cases were measured directly (the
+// as measured on a DS916+. The .DS_Store cases were measured directly (the
 // file uploads, the scanner reads it, list omits it and getinfo answers 418).
 // The "._" cases were established indirectly — File Station answers 418 when
 // asked to CREATE such a name, by upload or by rename, so no probe file could

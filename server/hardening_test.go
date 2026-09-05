@@ -1,6 +1,6 @@
 package main
 
-// Tests pinning the 2026-09-04 review fixes: parser bounds on the 32-bit
+// Tests pinning the input-hardening properties: parser bounds on the 32-bit
 // build, the archive entry cap, canonical reference protection, spill
 // bounds, synced atomic writes, epoch identity and date plausibility.
 
@@ -36,9 +36,9 @@ func fileWith(t *testing.T, data []byte) *os.File {
 	return f
 }
 
-// An infe size just under 2^31 used to wrap `pos+size` negative on the
-// 32-bit build, pass the bound and panic in the slice; the guard is now a
-// subtraction from len(buf), which cannot wrap.
+// An infe size just under 2^31 wraps `pos+size` negative on the 32-bit
+// build, where an additive bound would pass and the slice would panic; the
+// guard is a subtraction from len(buf), which cannot wrap.
 func TestHeifChildSizeNearIntMaxIsRefused(t *testing.T) {
 	payload := []byte{0, 0, 0, 0, 0, 1} // version 0, flags, entry_count = 1
 	child := make([]byte, 24)

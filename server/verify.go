@@ -68,10 +68,10 @@ const maxInflate = 8 << 30
 // copy or a lost block. Storage does not lose data in ones and twos: a sector
 // is 512 bytes, and anything smaller is a bit-level event, not a missing
 // allocation. The floor exists because aAllZero/bAllZero mean only "every
-// byte where the copies differ is NUL on this side" — with no floor, a single
-// differing byte satisfied that, and the verdict came out BACKWARDS: rot that
+// byte where the copies differ is NUL on this side" — with no floor a single
+// differing byte satisfies that, and the verdict comes out BACKWARDS: rot that
 // turns a 0x00 into a non-NUL byte leaves the healthy copy holding the zero,
-// so the healthy copy was convicted and the rotted one called Intact.
+// so the healthy copy would be convicted and the rotted one called Intact.
 const minZeroBytes = 512
 
 // verifyContent walks one file's container and reports what its own structure
@@ -97,8 +97,8 @@ func verifyContent(open func() (*os.File, error), size int64) (intactness, strin
 	case bytes.HasPrefix(magic, []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}):
 		return verifyPNG(f, size)
 	// CM (byte 3) must be 8 — deflate is the only method gzip defines. Every
-	// other arm here matches on 3–8 bytes; matching gzip on 2 routed any file
-	// that happened to begin 1F 8B into a validator that then convicted it.
+	// other arm here matches on 3–8 bytes; matching gzip on 2 would route any
+	// file that happens to begin 1F 8B into a validator that then convicts it.
 	case bytes.HasPrefix(magic, []byte{0x1F, 0x8B, 0x08}):
 		return verifyGzip(f, size)
 	case bytes.HasPrefix(magic, []byte{'P', 'K', 0x03, 0x04}),
@@ -237,9 +237,9 @@ func verifyZip(f *os.File, size int64) (intactness, string) {
 		// "I cannot read this" is not "this is damaged". archive/zip implements
 		// only Store and Deflate and never looks at the encryption flag, so a
 		// bzip2 (12), LZMA (14), zstd, XZ, PPMd or password-protected member —
-		// every one of which `unzip -t` clears — came back convicted. That was
-		// doubly wrong: a damaged verdict at this rung SHORT-CIRCUITS the byte
-		// comparison that would have found the copy actually at fault.
+		// every one of which `unzip -t` clears — would otherwise be convicted.
+		// Doubly wrong: a damaged verdict at this rung SHORT-CIRCUITS the byte
+		// comparison that would find the copy actually at fault.
 		if m.Flags&0x1 != 0 {
 			return unproven, "" // encrypted payload: nothing here can check it
 		}

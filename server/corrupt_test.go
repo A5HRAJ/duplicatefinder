@@ -303,12 +303,11 @@ func TestCachedPrefixDisagreementConvicts(t *testing.T) {
 	}
 }
 
-// Rot BEYOND the first 64 KiB leaves size, mtime and prefix all standing.
-// The old cross-scan cache served the stale full hash for exactly this file,
-// so the rotted copy still counted as identical to its twin and no set was
-// ever reported. Now every scan re-reads in full, the pair's disagreement is
-// seen, and the fresh hash displacing the old entry convicts the copy that
-// moved.
+// Rot BEYOND the first 64 KiB leaves size, mtime and prefix all standing. A
+// cache that served a previous scan's full hash for such a file would keep
+// the rotted copy counted as identical to its twin and never report a set.
+// Because every scan re-reads in full, the pair's disagreement is seen, and
+// the fresh hash displacing the stored entry convicts the copy that moved.
 func TestDeepRotBeyondPrefixConvicts(t *testing.T) {
 	dir := t.TempDir()
 	body := bytes.Repeat([]byte{0x5a}, 80*1024)
@@ -570,12 +569,12 @@ func TestSkewedCorruptKeyStillFindsTheOddCopy(t *testing.T) {
 }
 
 // A skewed-family member whose rot lives BEYOND its first 64 KiB shares a
-// prefix with its intact siblings. The old prefix-granular pass never
-// full-hashed it: the family was confirmed conflicting by OTHER members and
-// the rotted copy was sampled away by the per-prefix quota — unlisted,
+// prefix with its intact siblings. A prefix-granular pass would never
+// full-hash it: the family is confirmed conflicting by OTHER members and the
+// rotted copy would be sampled away by a per-prefix quota — unlisted,
 // unconvicted, and silently identical every scan. Full-content tags give it
-// its own tag (and record()'s capture marks it), so it must now be listed
-// and convicted.
+// its own tag (and record()'s capture marks it), so it must be listed and
+// convicted.
 func TestSkewedCorruptKeyConvictsDeepRotBehindSharedPrefix(t *testing.T) {
 	oldKey, oldWin, oldMax := dupKeyFileCap, dupWindowFiles, dupWindowMax
 	dupKeyFileCap, dupWindowFiles, dupWindowMax = 5, 4, 64
@@ -593,8 +592,8 @@ func TestSkewedCorruptKeyConvictsDeepRotBehindSharedPrefix(t *testing.T) {
 	headB := bytes.Repeat([]byte{0x88}, 64*1024)
 	tail := bytes.Repeat([]byte{0x01}, 8*1024)
 	// Members 0..9 share prefix A, members 10..11 prefix B — so prefixes
-	// already differ across the family and the old shortcut would have
-	// stopped before ever full-hashing anyone.
+	// already differ across the family, and a prefix shortcut would stop
+	// before ever full-hashing anyone.
 	content := func(i int) []byte {
 		h := headA
 		if i >= 10 {

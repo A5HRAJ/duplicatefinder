@@ -115,9 +115,8 @@ func TestScanEmptyFoldersHardConfirm(t *testing.T) {
 
 // Only the TOPMOST directory whose subtree holds no file is offered, and a
 // directory holding content releases the empty children it was holding back.
-// These are the rules the old map-based pass encoded in hasFile/isDir; the
-// streaming form has to reproduce them exactly, including when the file that
-// settles a directory's fate arrives AFTER its empty child.
+// The streaming form has to honour both rules exactly, including when the
+// file that settles a directory's fate arrives AFTER its empty child.
 func TestScanEmptyFoldersTopmostRule(t *testing.T) {
 	yes := func(string) bool { return true }
 	cases := []struct {
@@ -920,8 +919,8 @@ func TestStateOmitsMoveProgressWhenIdle(t *testing.T) {
 // under a running scan makes the scan under-report: the moved path fails its
 // pinned re-open and is dropped, and a duplicate group that falls below two
 // members is discarded whole, taking its surviving member out of the results.
-// The move-during-scan direction has been guarded since 0095; these cover the
-// reverse, and the TOCTOU in the original guard.
+// handleMove guards the move-during-scan direction; these cover the reverse,
+// and the TOCTOU between handleMove's pre-lock check and its lock.
 func TestScanRefusedWhileMoveActive(t *testing.T) {
 	s := &Server{results: map[string]*toolResult{}}
 	if why := s.scanAdmissionLocked(); why != "" {
@@ -946,10 +945,11 @@ func TestScanRefusedWhileMoveActive(t *testing.T) {
 	}
 }
 
-// The bug the post-lock check exists for: handleMove's cheap pre-lock check
+// The race the post-lock check exists for: handleMove's cheap pre-lock check
 // passes, then the request spends a File Station round trip (and, for a queued
 // second move, however long the first one runs) before taking moveMu. A scan
-// starting in that window used to go unnoticed because nothing re-read the flag.
+// starting in that window goes unnoticed unless the flag is re-read after the
+// lock.
 func TestBeginMoveRefusesAScanThatStartedAfterThePrecheck(t *testing.T) {
 	s := &Server{results: map[string]*toolResult{}}
 

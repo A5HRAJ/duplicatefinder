@@ -77,9 +77,9 @@ func findExifInJpeg(b []byte) []byte {
 			// matched: segLen counts its own 2 bytes plus the 6 of
 			// "Exif\0\0", so anything below 8 ends BEFORE the low bound
 			// below. `end` is only ever clamped downwards, so a truncated
-			// or byte-flipped length used to make b[i+10:end] a low>high
-			// slice — a panic that runScan's recover turns into a whole
-			// scan's results being discarded, on every rescan.
+			// or byte-flipped length would make b[i+10:end] a low>high
+			// slice — a panic that runScan's recover would turn into a
+			// whole scan's results being discarded, on every rescan.
 			if segLen < 8 {
 				return nil
 			}

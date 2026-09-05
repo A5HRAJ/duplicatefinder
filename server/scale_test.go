@@ -1,6 +1,6 @@
 package main
 
-// Phase-4 scale tests: the pieces that keep an 80 TB volume with millions of
+// Scale tests: the pieces that keep an 80 TB volume with millions of
 // duplicates inside bounded memory. Each one pins a property that cannot be
 // observed on the test hardware — the fixture NAS is far too small to reach
 // any of these thresholds — so the thresholds themselves are shrunk here.
@@ -311,9 +311,9 @@ func TestCrowdedLadderPartitionEscalatesInsteadOfDropping(t *testing.T) {
 	}
 }
 
-// The ladder used to read a skewed key's files at full length TWICE — once to
-// tag them by content, once again in dupWindow to group them. The full rung
-// now consults and populates the hash store, so within one scan the second
+// The ladder must not read a skewed key's files at full length TWICE — once
+// to tag them by content, once again in dupWindow to group them. The full
+// rung consults and populates the hash store, so within one scan the second
 // read becomes a lookup. That reuse is strictly SAME-scan: a real rescan
 // advances the generation, misses every entry, and re-reads everything in
 // full by design — the third leg below pins exactly that.
@@ -677,7 +677,7 @@ func TestRotatingLogRotates(t *testing.T) {
 }
 
 // A spill round trip must survive being distilled and then read back one
-// partition at a time — the path every duplicates scan now takes.
+// partition at a time — the path every duplicates scan takes.
 func TestSpillDistilAndWindow(t *testing.T) {
 	dir := t.TempDir()
 	sp, err := newSpill(dir)

@@ -1,8 +1,7 @@
 package main
 
-// Phase-3 scale tests: the spill/candidate pass, the persistent hash cache,
-// result persistence across daemon restarts, and the interrupted-scan
-// marker.
+// Scale tests: the spill/candidate pass, the persistent hash cache, result
+// persistence across daemon restarts, and the interrupted-scan marker.
 
 import (
 	"bytes"
@@ -162,9 +161,9 @@ func TestHashCacheRoundTrip(t *testing.T) {
 // While a scan is still running, the RAM bound must be paid with THIS scan's
 // own entries (re-creatable by a re-read, evidence already captured), never
 // with prior-scan history — the corrupted-files pass at the end of the scan
-// still needs that history for its rot comparisons. The old keep-newest trim
-// deleted exactly the wrong side: at a full store, one partition's worth of
-// new records pushed the entire prior generation out mid-scan.
+// still needs that history for its rot comparisons. A keep-newest trim would
+// delete exactly the wrong side: at a full store, one partition's worth of
+// new records would push the entire prior generation out mid-scan.
 func TestMidScanTrimProtectsHistory(t *testing.T) {
 	oldMax, oldHigh := hashCacheMax, hashCacheHigh
 	hashCacheMax, hashCacheHigh = 8, 10
@@ -626,8 +625,8 @@ func TestCandHashDiscriminates(t *testing.T) {
 // still had the tool carries its rows, and they are NOT inert: handleMove's
 // allowlist is built from every cached result, so a retired tool's files would
 // stay movable — including a keep-one survivor listed only there — with no UI
-// able to display them or rescan them away. "big_files" is the concrete case
-// (retired in 0115); the assertion is on unknown tools generally.
+// able to display them or rescan them away. "big_files" stands in for any
+// retired tool; the assertion is on unknown tools generally.
 func TestLoadStateDropsRetiredTools(t *testing.T) {
 	dir := t.TempDir()
 	s := &Server{varDir: dir, lastTool: "big_files",

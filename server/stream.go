@@ -1,16 +1,16 @@
 package main
 
-// Bounded-memory enumeration primitives (scale phase 3, tightened in phase
-// 4). The walk never materializes every file in RAM — each tool consumes the
-// entry stream through a small accumulator:
+// Bounded-memory enumeration primitives. The walk never materializes every
+// file in RAM — each tool consumes the entry stream through a small
+// accumulator:
 //
 //   - duplicates spool compact records to a spill file while a bounded
 //     candidate-key counter finds collisions; the collision candidates are
 //     then distilled into a second, smaller spill and processed one
 //     PARTITION at a time, so daemon memory scales with the window, not with
 //     the volume and not with the duplicate population;
-//   - the flat tools keep bounded top-K heaps that reproduce the old
-//     sort-then-cap results exactly;
+//   - the flat tools keep bounded top-K heaps that reproduce a full
+//     sort-then-cap exactly;
 //   - duplicate groups accumulate in a bounded top-K heap of their own, so a
 //     volume with millions of duplicates never holds more groups than the
 //     stored-results cap can keep.
@@ -78,7 +78,7 @@ type keyCounter struct {
 	tab   []byte          // 4 two-bit counters per byte
 	mask  uint64
 	// share halves both budgets once per step, so N counters running over one
-	// walk cost what a single counter used to. The duplicates scan runs two —
+	// walk cost what a single counter would. The duplicates scan runs two —
 	// its own candidate key and the corrupted-files (size, mtime) key — and
 	// the fixed 64 MB ceiling above is a promise about the daemon, not about
 	// one counter. Halving raises the false-positive rate, which only ever
@@ -513,9 +513,8 @@ func (s *spill) close() {
 
 // boundedTop keeps the limit highest-ranked entries of a stream, counting
 // what it drops. keepBefore(a, b) reports whether a outranks b in the final
-// listing — the same comparator that used to sort the full slice before
-// capping, so the kept set and its order match the old sort-then-truncate
-// exactly.
+// listing — the comparator a full sort would use, so the kept set and its
+// order match a sort-then-truncate exactly.
 type boundedTop struct {
 	limit      int
 	keepBefore func(a, b *fEnt) bool

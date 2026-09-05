@@ -98,7 +98,7 @@ func (s *fsSession) shareTable() ([]shareEntry, error) {
 // The share NAME is what File Station addresses and it is not derivable from
 // the path: external shares mount under a directory that differs from their
 // name ("usbshare1" at /volumeUSB1/usbshare), so stripping the volume prefix
-// — the old implementation — builds a share path that does not exist.
+// would build a share path that does not exist.
 // A volume root itself maps to no share and stays an error, which the
 // volume-root refusals elsewhere rely on. Fails closed: no table, no path.
 func (s *fsSession) shareSpacePath(p string) (string, error) {
@@ -558,10 +558,10 @@ func moveViaFS(s *fsSession, srcShare, outShare string) (string, error) {
 	tmpShare := outShare + "/" + tmp
 	if err := s.copyMoveOnce(srcShare, tmpShare); err != nil {
 		// The staging folder may be holding the ONLY copy — whatever the
-		// error said. A coded reply used to be read as "the move did not
-		// happen", but the task had already been started, and a coded error
-		// can come back from the status poll after data moved: a directory
-		// moved member by member, or a transient code on a task that in fact
+		// error said. A coded reply does not mean the move did not happen:
+		// the task had already been started, and a coded error can come
+		// back from the status poll after data moved — a directory moved
+		// member by member, or a transient code on a task that in fact
 		// finished. Deleting on that evidence would be permanent data loss,
 		// so the folder is removed only when the entry is CONFIRMED absent
 		// from it; anything less certain parks, visibly and by path.
@@ -587,8 +587,9 @@ func moveViaFS(s *fsSession, srcShare, outShare string) (string, error) {
 		if err == nil {
 			// The file is at its destination — the move SUCCEEDED. Failing to
 			// remove the now-empty staging folder is untidy, not a failure:
-			// returning that error made handleMove leave the row unpruned and
-			// tell the user a completed move had failed. Log and move on.
+			// returned as an error it would make handleMove leave the row
+			// unpruned and tell the user a completed move had failed. Log and
+			// move on.
 			if derr := s.deletePath(tmpShare); derr != nil {
 				log.Printf("move staging folder %s could not be removed: %v", tmpShare, derr)
 			}
@@ -625,14 +626,13 @@ func moveViaFS(s *fsSession, srcShare, outShare string) (string, error) {
 // and not just from list: getinfo answers code 418 for them, which is
 // indistinguishable from "no such file". Since every move this package
 // performs goes through File Station, such an entry can be FOUND by the
-// scanner's own walk (which reads the directory directly) but never moved —
-// the move used to fail with a bare "no such file or folder" for a file the
-// scan had just read. The UI disables the checkbox on these rows and the
-// daemon refuses them with an honest reason.
+// scanner's own walk (which reads the directory directly) but never moved;
+// left to File Station, the move fails with a bare "no such file or folder"
+// for a file the scan has just read. The UI disables the checkbox on these
+// rows and the daemon refuses them with an honest reason.
 //
-// Measured on DSM 7.4 (DS916+, 2026-08-10). The two clauses were established
-// DIFFERENTLY, and the distinction is worth keeping because it says how much
-// each one is worth:
+// Measured on DSM 7.4. The two clauses were established DIFFERENTLY, and the
+// distinction is worth keeping because it says how much each one is worth:
 //
 //   - ".DS_Store", exactly and CASE-SENSITIVELY. Directly measured: a
 //     .DS_Store uploaded fine, the scanner's own walk read it (15 bytes), and
@@ -650,9 +650,7 @@ func moveViaFS(s *fsSession, srcShare, outShare string) (string, error) {
 //     rejects the name wherever it is asked to act on it, which is the same
 //     conclusion for our purposes. These files are not hypothetical: macOS
 //     writes them over SMB/AFP, so a real NAS has them even though the API
-//     cannot make one. (An earlier reading of this said "._x" and friends
-//     were FILTERED FROM LISTINGS; that was wrong — those probe files had
-//     simply failed to upload.)
+//     cannot make one.
 //
 // Both clauses cover DIRECTORIES as well as files. The test is on the entry's
 // OWN name, so a folder is not unmovable merely because it CONTAINS one of
@@ -679,8 +677,8 @@ func fsCannotAddress(name string) bool {
 // Two measured DSM behaviours this leans on: dotFILES like .keep and
 // .htaccess DO come back from list, so real content cannot hide from this
 // answer — the sole exceptions are .DS_Store and ._* AppleDouble files,
-// which DSM filters from list AND getinfo (measured on-device 2026-08-10,
-// getinfo answers code 418 for them). Those never appear here at all, and it
+// which DSM filters from list AND getinfo (measured on DSM 7.4: getinfo
+// answers code 418 for them). Those never appear here at all, and it
 // does not matter: the native walk classifies exactly those names as junk
 // upstream, so the two layers agree without seeing the same entries.
 func (s *fsSession) folderHoldsOnlyJunk(folderShare string) (bool, error) {
@@ -935,11 +933,10 @@ func (s *fsSession) getInfo(shares []string, additional []string) (map[string]fs
 
 // ------------------------------------------------------- creation times
 
-// crtimeWorkers is the fan-out for creation-time batches (scale phase 2).
-// The batches are independent getinfo calls, and on large scans the
-// sequential round trips dominated created-date time; 4 matches the
-// scanner's own hashing worker cap — enough to hide per-call latency
-// without leaning on DSM's web server.
+// crtimeWorkers is the fan-out for creation-time batches. The batches are
+// independent getinfo calls, and on large scans sequential round trips would
+// dominate created-date time; 4 matches the scanner's own hashing worker cap
+// — enough to hide per-call latency without leaning on DSM's web server.
 const crtimeWorkers = 4
 
 // fetchCrtimes returns File Station's creation times for the given volume
@@ -1006,7 +1003,7 @@ func (s *fsSession) fetchCrtimesShares(shares []string, byShare map[string]strin
 		}()
 	}
 	// Batches are cut as they are fed, not materialized up front: on a scan
-	// window of millions of paths the slice of slices was pure overhead.
+	// window of millions of paths a slice of slices would be pure overhead.
 	for i := 0; i < len(shares); i += batch {
 		if cancelled(cancel) {
 			break
@@ -1031,7 +1028,7 @@ func (s *fsSession) fetchCrtimesShares(shares []string, byShare map[string]strin
 func applyCrtimes(sess *fsSession, res *toolResult, cancel chan struct{}, prog func(done, total int)) {
 	// Only rows still without a value: under Created matching every duplicate
 	// row already carries the answer from the per-window fetch, and asking
-	// again cost a thousand repeated round trips at the result cap.
+	// again would cost a thousand repeated round trips at the result cap.
 	var paths []string
 	for i := range res.Files {
 		if res.Files[i].Created == "" {

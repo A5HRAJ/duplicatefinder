@@ -13,9 +13,9 @@ package main
 //     every scan re-reads every candidate in full, and the stored entry is
 //     used the other way around: record() compares the fresh hash against it
 //     and captures "content moved while size and mtime did not", which is
-//     the conflicting-files scan's bit-rot evidence. Perfect rot detection
-//     over speed is the maintainer's explicit priority here; serving stale
-//     hashes to skip reads is the one thing this file must never do again.
+//     the conflicting-files scan's bit-rot evidence. Detection is preferred
+//     over speed here; serving stale hashes to skip reads is the one thing
+//     this file must never do.
 //
 // Entries are keyed by a hash of the display path and carry the file's
 // size, mtime, 64 KiB prefix hash and full-content hash. The store is
@@ -50,8 +50,8 @@ var (
 	hashCacheHigh = hashCacheMax + hashCacheMax/4
 )
 
-// Bumped to 2 when entries gained the path tag: an old file is simply
-// ignored (a clean start costs one slower scan, never a wrong hash).
+// Format version 2 (entries carry the path tag). A file with any other magic
+// is ignored: a clean start costs one slower scan, never a wrong hash.
 var hashCacheMagic = [8]byte{'D', 'F', 'H', 'C', '2', 0, 0, 0}
 
 type hcEnt struct {
@@ -73,8 +73,8 @@ type hashCache struct {
 	// time stayed put — the prefix hash, the full hash, or both. Nothing that
 	// edits a file leaves size and mtime untouched, so it is the
 	// corrupted-files scan's historical bit-rot evidence, and since every scan
-	// now re-reads candidates in full, it sees rot anywhere in the file, not
-	// only inside the first 64 KiB.
+	// re-reads candidates in full, it sees rot anywhere in the file, not only
+	// inside the first 64 KiB.
 	//
 	// The VALUE is the path's BLAKE3 tag, checked again on every query: the
 	// key alone is 64-bit FNV, and answering on the bare key would let a path
@@ -84,7 +84,7 @@ type hashCache struct {
 	// It has to be captured HERE, at the moment record() overwrites the bucket,
 	// because by the time that scan asks, the duplicates pass has already
 	// rewritten every entry it touched and the before-value is gone. Asking the
-	// live bucket alone made the whole rung dead code.
+	// live bucket alone would leave the rung with nothing to see.
 	//
 	// It is scan-lifetime only and never persisted: one entry per file that
 	// genuinely changed underneath its metadata, which is rare by construction,
@@ -236,8 +236,8 @@ func (c *hashCache) lookup(path string, size, mod int64, pfxHex string) (string,
 // compare, since that is all the caller has before the full read. A deep
 // change in a not-yet-recorded path is instead caught by record() itself the
 // moment the fresh full hash lands (its return value says so). Consulting
-// only the live bucket left the rung answering "no" for exactly the files the
-// duplicates pass had already read — which is most of them.
+// only the live bucket would leave the rung answering "no" for exactly the
+// files the duplicates pass had already read — which is most of them.
 func (c *hashCache) priorContentChanged(path string, size, mod int64, pfxHex string) bool {
 	if c == nil {
 		return false
@@ -255,8 +255,8 @@ func (c *hashCache) priorContentChanged(path string, size, mod int64, pfxHex str
 	e, ok := c.ents[key]
 	// e.Gen == c.gen means the entry is this scan's own read coming back, not
 	// history: a mismatch against it says only that the file moved DURING the
-	// scan (an ordinary edit landing mid-run), and calling that rot convicted
-	// healthy files — the walk's size and mtime were never re-observed.
+	// scan (an ordinary edit landing mid-run), and calling that rot would
+	// convict healthy files — the walk's size and mtime were never re-observed.
 	if !ok || e.Gen == c.gen || e.Size != size || e.Mod != mod || e.Tag != pathTag(path) {
 		return false // no comparable history: not evidence either way
 	}
@@ -294,7 +294,7 @@ func (c *hashCache) record(path string, size, mod int64, pfxHex, fullHex string)
 	// OLDER generation's entry is evidence — the two observations then carry
 	// two independent walks' size and mtime. A same-generation mismatch means
 	// the file moved DURING this scan (an ordinary edit landing mid-run, its
-	// new mtime never re-observed), and treating that as rot convicted
+	// new mtime never re-observed), and treating that as rot would convict
 	// healthy files.
 	if old, ok := c.ents[key]; ok && old.Gen != c.gen &&
 		old.Size == size && old.Mod == mod && old.Tag == e.Tag &&
@@ -344,9 +344,8 @@ func (c *hashCache) changedPath(path string) bool {
 // when that is not enough does older history go, oldest generation first;
 // that loss is real (the dropped path cannot be compared against its past,
 // this scan or next), which is the bounded-evidence trade the entry cap
-// forces. The old behavior — keep-newest even mid-scan — deleted exactly
-// the history the rest of the scan still needed, and a probe showed a
-// single partition save at cap losing prior-scan evidence in 182/200 runs.
+// forces. Trimming newest-first mid-scan would delete exactly the history
+// the rest of the scan still needs.
 func (c *hashCache) trimMidScanLocked(keep int) {
 	for k, e := range c.ents {
 		if len(c.ents) <= keep {

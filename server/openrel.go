@@ -17,7 +17,7 @@ import (
 // components additionally O_DIRECTORY), so a directory swapped for a
 // symlink after enumeration fails the open (ELOOP/ENOTDIR) instead of
 // redirecting the read outside the pinned tree. rootFD is not consumed.
-// Works on the DS916+'s 3.10 kernel, which predates openat2(2).
+// Works on DSM's 3.10 kernels, which predate openat2(2).
 func openRelAt(rootFD int, rel string) (*os.File, error) {
 	parts := strings.Split(filepath.Clean(rel), "/")
 	fd := rootFD

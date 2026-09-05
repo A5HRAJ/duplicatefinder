@@ -24,14 +24,13 @@ package main
 // previous scan's — and the extra ones are spent only on sets already
 // confirmed to differ.
 //
-// GUARANTEE (the maintainer's explicit priority: perfect rot detection over
-// speed): every hash this pass consumes was computed from bytes read during
-// this scan. A previous scan's hash is never served as a stand-in — it is
-// used only the other way around, as history: content that moved anywhere in
-// the file while size and mtime stood still is rung 2's bit-rot evidence.
-// The old known limit — rot beyond the first 64 KiB hiding behind a cache
-// entry until it aged out — is gone, paid for by re-reading every candidate
-// in full on every rescan.
+// GUARANTEE — detection is preferred over speed: every hash this pass
+// consumes was computed from bytes read during this scan. A previous scan's
+// hash is never served as a stand-in — it is used only the other way around,
+// as history: content that moved anywhere in the file while size and mtime
+// stood still is rung 2's bit-rot evidence. Rot beyond the first 64 KiB
+// therefore cannot hide behind a cache entry; the price is re-reading every
+// candidate in full on every rescan.
 
 import (
 	"errors"
@@ -83,7 +82,7 @@ type corruptFile struct {
 	readErr error
 	// contentChanged records that an earlier scan's hash store held this path,
 	// at this size and mtime, with DIFFERENT content — anywhere in the file,
-	// prefix or beyond, since every scan now reads candidates in full. A
+	// prefix or beyond, since every scan reads candidates in full. A
 	// timestamped before/after saying the content moved while the metadata
 	// did not: the bit-rot signature.
 	contentChanged bool
@@ -479,17 +478,15 @@ const corruptSkewSample = 500
 // same reason: capping an unexamined population is how a real finding gets
 // thrown away. Every member is tagged, and only then is anything dropped.
 //
-// One rung, by the FULL content hash. There used to be a prefix shortcut —
-// stop as soon as two 64 KiB prefixes differed — but the sample it then drew
-// was PREFIX-granular, and a member whose rot lives beyond its first 64 KiB
-// hides behind the prefix it shares with its intact siblings: never
-// full-hashed, never listed, never convicted, silently identical every scan
-// (a probe demonstrated exactly that). Full tags make every distinct content
-// its own tag, so the variant-spanning sample below cannot miss it, and the
-// full read is what feeds record()'s rot capture. Most of these reads are
+// One rung, by the FULL content hash — deliberately not a prefix shortcut
+// that stops as soon as two 64 KiB prefixes differ. A prefix-granular sample
+// lets a member whose rot lives beyond its first 64 KiB hide behind the
+// prefix it shares with its intact siblings: never full-hashed, never
+// listed, never convicted. Full tags make every distinct content its own
+// tag, so the variant-spanning sample below cannot miss it, and the full
+// read is what feeds record()'s rot capture. Most of these reads are
 // answered by this scan's own earlier work anyway — the duplicates pass
-// usually wanted the same files. Perfect detection over speed, by the
-// maintainer's explicit choice.
+// usually wanted the same files. Detection over speed.
 //
 // What a cap finally applies to is a family already known to disagree, listed
 // down to a sample that spans its variants — not an unexamined population.
@@ -753,10 +750,10 @@ func verdictSearchText(v string) string {
 //
 // KEEP IN SYNC with VERDICT_TEXT in spk/ui/DuplicateFinder.js, which renders
 // the same three verdicts in the grid's Status column. They are necessarily
-// separate — one is Go, one is the browser — and they did drift: the export
-// said "Unknown" where the grid said "Undetermined", so a report and the screen
-// it came from disagreed about the same row. TestVerdictLabelsMatchTheUI here
-// and the smoke assertion on VERDICT_TEXT pin both halves to the same words.
+// separate — one is Go, one is the browser — and can drift into a report
+// saying "Unknown" beside a grid saying "Undetermined" about the same row.
+// TestVerdictLabelsMatchTheUI here and the smoke assertion on VERDICT_TEXT
+// pin both halves to the same words.
 func verdictLabel(v string) string {
 	switch v {
 	case verdictCorrupt:

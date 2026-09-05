@@ -1,14 +1,12 @@
 package main
 
-// Paged results delivery (scale phase 1). The daemon can cache result sets
-// far larger than a browser — or an ExtJS 3.4 grid — can hold (a
-// SynoCommunity-scale NAS may carry millions of duplicates), so the UI reads
-// results through POST /api/results in pages and reveals them progressively.
-// Search, match refinement and column sorting are
-// applied here, server-side: the client only ever holds a window into the
+// Paged results delivery. The daemon can cache result sets far larger than a
+// browser — or an ExtJS 3.4 grid — can hold (a large NAS may carry millions
+// of duplicates), so the UI reads results through POST /api/results in pages
+// and reveals them progressively. Search, match refinement and column sorting
+// are applied here, server-side: the client only ever holds a window into the
 // result set, so any client-side filter or sort would silently act on a
-// fraction of the data. The legacy GET dump remains for raw localhost API
-// callers.
+// fraction of the data. The GET dump remains for raw localhost API callers.
 
 import (
 	"encoding/json"
@@ -161,8 +159,8 @@ type resultsQuery struct {
 	Match  MatchOpts `json:"match"` // duplicates: display-time refinement
 	// RefDirs is accepted for compatibility and IGNORED: reference protection
 	// is decided from the folders the stored results were scanned with,
-	// which the daemon holds — a client-supplied list let the padlocks and
-	// the move's refusals describe two different sets.
+	// which the daemon holds — a client-supplied list would let the padlocks
+	// and the move's refusals describe two different sets.
 	Sort    string   `json:"sort"`    // flat tools: column to order by
 	Dir     string   `json:"dir"`     // ASC | DESC
 	RefDirs []string `json:"refDirs"` // reference dirs, for the reclaimable figure
@@ -689,8 +687,8 @@ func filterGroups(groups []Group, pred *searchPred) []Group {
 // dupTotals aggregates duplicate groups. Reclaimable mirrors the UI's own
 // arithmetic: per group, every copy beyond the kept one may go — protected
 // reference copies count as kept. With no reference folders the per-row
-// test is skipped entirely: it ran under s.mu, and joining and comparing
-// 100k paths against an empty list on every keystroke was pure cost.
+// test is skipped entirely: it runs under s.mu, and joining and comparing
+// 100k paths against an empty list on every keystroke would be pure cost.
 func dupTotals(groups []Group, refs *refMatcher) pageTotals {
 	t := pageTotals{Groups: len(groups)}
 	for _, g := range groups {
