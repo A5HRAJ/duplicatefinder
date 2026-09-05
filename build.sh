@@ -29,7 +29,7 @@ export COPYFILE_DISABLE=1   # keep macOS ._* metadata out of the tars
 # only if the script changes. The version rides along purely so the filename is
 # readable in a network log.
 #
-# The stem stays dot-free (1.0.0-0104 -> 1-0-0-0104): DSM does token
+# The stem stays dot-free (1.2.3-0045 -> 1-2-3-0045): DSM does token
 # substitution inside config values and its loader's filename handling is not
 # documented, so extra dots in a basename are a gratuitous unknown.
 JS_HASH=$( (md5 -q spk/ui/$PKG.js 2>/dev/null || md5sum spk/ui/$PKG.js | cut -d' ' -f1) | cut -c1-8 )
@@ -86,15 +86,24 @@ assert_ui_stamped() {
   [ ! -f "$DEST/$PKG.js" ] || { echo "payload: unstamped $PKG.js must not ship (it re-anchors the cached URL)" >&2; exit 1; }
 }
 
-# Test hook: stage only the UI payload and print the stamped filename, so
-# test/stamp.sh exercises the real staging code instead of a copy of it.
-# Sits above `rm -rf "$BUILD"` so a test run can never wipe a real build.
-if [ "${1:-}" = "--stage-ui" ]; then
-  stage_ui "$2"
-  assert_ui_stamped "$2"
-  echo "$JS_NAME"
-  exit 0
-fi
+# Test hooks for test/stamp.sh. `--version` prints the declared VERSION, so
+# the test checks the stamp against it rather than against a literal that
+# goes stale at the next release. `--stage-ui <dest>` stages only the UI
+# payload and prints the stamped filename, so the test exercises the real
+# staging code instead of a copy of it. Both sit above `rm -rf "$BUILD"` so
+# a test run can never wipe a real build.
+case "${1:-}" in
+  --version)
+    echo "$VERSION"
+    exit 0
+    ;;
+  --stage-ui)
+    stage_ui "$2"
+    assert_ui_stamped "$2"
+    echo "$JS_NAME"
+    exit 0
+    ;;
+esac
 
 rm -rf "$BUILD"
 mkdir -p "$BUILD/bin" dist

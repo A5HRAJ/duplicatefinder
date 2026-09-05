@@ -17,11 +17,15 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 # --- stage once at the declared version -------------------------------------
+# The expected version is asked of build.sh itself: a literal here would go
+# stale at the first release bump and fail every run after it.
+VERSION=$(./build.sh --version)
+check "build.sh reports its version" "$([ -n "$VERSION" ] && echo 1 || echo 0)"
 NAME_A=$(./build.sh --stage-ui "$WORK/a")
 check "staging prints the stamped filename" "$([ -n "$NAME_A" ] && echo 1 || echo 0)"
 check "stamped file exists in the payload" "$([ -f "$WORK/a/$NAME_A" ] && echo 1 || echo 0)"
 check "stamped name carries the package version" \
-  "$(grep -q -- '-1-0-0-' <<<"$NAME_A" && echo 1 || echo 0)"
+  "$(grep -qF -- "-${VERSION//./-}-" <<<"$NAME_A" && echo 1 || echo 0)"
 check "stamped stem is dot-free apart from .js" \
   "$(eq "$(tr -cd '.' <<<"$NAME_A" | wc -c | tr -d ' ')" "1")"
 

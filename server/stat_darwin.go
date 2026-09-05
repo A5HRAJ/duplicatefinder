@@ -1,5 +1,6 @@
-//go:build darwin
+//go:build darwin && dev
 
+// Native stat helpers for the dev mock DSM (dev.go); see stat_linux.go.
 package main
 
 import (
@@ -10,9 +11,6 @@ import (
 
 // createdTime returns the file's birth time (macOS exposes it in stat).
 // The path parameter is only needed by the Linux statx implementation.
-// Used ONLY by the dev mock DSM (dev.go) as its crtime data source — the
-// scanner never calls this: Created Dates come from File Station's API
-// alone, with no native fallback.
 func createdTime(_ string, fi os.FileInfo) time.Time {
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
 		sec, nsec := st.Birthtimespec.Unix()
@@ -21,6 +19,7 @@ func createdTime(_ string, fi os.FileInfo) time.Time {
 	return fi.ModTime()
 }
 
+// diskUsage returns the size and used bytes of the filesystem holding path.
 func diskUsage(path string) (total, used int64) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(path, &st); err != nil {

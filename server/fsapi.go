@@ -488,7 +488,7 @@ const copyMoveMax = 12 * time.Hour
 
 // errMoveTimeout is deliberately NOT an fsError: it is the absence of an
 // answer, and moveOutcomeUnknown must say so.
-var errMoveTimeout = errors.New("File Station did not finish the move within 12 hours")
+var errMoveTimeout = errors.New("File Station did not finish the move within 12 hours") //lint:ignore ST1005 File Station is a proper noun
 
 // moveOutcomeUnknown reports that an error carries NO answer from File
 // Station (connection dropped, reply mangled): the operation may well have

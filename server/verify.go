@@ -305,7 +305,7 @@ func zipEntryCount(f *os.File, size int64) (uint64, bool) {
 	}
 	// ZIP64: the locator sits 20 bytes before the EOCD and names the offset of
 	// the ZIP64 EOCD record, whose total-entries field is at +32.
-	if i < 20 || string(buf[i-20:i-16]) != "PK" {
+	if i < 20 || string(buf[i-20:i-16]) != "PK\x06\x07" {
 		return n, true
 	}
 	off := int64(binary.LittleEndian.Uint64(buf[i-12 : i-4]))
@@ -313,7 +313,7 @@ func zipEntryCount(f *os.File, size int64) (uint64, bool) {
 		return n, true
 	}
 	var rec [40]byte
-	if _, err := f.ReadAt(rec[:], off); err != nil || string(rec[0:4]) != "PK" {
+	if _, err := f.ReadAt(rec[:], off); err != nil || string(rec[0:4]) != "PK\x06\x06" {
 		return n, true
 	}
 	return binary.LittleEndian.Uint64(rec[32:40]), true

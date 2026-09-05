@@ -2,7 +2,7 @@
 
 package main
 
-// The property the round-3 hardening rests on: once a directory handle is
+// The property the move and scan vetting rest on: once a directory handle is
 // open, renaming the original path away and planting a symlink (or imposter
 // dir) in its place must not redirect operations that go through the handle.
 // Only the Linux implementation pins; this test documents and enforces it.
@@ -12,6 +12,11 @@ import (
 	"path/filepath"
 	"testing"
 )
+
+func pathExists(p string) bool {
+	_, err := os.Lstat(p)
+	return err == nil
+}
 
 func TestDirHandleSurvivesPathSwap(t *testing.T) {
 	dir := t.TempDir()

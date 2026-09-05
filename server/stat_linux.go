@@ -1,5 +1,9 @@
-//go:build linux
+//go:build linux && dev
 
+// Native stat helpers for the dev mock DSM (dev.go), which stands in for File
+// Station and so needs a native source for creation times and disk usage.
+// Release builds never read either natively: Created Dates come from File
+// Station's API alone, and the volume overview from its share listing.
 package main
 
 import (
@@ -11,10 +15,7 @@ import (
 )
 
 // createdTime returns the file's creation (birth) time via statx, falling
-// back to the inode change time. Used ONLY by the dev mock DSM (dev.go) as
-// its crtime data source — the mock stands in for DSM itself, so a native
-// read is the point. The scanner never calls this: Created Dates come from
-// File Station's API alone, with no native fallback.
+// back to the inode change time.
 func createdTime(path string, fi os.FileInfo) time.Time {
 	var stx unix.Statx_t
 	err := unix.Statx(unix.AT_FDCWD, path,
@@ -29,6 +30,7 @@ func createdTime(path string, fi os.FileInfo) time.Time {
 	return fi.ModTime()
 }
 
+// diskUsage returns the size and used bytes of the filesystem holding path.
 func diskUsage(path string) (total, used int64) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(path, &st); err != nil {
