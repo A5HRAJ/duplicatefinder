@@ -65,7 +65,7 @@ scan state, does not carry over).
 - `HOMEPAGE`, `PKG_DIST_SITE` and the tag archive name need the public
   repository. Push it, tag `v1.0.0`, then run `make digests` in
   `cross/duplicatefinder` to replace the zeroed `digests` file.
-- `LICENSE = MIT` is a placeholder: the repository has no LICENSE file yet
-  and SynoCommunity only takes open-source software. Add the file first.
+- `LICENSE = MIT` matches the repository's LICENSE file (added 2026-09-04),
+  which satisfies SynoCommunity's open-source requirement.
 - The daemon's `/api/info` will report `1.0.0`, not `1.0.0-1`: the cross
   package cannot see `SPK_REV`.

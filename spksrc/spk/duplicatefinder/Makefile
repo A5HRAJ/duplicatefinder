@@ -18,7 +18,7 @@ DISPLAY_NAME = Duplicate Finder
 DESCRIPTION = Find and clean up duplicate files, empty folders, empty files and temporary junk on your DiskStation, and spot conflicting files: copies that share a size and modified time but no longer hold the same content. Duplicates are matched by BLAKE3 content hash; selected files are moved (never deleted) to a folder you choose.
 CHANGELOG = "Initial package release."
 
-# TODO(before submission): both need the public repository to exist.
+# TODO(before submission): HOMEPAGE needs the public repository to exist.
 HOMEPAGE = https://github.com/ashwinrajani/duplicatefinder
 LICENSE  = MIT
 

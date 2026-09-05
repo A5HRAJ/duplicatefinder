@@ -530,3 +530,7 @@ runtime via `Ext.util.CSS.createStyleSheet` in `DuplicateFinder.js`.
   a bare volume root has no share-space address for File Station to answer
   about, so it is refused rather than checked natively (the UI's picker
   cannot produce one anyway).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
