@@ -1,6 +1,6 @@
 SPK_NAME = duplicatefinder
-SPK_VERS = 1.0.0
-SPK_REV = 1
+SPK_VERS = 1.0.1
+SPK_REV = 2
 SPK_ICON = src/duplicatefinder.png
 
 DEPENDS = cross/duplicatefinder
@@ -16,7 +16,7 @@ REQUIRED_MIN_DSM = 7.0
 MAINTAINER = A5HRAJ
 DISPLAY_NAME = Duplicate Finder
 DESCRIPTION = Find and clean up duplicate files, empty folders, empty files and temporary junk on your DiskStation, and spot conflicting files: copies that share a size and modified time but no longer hold the same content. Duplicates are matched by BLAKE3 content hash. Selected files are moved \(never deleted\) to a folder you choose.
-CHANGELOG = "Initial package release."
+CHANGELOG = "1. The hint shown when a location cannot be read now names the account to grant access to (sc-duplicatefinder) instead of the hand-built package's user."
 
 HOMEPAGE = https://github.com/A5HRAJ/duplicatefinder
 LICENSE  = MIT
