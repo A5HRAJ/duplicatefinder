@@ -12,6 +12,10 @@ package versions shown in Package Center.
   Actions workflow that runs it on every push, pull request and release tag.
 - This changelog, an architecture document and a development guide, with the
   README rewritten for users.
+- Fuzz targets for every reader of untrusted bytes (EXIF, HEIF, QuickTime,
+  the PNG/gzip/ZIP/JPEG/PDF/media validators, the byte comparison and the
+  daemon's own on-disk files), a `test/fuzz.sh` runner and a weekly `Fuzz`
+  workflow; positive tests for the metadata readers, which had none.
 
 ### Fixed
 - The packaging test compared the stamped filename against the literal

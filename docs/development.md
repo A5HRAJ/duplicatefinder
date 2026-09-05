@@ -108,6 +108,24 @@ until green.
 cd server && go test -race ./...
 ```
 
+### Fuzzing
+
+```bash
+FUZZTIME=1m test/fuzz.sh
+```
+
+Every reader of bytes the daemon does not control has a fuzz target in
+`server/fuzz_test.go`: the EXIF, HEIF and QuickTime metadata readers, the
+container validators behind Conflicting Files, the byte-level comparison, and
+the daemon's own spill, hash-store and results files. Each target is seeded
+with a valid file built by `server/parsers_test.go`, and asserts that the
+reader neither panics nor runs away and that its output is well-formed.
+`go test` replays the seeds and any saved crashers on every run; the script
+above runs the targets for real, for `FUZZTIME` each (default 30 seconds). A
+crasher is written to `server/testdata/fuzz/<Target>/` and fails `go test`
+from then on, so commit it together with the fix. The `Fuzz` workflow runs the
+same script weekly and on demand from the Actions tab.
+
 ## Conventions
 
 - Go code is `gofmt`-formatted and `staticcheck`-clean; the gate enforces
@@ -126,8 +144,9 @@ cd server && go test -race ./...
 
 ## Releasing
 
-1. Run `test/check.sh` and `test/run-arm.sh`; both must pass on the commit you
-   intend to release. CI must be green for that commit too.
+1. Run `test/check.sh`, `test/run-arm.sh` and `FUZZTIME=2m test/fuzz.sh`; all
+   three must pass on the commit you intend to release. CI must be green for
+   that commit too.
 2. Bump `VERSION` in `build.sh`, and in `spksrc/` bump `PKG_VERS`
    (`cross/duplicatefinder/Makefile`), `SPK_VERS`, `SPK_REV` and the
    `CHANGELOG` line (`spk/duplicatefinder/Makefile`). Add the release to

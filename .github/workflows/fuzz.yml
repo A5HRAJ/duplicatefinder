@@ -1,0 +1,40 @@
+# Runs the fuzz targets (test/fuzz.sh) weekly and on demand. Kept out of the
+# main CI workflow: fuzzing is open-ended and the release gate has to stay
+# deterministic. A crasher fails the job and is uploaded, so it can be added
+# to server/testdata/fuzz alongside the fix.
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: Time to spend on each target (a Go duration)
+        default: "2m"
+
+jobs:
+  fuzz:
+    name: Fuzz every parser
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Fuzz every target
+        run: test/fuzz.sh
+        env:
+          FUZZTIME: ${{ github.event.inputs.fuzztime || '2m' }}
+
+      - name: Save any crashers
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashers
+          path: server/testdata/fuzz
+          if-no-files-found: ignore
