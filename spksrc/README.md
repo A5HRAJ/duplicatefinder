@@ -121,7 +121,9 @@ the next it is an ordinary DSM upgrade, and the var dir stays (the
 - Built through the spksrc toolchain on 2026-09-04 for x64, aarch64 and
   armv7 as 1.0.0-1 (`duplicatefinder_<arch>-7.1_1.0.0-1.spk`, the build the
   per-arch checks under "Building it" describe), then again as 1.0.1-2 for
-  x64, the DS916+'s arch. Note `os_min_ver` comes out as 7.1 from those
+  x64, the DS916+'s arch. Whether the aarch64 and armv7 1.0.1-2 builds were
+  run was not recorded, so all three should be rebuilt and checked before
+  the pull request. Note `os_min_ver` comes out as 7.1 from those
   toolchains, against the hand-built package's 7.0.
 - DS916+ trial, 2026-09-04:
   - 1.0.0-1 installed after the hand-built package was uninstalled (the
@@ -134,10 +136,10 @@ the next it is an ordinary DSM upgrade, and the var dir stays (the
     `/webman/3rdparty/duplicatefinder/api.cgi`. The service user is new,
     so the shared-folder grants (the top-level README's Install step 3)
     had to be made again for `sc-duplicatefinder` before a scan could
-    read anything; with them made, a scan returned the same results the
-    hand-built package had been producing. A scan on this build also
-    surfaced the unreadable-location hint naming the hand-built package's
-    user, the bug 1.0.1 fixes (see the Makefile's `CHANGELOG`).
+    read anything; with them made, a scan ran and read every location. A
+    scan on this build also surfaced the unreadable-location hint naming
+    the hand-built package's user, the bug 1.0.1 fixes (see the Makefile's
+    `CHANGELOG`).
   - Upgraded in place to 1.0.1-2 by installing the new spk over it.
     Verified: DSM started it unasked (the upgrade case above), the
     persisted results survived the upgrade, and the hint now names the
