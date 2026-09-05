@@ -58,13 +58,20 @@ scan state, does not carry over).
   reachable through `api.cgi`. Declaring the port would add a pointless
   firewall rule and make spksrc overwrite `ui/config` with its own.
 
-## Placeholders to fill before submitting
+## State of the submission
 
-- `MAINTAINER`, `HOMEPAGE` and `PKG_DIST_SITE` name the public repository,
-  https://github.com/A5HRAJ/duplicatefinder. Tag `v1.0.0` there, then run
-  `make digests` in `cross/duplicatefinder` to replace the zeroed `digests`
-  file.
-- `LICENSE = MIT` matches the repository's LICENSE file (added 2026-09-04),
-  which satisfies SynoCommunity's open-source requirement.
+- The public repository is https://github.com/A5HRAJ/duplicatefinder, and
+  `MAINTAINER`, `HOMEPAGE` and `PKG_DIST_SITE` name it. Tag `v1.0.0` marks
+  the source this recipe builds; `digests` holds the SHA1, SHA256 and MD5 of
+  the archive GitHub serves for that tag
+  (`archive/refs/tags/v1.0.0.tar.gz`, 325,651 bytes, downloaded twice and
+  byte-identical on 2026-09-04, top directory `duplicatefinder-1.0.0`). A
+  new release means a new tag, a new `PKG_VERS`/`SPK_VERS`, and `make
+  digests` in `cross/duplicatefinder`.
+- The tagged archive itself still carries the zeroed `digests` file. That is
+  unavoidable, since the hashes depend on the archive's bytes, and harmless:
+  spksrc reads `digests` from its own tree, never from the archive.
+- `LICENSE = MIT` matches the repository's LICENSE file.
 - The daemon's `/api/info` will report `1.0.0`, not `1.0.0-1`: the cross
   package cannot see `SPK_REV`.
+- Nothing here has been built through the spksrc toolchain yet.

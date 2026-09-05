@@ -1,8 +1,9 @@
 PKG_NAME = duplicatefinder
 PKG_VERS = 1.0.0
 PKG_EXT = tar.gz
-# TODO(before submission): tag v$(PKG_VERS) in the repository and regenerate
-# `digests` (make digests) from the archive GitHub serves for it.
+# `digests` holds the hashes of the archive GitHub serves for tag v$(PKG_VERS)
+# (archive/refs/tags/v$(PKG_VERS).tar.gz); regenerate it with `make digests`
+# whenever PKG_VERS changes.
 PKG_DIST_NAME = v$(PKG_VERS).$(PKG_EXT)
 PKG_DIST_SITE = https://github.com/A5HRAJ/duplicatefinder/archive/refs/tags
 PKG_DIST_FILE = $(PKG_NAME)-$(PKG_VERS).$(PKG_EXT)
