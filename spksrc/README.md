@@ -100,13 +100,13 @@ scan state, does not carry over).
 ## State of the submission
 
 - The public repository is https://github.com/A5HRAJ/duplicatefinder, and
-  `MAINTAINER`, `HOMEPAGE` and `PKG_DIST_SITE` name it. Tag `v1.0.0` marks
-  the source this recipe builds; `digests` holds the SHA1, SHA256 and MD5 of
-  the archive GitHub serves for that tag
-  (`archive/refs/tags/v1.0.0.tar.gz`, 325,651 bytes, downloaded twice and
-  byte-identical on 2026-09-04, top directory `duplicatefinder-1.0.0`). A
-  new release means a new tag, a new `PKG_VERS`/`SPK_VERS`, and `make
-  digests` in `cross/duplicatefinder`.
+  `MAINTAINER`, `HOMEPAGE` and `PKG_DIST_SITE` name it. Tag `v1.0.1` marks
+  the source this recipe builds (1.0.1-2; `v1.0.0` was 1.0.0-1); `digests`
+  holds the SHA1, SHA256 and MD5 of the archive GitHub serves for that tag
+  (`archive/refs/tags/v1.0.1.tar.gz`, 327,634 bytes, downloaded twice and
+  byte-identical on 2026-09-04, top directory `duplicatefinder-1.0.1`). A
+  new release means a new tag, a new `PKG_VERS`/`SPK_VERS`, `SPK_REV` one
+  higher, a `CHANGELOG` line, and `make digests` in `cross/duplicatefinder`.
 - The tagged archive itself still carries the zeroed `digests` file. That is
   unavoidable, since the hashes depend on the archive's bytes, and harmless:
   spksrc reads `digests` from its own tree, never from the archive.
