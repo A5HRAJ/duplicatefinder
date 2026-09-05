@@ -77,12 +77,11 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   check('each rail item has an SVG icon (not escaped text)', doc.querySelectorAll('.df-rail-item svg.df-rail-ico').length === 5);
   check('selected rail row uses DSM-themed class (inherits highlight)', doc.querySelectorAll('.df-rail-item.x-grid3-row-selected').length === 1);
   check('rail item labels present alongside icons', /Duplicate Files/.test((doc.querySelector('.df-rail-label') || {}).textContent || ''));
-  // The read-only category is "Conflicting Files" (renamed 0123). The old name
-  // asserted of every row what the scan can only prove of a few — on the
-  // maintainer's own NAS, 108 files and 0 convictions. "Corrupted" survives as
-  // the per-row verdict only, which is why the labels are checked separately
+  // The read-only category is "Conflicting Files": "Corrupted" would assert of
+  // every row what the scan can only prove of a few, so it survives as the
+  // per-row verdict only, which is why the labels are checked separately
   // below. Its icon is a warning triangle: a red stroked+filled triangle path
-  // with a white bar and dot, no <path> from the old damaged-document glyph.
+  // with a white bar and dot.
   {
     const railLabels = [...doc.querySelectorAll('.df-rail-label')].map((el) => el.textContent.trim());
     check('the read-only category reads "Conflicting Files"',
@@ -153,11 +152,10 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   // owner.modalWin by afterShow, and a mousedown on the owner's mask runs
   // blinkModalChild, which raises the topmost modal child and flashes it.
   // The harness stubs ModalWindow as a plain Ext.Window, so the z-order
-  // behaviour itself CANNOT be tested here — it was verified on-device against
+  // behaviour itself CANNOT be tested here — it is verified on-device against
   // File Station's own Settings dialog. What jsdom can pin is the config that
-  // hands the job to DSM, which is exactly what regressed before: an earlier
-  // version hand-rolled this with an 'activate' listener plus a raw
-  // getEl().mask(), and the app window ended up on top of the dialog anyway.
+  // hands the job to DSM: hand-rolling this with an 'activate' listener plus a
+  // raw getEl().mask() leaves the app window on top of the dialog anyway.
   const pw = win.progressWin;
   check('progress dialog is owned by the app window (DSM keeps it on top)',
     pw.owner === win);
@@ -203,7 +201,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     /214 duplicate files<\/b> in 107 groups/.test(summaryHtml) && !/showing first/.test(summaryHtml));
   /* The top toolbar has ~2px spare at the window's minWidth once the longest
      match label is showing, so the summary's width is load-bearing: measured
-     on-device, an exact count overflowed the search box off the window by 40px
+     on-device, an exact count overflows the search box off the window by 40px
      at 34k duplicates and 132px at 1.2M + "capped". jsdom does no layout, so
      the guard is on the two things that bound the width — compact counts above
      10k, and the capped wrapper that clips whatever is left. */
@@ -234,9 +232,9 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   // The checker's className must be EXACTLY the stock string. Ext's
   // CheckboxSelectionModel.onMouseDown tests `t.className ==
   // "x-grid3-row-checker"` by string equality, so any second class silently
-  // stops every checkbox click from toggling selection. 0077 shipped exactly
-  // that bug by adding syno-ux-checkbox-icon here; DSM's checkbox art is now
-  // applied by URL from the stylesheet instead. This guards the regression.
+  // stops every checkbox click from toggling selection. Adding
+  // syno-ux-checkbox-icon here would do exactly that; DSM's checkbox art is
+  // applied by URL from the stylesheet instead.
   const checkers = [...doc.querySelectorAll('.x-grid3-row-checker')];
   check('checkers exist', checkers.length >= 4);
   check('checker className is exactly the stock string (Ext matches it by ==)',
@@ -245,17 +243,18 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   // selection wiring under jsdom (tried; it selects nothing either way, so the
   // assertion passes vacuously and proves nothing). The className check above
   // is the meaningful automated guard; the click path itself has to be
-  // confirmed on-device, like the layout-dependent issues before it.
+  // confirmed on-device.
   const cssText = window.document.getElementById('duplicate-finder-css') ?
     window.document.getElementById('duplicate-finder-css').textContent : '';
   // DSM centres a 20px box in a 28px row with margin-top, not vertical-align;
-  // the old vertical-align:middle inflated rows to 29.5px against DSM's 28px.
+  // vertical-align:middle would inflate rows to 29.5px against DSM's 28px.
   check('checker centred DSM\'s way, not by vertical-align',
     /x-grid3-row-checker\{[^}]*margin-top:4px/.test(cssText) &&
     !/td\.x-grid3-td-checker\{vertical-align:middle/.test(cssText));
-  // Unselectable rows must NOT be greyed (0122). Grey text is this app's
-  // "Missing"/"Loading" signal; spending it on protection made two unrelated
-  // states look alike. The disabled checkbox and the padlock carry it instead.
+  // Unselectable rows must NOT be greyed. Grey text is this app's
+  // "Missing"/"Loading" signal; spending it on protection would make two
+  // unrelated states look alike. The disabled checkbox and the padlock carry
+  // it instead.
   check('unselectable rows keep normal text colour',
     !/df-row-prot \.x-grid3-cell-inner/.test(cssText) &&
     !/df-row-capped \.x-grid3-cell-inner/.test(cssText));
@@ -270,19 +269,19 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   check('no row uses DSM\'s tri-state grayed checkbox',
     !/background-position:0 -120px/.test(cssText));
   // The padlock is centred the same way the checker is (20px box, 28px row), or
-  // it grows the row it sits in — the class of bug 0103/0107 shipped twice.
+  // it grows the row it sits in.
   // line-height pins the glyph inside that box: an emoji font's natural line
   // box is taller than 20px and would push the row open on its own.
   check('protected-row padlock keeps DSM\'s 20-in-28 centring',
     /df-prot-lock\{[^}]*width:20px[^}]*height:20px[^}]*margin-top:4px/.test(cssText) &&
     /df-prot-lock\{[^}]*line-height:20px/.test(cssText));
-  // The hand-drawn shield/padlock artwork was deleted on 0122 — the glyph is
-  // now Unicode. The grid must carry no inline SVG at all: an SVG element's
+  // The padlock glyph is Unicode, not hand-drawn artwork. The grid must carry
+  // no inline SVG at all: an SVG element's
   // .className is an SVGAnimatedString, and Ext's getTarget/QuickTips both
   // assume a string, so an SVG node inside a row is a live event-target hazard.
   // The only inline SVG left in the app is the left rail's module icon
   // (df-rail-ico), which stays. Counting occurrences is the guard: it fails
-  // both if the shield comes back and if any new row artwork is hand-drawn.
+  // if any row artwork is hand-drawn.
   const appSrc = fs.readFileSync(
     path.join(__dirname, '..', 'spk', 'ui', 'DuplicateFinder.js'), 'utf8');
   const svgOpens = appSrc.match(/'<svg/g) || [];
@@ -291,13 +290,13 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     !/df-prot-lock svg/.test(cssText) &&
     svgOpens.length === 1 && /df-rail-ico/.test(appSrc));
 
-  // Regression guard for the standing rule that DSM paints the grid: these
-  // overrides were measured redundant or actively divergent from File Station
-  // and removed on 2026-07-30. Reintroducing any of them is a bug.
+  // Guard for the standing rule that DSM paints the grid: measured against
+  // File Station, these overrides are redundant or actively divergent, and
+  // introducing any of them is a bug.
   check('no grid overrides fighting DSM\'s theme',
-    !/x-grid3-hd-inner\{/.test(cssText) &&        // was 11px bold vs FS's 13px/400
-    !/x-grid3-header\{background/.test(cssText) && // was #f8f9fb vs FS's transparent
-    !/scroll-menu-ct/.test(cssText) &&             // only needed because of the above
+    !/x-grid3-hd-inner\{/.test(cssText) &&        // 11px bold vs FS's 13px/400
+    !/x-grid3-header\{background/.test(cssText) && // #f8f9fb vs FS's transparent
+    !/scroll-menu-ct/.test(cssText) &&             // only ever needed because of the above
     !/x-grid3-row-over\{background/.test(cssText) &&
     !/x-grid3-row-selected\{background/.test(cssText) &&
     !/x-grid-group-hd/.test(cssText) &&
@@ -342,8 +341,8 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   check('pager total follows the filtered set', win.store.getTotalCount() === 1);
   // Clear the way a USER does — the field's X trigger, which calls
   // setValue('') + filter() and fires NO key event. Driving state.query
-  // directly here is what let the 0080–0082 bug ship: keyup-only wiring left
-  // state.query stale and the old filtered page stayed on screen.
+  // directly here would let keyup-only wiring pass, and with that wiring
+  // state.query stays stale and the old filtered page stays on screen.
   win.searchField.setValue('');
   win.searchField.filter();
   for (let i = 0; i < 30 && win.store.getCount() === 2; i++) await sleep(150);
@@ -358,9 +357,9 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     f.type.store.getCount() === 12 && f.sizeOp.store.getCount() === 4 &&
     f.dateBy.store.getCount() === 3);
 
-  // 0083 bug: picking any option closed the whole menu and wiped the rest.
-  // Two independent causes, both guarded here because jsdom does no layout
-  // and cannot reproduce the click itself.
+  // Picking any option must not close the whole menu and wipe the rest. Two
+  // independent causes can do that, both guarded here because jsdom does no
+  // layout and cannot reproduce the click itself.
   //  (a) combo dropdowns render to document.body -> MenuMgr reads the list
   //      click as "outside" and hides the menu. getListParent must return the
   //      menu element instead.
@@ -377,9 +376,9 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     !!f.from.menu && !!f.to.menu &&
     f.from.menu !== f.to.menu &&
     String(f.from.menu.show).indexOf('stockShow') >= 0);
-  // Must be DSM's own picker, configured like File Station's: 0084 substituted
-  // a stock Ext.menu.DateMenu here, which lost the year/month dropdowns and the
-  // Clear button. Prefer DateTimeField/DateTimeMenu, and keep DSM's menu class.
+  // Must be DSM's own picker, configured like File Station's: a stock
+  // Ext.menu.DateMenu here loses the year/month dropdowns and the Clear
+  // button. Prefer DateTimeField/DateTimeMenu, and keep DSM's menu class.
   check('date fields are DSM\'s File Station picker, not the stock one',
     f.from instanceof window.SYNO.ux.DateTimeField &&
     f.from.menu instanceof window.SYNO.ux.DateTimeMenu &&
@@ -501,8 +500,8 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
       /picker\.update\(back\)/.test(String(win.getSearchMenu)));
     // Clear fires no select event, so it must recompute the pair's bounds
     // itself — otherwise the OTHER field stays limited by the date just
-    // removed (shipped in 0091: From claimed "must be 2019-04-30 or earlier"
-    // long after that To date had been cleared).
+    // removed, and From claims "must be <date> or earlier" long after that To
+    // date has been cleared.
     check('Clear recomputes the pair\'s bounds',
       /refreshDateBounds\(\)/.test(String(win.getSearchMenu)));
     {
@@ -529,10 +528,9 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     /* The picker is PRE-BUILT so show() can bind parentMenu before the first
        click — but DateField wires its select relay inside the same lazy branch
        that creates the menu, so assigning field.menu skips it and a chosen day
-       never reaches the field. That shipped in 0087–0092: the day highlighted,
-       the value never set, the menu never closed. Asserted behaviourally rather
-       than by grepping the source, because a source regex is exactly what let
-       the original defect through. */
+       never reaches the field: the day highlights, the value is never set, the
+       menu never closes. Asserted behaviourally rather than by grepping the
+       source, because a source regex cannot see that. */
     {
       f.from.setValue(''); f.to.setValue('');
       win.refreshDateBounds();
@@ -785,8 +783,8 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   check('last unselected file in group disables its checkbox',
     doc.querySelectorAll('.df-row-capped').length === 1);
   // The capped row must EXPLAIN itself on the checkbox cell — that hover is
-  // what replaced the toast removed in 0082, and unlike the reference case it
-  // had no tooltip anywhere before.
+  // the only explanation the capped case has, where the reference case also
+  // has the padlock's tooltip.
   {
     const cappedCell = doc.querySelector('.df-row-capped .x-grid3-td-checker');
     check('capped checkbox explains itself on hover',
@@ -856,8 +854,8 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   // Decided by the DAEMON from the folders the stored results were scanned
   // with, on canonical paths — the same comparison the move refuses with.
   // Editing the Scope list therefore changes nothing until the next scan:
-  // it used to unlock rows on the spot, and the move then refused every one
-  // of them as read-only.
+  // unlocking rows on the spot would only have the move refuse every one of
+  // them as read-only.
   const someDir = win.store.getAt(0).get('path');
   win.state.refDirs.push(someDir);
   win.reloadPage();
@@ -985,7 +983,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
       !!plainRec && !/df-row-nomove/.test(gv.getRowClass(plainRec, 0, {}, win.store) || ''));
     // The sprite comes from a ROW-scoped rule, never a second class on the
     // checker: Ext matches the checker's className by ==, so an extra class
-    // there kills every checkbox click in the grid (the 0077 bug).
+    // there kills every checkbox click in the grid.
     check('nomove sprite is row-scoped, not on the checker itself',
       /df-row-nomove \.x-grid3-row-checker\{background-position:0 -40px/.test(cssText));
     const stillStock = [...doc.querySelectorAll('.x-grid3-row-checker')];
@@ -1000,7 +998,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   win.setTool('empty_folders');
   await sleep(50);
   check('unreadable folder not reported as empty', efNames.indexOf('locked') < 0);
-  // junk-only counts as empty (2026-08-10 directive): the junk-file names are
+  // junk-only counts as empty: the junk-file names are
   // the Temporary Files tool's own list, and @eaDir is Synology's regenerable
   // thumbnail cache. A dot-DIRECTORY with real content stays protected — a
   // folder whose only child is .git is a repository, not clutter.
@@ -1236,9 +1234,9 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   check('verification is offered as a checkbox, ticked by default',
     !!verifyInput && verifyInput.type === 'checkbox' && verifyInput.checked === true);
   // The prose explaining WHEN turning verification off is reasonable (a move
-  // within one shared folder only renames) was deliberately dropped from the
-  // dialog in 0134 and lives in the README alone — the checkbox is the whole
-  // question, and the paragraph was three lines of the dialog's height.
+  // within one shared folder only renames) is deliberately kept out of the
+  // dialog and lives in the README alone — the checkbox is the whole
+  // question, and the paragraph would be three lines of the dialog's height.
   check('the dialog carries no same-shared-folder explanation',
     !/only renames the file/.test(doc.body.textContent));
   // Untick for pass 1: the payload must carry the explicit opt-out.
@@ -1377,8 +1375,8 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   check('progress bar reports the overall count', /3 of 12/.test(moveBarText()));
   check('progress bar names the file in flight', /clip\.mov/.test(moveBarText()));
   // Ext renders progress text INSIDE the bar element, where an 18px-high bar
-  // clips it to a sliver — that is how 0107 shipped. The count must live in
-  // its own line, exactly as the scan dialog has always done.
+  // clips it to a sliver. The count must live in its own line, as the scan
+  // dialog's does.
   check('the count is not rendered inside the bar, where it would be clipped',
     inBarText() === '');
   // jsdom does no layout, so the bar's rendered WIDTH is 0px whatever the
@@ -1462,15 +1460,14 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
 
   // A selection REPLACED between opening the dialog and picking the folder
   // must not move the originally captured batch — the pick IS the move, with
-  // no confirmation after it. Emptiness was already guarded; substitution was
-  // not.
+  // no confirmation after it.
   //
   // Note what this test does and does not prove. On real DSM 7.4 the chooser
   // is an owned SYNO.SDS.ModalWindow, so it masks the app window and a USER
-  // cannot click the grid mid-flow (measured on the DS916+: elementFromPoint
+  // cannot click the grid mid-flow (measured on DSM 7.4: elementFromPoint
   // inside the app window returns .ext-el-mask.sds-window-mask). The harness
-  // has no such mask — harness.html:52 stubs ModalWindow as a plain Ext.Window
-  // — so the swap below is performed programmatically. It pins the guard, not
+  // has no such mask — harness.html stubs ModalWindow as a plain Ext.Window —
+  // so the swap below is performed programmatically. It pins the guard, not
   // a reachable user journey: this is defence in depth against DSM's masking
   // changing under us, and against any programmatic path that mutates the
   // selection while a pick is outstanding.
@@ -1694,8 +1691,8 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   check('one copy of the group survives on disk', fs.existsSync(pairA) !== fs.existsSync(pairB));
 
   // 2.2b — the survivor stays protected after its group dissolved: a
-  // follow-up request for the remaining copy (the two-request drain Codex
-  // flagged) must be refused until the next duplicates scan.
+  // follow-up request for the remaining copy (the two-request drain) must be
+  // refused until the next duplicates scan.
   const survivor = fs.existsSync(pairA) ? pairA : pairB;
   const takeSurvivor = await api('/move', { files: [survivor], dest: movedDir, preserve: false });
   check('survivor of a drained group refused in a follow-up move',
@@ -1722,7 +1719,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   check('move of a file behind a symlinked parent rejected',
     escMove.moved.length === 0 && /outside allowed volumes/.test((escMove.errors[0] || {}).error || ''));
 
-  // ---- Round 2: symlink-alias and preserve-mode hardening ------------------
+  // ---- Symlink-alias and preserve-mode hardening ---------------------------
   // R2.2a — a reference file requested through a directory alias is refused
   // (the string-prefix guard alone would not match /photoalias/ to /photo)
   const aliasRef = await api('/move', { files: [vol + '/photoalias/random.bin'], dest: movedDir, preserve: false });
@@ -1951,10 +1948,10 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   check('temp rows under the moved folder are pruned',
     (tempAfterJunkMv.files || []).every((f) => (f.path || '').indexOf('/junkonly') < 0));
 
-  // R6 (phase 3) — an aliased scope no longer fabricates phantom duplicate
-  // pairs: Balias resolves inside Backups, so the walk de-overlaps it (the
-  // old walker visited the same files twice under both display paths and
-  // every pair became a triple).
+  // R6 — an aliased scope must not fabricate phantom duplicate pairs: Balias
+  // resolves inside Backups, so the walk de-overlaps it (a walker visiting the
+  // same files twice under both display paths would turn every pair into a
+  // triple).
   await api('/scan', { tool: 'duplicates', dirs: [vol + '/Backups', vol + '/Balias'], refDirs: [], recurse: true, match: {} });
   for (let i = 0; i < 80; i++) { st = await api('/state'); if (!st.running) break; await sleep(250); }
   const aliasDump = await api('/results?tool=duplicates');

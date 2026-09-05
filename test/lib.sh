@@ -62,12 +62,12 @@ make_fixture() {
 	# hidden-DIRECTORY cases, which the walker skips and File Station's
 	# listing must therefore adjudicate: a dot-directory holding real content
 	# (think .git) must NOT be reported empty; @eaDir is Synology's thumbnail
-	# cache, junk by definition (2026-08-10 directive), so a folder holding
-	# only that IS empty and the cache rides along when it moves
+	# cache, junk by definition, so a folder holding only that IS empty and
+	# the cache rides along when it moves
 	mkdir -p "$V/photo/hiddenonly/.hidden" "$V/photo/eadironly/@eaDir"
 	head -c 100 /dev/urandom > "$V/photo/hiddenonly/.hidden/thumb.bin"
-	# junk-only folders count as empty (same directive): the junk-file names
-	# are the Temporary Files tool's own list. One visible to File Station
+	# junk-only folders count as empty: the junk-file names are the
+	# Temporary Files tool's own list. One visible to File Station
 	# (Thumbs.db), one invisible to it (.DS_Store — DSM filters exactly
 	# .DS_Store and ._* from list/getinfo, so on the device the confirmation
 	# sees an empty listing; the dev mock lists it and isTempName accepts it —
@@ -96,7 +96,7 @@ make_fixture() {
 	mkdir -p "$OUTSIDE"
 	head -c 100 /dev/urandom > "$OUTSIDE/escapee.bin"
 	ln -s "$OUTSIDE" "$V/photo/sneaky"
-	# round-2 fixtures: directory aliases inside the volume (a move request
+	# alias fixtures: directory aliases inside the volume (a move request
 	# may name a protected/duplicate file through them) and probe files
 	ln -s "$V/photo" "$V/photoalias"
 	ln -s "$V/Backups/B" "$V/Balias"

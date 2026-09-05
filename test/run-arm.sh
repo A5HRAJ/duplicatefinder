@@ -44,8 +44,8 @@ mkdir -p "$BINDIR"
 )
 
 # Cleanup on EVERY exit, not only on a function return: an interrupt during
-# the 60 s daemon wait or the smoke pass used to leave the container (still
-# publishing 127.0.0.1:9807 — the next run.sh then failed to bind), the
+# the 60 s daemon wait or the smoke pass would otherwise leave the container
+# (still publishing 127.0.0.1:9807, so the next run.sh fails to bind), the
 # cross-compiled binaries and the work dirs behind.
 CIDS=""
 cleanup() {

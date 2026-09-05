@@ -71,10 +71,10 @@ def render(size, ss=4):
     w = stroke / 2
     gap = stroke           # break width where a front element crosses a back one
     # two overlapping files (upper-left), portrait sheets with a folded corner.
-    # The offset is larger than a plain rounded rect needed: a page's corner cut
-    # is at the TOP-RIGHT, which is exactly where the front page lands, so at
-    # the old 0.075 diagonal offset the front's occlusion halo ate the back's
-    # cut and the back read as a plain square again.
+    # The offset is larger than a plain rounded rect would need: a page's corner
+    # cut is at the TOP-RIGHT, which is exactly where the front page lands, so
+    # at a 0.075 diagonal offset the front's occlusion halo would eat the back's
+    # cut and the back would read as a plain square again.
     fhw, fhh, fr = 0.133, 0.163, 0.030
     fold = 0.105                       # cut corner, ~39% of the page width —
                                        # the same proportion the Duplicate

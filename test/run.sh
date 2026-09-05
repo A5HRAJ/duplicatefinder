@@ -43,9 +43,8 @@ cp harness.html ext/ext-base.js ext/ext-all.js "$UIDIR/"
 # (results, hash cache, scan marker) is exercised without arming the token.
 STATE="$WORK/state"
 mkdir -p "$STATE"
-# start_daemon <logfile>: one launcher for every (re)start below, with the
-# readiness wait — the block used to be pasted five times, and only the
-# first copy waited for the daemon to answer.
+# start_daemon <logfile>: the one launcher for every (re)start below, so no
+# launch can skip the readiness wait.
 start_daemon() {
 	DUPFINDER_ROOTS="$V:$WORK/volumeUSB1" DUPFINDER_UI="$UIDIR" DUPFINDER_DSM_URL="http://127.0.0.1:$PORT" \
 		DUPFINDER_STATE="$STATE" \

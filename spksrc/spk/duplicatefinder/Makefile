@@ -39,9 +39,9 @@ DSM_APP_NAME = SYNO.SDS.DuplicateFinder.Application
 # returns at once. Our daemon can still die during startup (port taken,
 # unreadable token file), and a start that reports success before the
 # daemon is listening leaves Package Center showing "running" while the UI
-# says "service is not running" -- a bug already fixed once in the hand
-# built package by waiting for the daemon's ready file. That wait needs a
-# custom script, which spksrc supports through SSS_SCRIPT.
+# says "service is not running". The hand-built package's script avoids
+# that by waiting for the daemon's ready file; that wait needs a custom
+# script, which spksrc supports through SSS_SCRIPT.
 SSS_SCRIPT = src/start-stop-status
 
 POST_STRIP_TARGET = duplicatefinder_extra_install
@@ -83,5 +83,5 @@ duplicatefinder_extra_install:
 	  [ -f "$$key" ] || { echo "ui/config names '$$key' but no such file was staged" >&2; exit 1; }; \
 	  [ ! -f DuplicateFinder.js ] || { echo "unstamped DuplicateFinder.js must not ship" >&2; exit 1; }; \
 	  if grep -l '/webman/3rdparty/DuplicateFinder\|/var/packages/DuplicateFinder' "$$key" api.cgi >/dev/null; then \
-	    echo "UI still hardcodes the old mixed-case package id; see spksrc/README.md" >&2; exit 1; \
+	    echo "UI still hardcodes the hand-built package's mixed-case id; see spksrc/README.md" >&2; exit 1; \
 	  fi

@@ -77,8 +77,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 	}
 	/* Volume capacities go through DSM's own CapacityRender, which uses the
 	   localized unit strings (fmtBytes is English-only). It takes MEGABYTES,
-	   not bytes. 1 decimal reproduces the previous "11.6 TB / 20.9 TB"
-	   reading exactly — verified against the DS916+'s real volume. */
+	   not bytes. One decimal matches DSM's own "11.6 TB / 20.9 TB" reading,
+	   verified against a real volume. */
 	function fmtCapacity(b) {
 		return UxCapacity ? UxCapacity((b || 0) / 1048576, 1) : fmtBytes(b);
 	}
@@ -95,8 +95,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 	   at the window's minWidth (measured on-device: 2 px clear with the longest
 	   "Match: Blake3 + Name + Modified + Created" label), so an exact count
 	   pushes the search box off the window as soon as the numbers grow — 40 px
-	   over at 34k duplicates, 132 px at 1.2M plus the "capped" suffix. The
-	   DS916+'s 445 files were simply too few to expose it. Six figures and up
+	   over at 34k duplicates, 132 px at 1.2M plus the "capped" suffix; a small
+	   NAS has too few files to expose it. Six figures and up
 	   therefore render compact, which keeps every part of the string visible
 	   rather than ellipsising the reclaimable total away. Grid cells and the
 	   selection footer keep fmtNum — only this one line is width-critical. */
@@ -108,7 +108,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 	}
 	// Dates render exactly as the backend sends them (YYYY-MM-DD HH:MM:SS) —
 	// the same format File Station uses. Escaped anyway: every renderer here
-	// lands in innerHTML, and this one was the only one trusting the daemon.
+	// lands in innerHTML.
 	function fmtDate(s) {
 		return s ? esc(s) : '—';
 	}
@@ -128,10 +128,10 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 	   attribute back — by then the browser has entity-decoded it — and
 	   renders that value as HTML (QuickTip.showAt → body.update). One
 	   htmlEncode therefore protects only the attribute, not the tooltip: a
-	   ZIP member name of "<img onerror=…>" inside a file on the NAS came
-	   through the daemon's evidence text and ran in the tooltip. Encoding
-	   twice makes the decoded value HTML-safe text, so the tooltip shows the
-	   literal characters. */
+	   ZIP member name of "<img onerror=…>" inside a file on the NAS would
+	   come through the daemon's evidence text and run in the tooltip.
+	   Encoding twice makes the decoded value HTML-safe text, so the tooltip
+	   shows the literal characters. */
 	function qtipText(s) {
 		return esc(esc(s));
 	}
@@ -170,7 +170,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 	var UxSearch = SYNO.ux.SearchField;
 	var UxTree = SYNO.ux.TreePanel || Ext.tree.TreePanel;
 	/* File Station's advanced-search From/To fields are SYNO.ux.DateTimeField
-	   (verified on-device 2026-07-30: its picker is SYNO.ux.DateTimePicker with
+	   (measured in DSM 7.4: its picker is SYNO.ux.DateTimePicker with
 	   clearType:'clear', hideClearButton:false, isAllDay:true — the year/month
 	   dropdowns and the Today/Clear buttons). SYNO.ux.DateField's picker is the
 	   plainer one, so prefer DateTimeField to match File Station exactly. */
@@ -195,20 +195,20 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 	     afterHide /
 	     onBeforeDestroy call hideFromOwner(), which de-registers and unmasks
 
-	   Two traps this replaced (both shipped): masking with the raw
-	   `appWin.getEl().mask()` skips the component path entirely, so no blink
-	   handler is installed AND blinkModalChild — finding owner.modalWin empty —
-	   falls through to raising the APP WINDOW over the dialog. DSM's unmask is
-	   also reference-counted via maskCnt, so a raw Element.unmask() alongside
-	   it desynchronises the count and can strand the mask. Verified live in
-	   DSM 7.4 on 2026-08-02 against File Station's own Settings dialog. */
+	   Two traps to avoid: masking with the raw `appWin.getEl().mask()` skips
+	   the component path entirely, so no blink handler is installed AND
+	   blinkModalChild — finding owner.modalWin empty — falls through to
+	   raising the APP WINDOW over the dialog. DSM's unmask is also
+	   reference-counted via maskCnt, so a raw Element.unmask() alongside it
+	   desynchronises the count and can strand the mask. Verified in DSM 7.4
+	   against File Station's own Settings dialog. */
 	var UxModal = SYNO.SDS.ModalWindow;
 	var UxToast = SYNO.SDS.ToastBox;
 	var UxCapacity = SYNO.SDS.Utils && SYNO.SDS.Utils.CapacityRender;
 	/* DSM's own usage bar. cls MUST be 'sds-ux-progressbar': DSM styles the
 	   bar's inner classes only under specific app scopes (.sds-ux-progressbar,
 	   .resource-monitor-widget) — there is no generic rule, so any other cls
-	   renders a completely invisible bar. Measured 2026-07-30. showValueText
+	   renders a completely invisible bar (measured in DSM 7.4). showValueText
 	   off because the card prints "X of Y used" underneath instead. */
 	var VOL_BAR = (SYNO.SDS.Utils && SYNO.SDS.Utils.PercentageBar) ?
 		new SYNO.SDS.Utils.PercentageBar({
@@ -216,7 +216,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			cls: 'sds-ux-progressbar', barHeight: 6, marginTop: 6
 		}) : null;
 
-	/* DSM 7.4 design tokens, measured live in-browser (2026-07-30) from
+	/* DSM 7.4 design tokens, measured in the browser from
 	   scripts/syno-vue-components/style/syno-vue-components.css, which defines
 	   them on :root — so they resolve inside this app's window too. Using the
 	   token rather than its literal value means DSM stays the single source of
@@ -224,8 +224,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 	   DSM without the token still renders (an unresolvable var() would
 	   otherwise drop the whole declaration).
 
-	   NOTE the blue: DSM 7.4's primary is #057FEB. This app previously used
-	   #0086e5 (DSM 6's blue) throughout — that was a guess, not a choice. */
+	   NOTE the blue: DSM 7.4's primary is #057FEB, not DSM 6's #0086e5. */
 	function tok(name, fallback) { return 'var(--v-' + name + ',' + fallback + ')'; }
 
 	/* DSM draws its checkboxes from a sprite that ux-all.css references on
@@ -267,9 +266,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 	/* Scoped stylesheet: only the rail, volume card, idle state and toast —
 	   the parts of this UI that have no DSM counterpart. Everything DSM's own
 	   theme paints (grid rows, headers, group headers, selection, hover,
-	   dividers, the checkbox column) is deliberately NOT restyled here; those
-	   overrides were removed after measuring that ux-all.css already renders
-	   them identically to File Station. Everything is scoped under .df-app. */
+	   dividers, the checkbox column) is deliberately NOT restyled here:
+	   measurement shows ux-all.css already renders them identically to File
+	   Station. Everything is scoped under .df-app. */
 	Ext.util.CSS.createStyleSheet([
 		// Rail rows carry DSM's own themed hover/selected classes
 		// (x-grid3-row-over / -selected), so their highlight is painted by
@@ -304,19 +303,19 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		/* The Hash column has no DSM counterpart, so there is no native value to
 		   inherit — but it must not break DSM's 28px row rhythm. As a baseline
 		   inline box, Menlo's metrics push the row taller than the cell's 28px
-		   line-height (measured: 29px at 12px, and 29.5px at the 11px this used
-		   to be). inline-block + vertical-align:top takes it out of baseline
-		   alignment and lands the row on exactly 28px, matching File Station. */
+		   line-height (measured: 29px at 12px). inline-block + vertical-align:top
+		   takes it out of baseline alignment and lands the row on exactly 28px,
+		   matching File Station. */
 		'.df-mono{font-family:Menlo,Consolas,monospace;font-size:' + FSMALL + ';display:inline-block;vertical-align:top;}',
 		/* The top toolbar can run out of width: at the window's minWidth, with
 		   every match criterion in the button's label, the summary and the
 		   170px search box together overrun it. syncSummaryWidth measures that
 		   for real and sets an inline max-width, clawing back only the pixels
-		   the search box actually overflows by — a fixed cap here was both too
-		   tight on a wide window (it clipped text with 400px of room to spare)
-		   and too loose at minWidth with the longest label (the search box
-		   still overran by 19px). This 380px stands only until that first
-		   measurement runs. When a cap does bite, the count and group total —
+		   the search box actually overflows by — a fixed cap here would be both
+		   too tight on a wide window (clipping text with 400px of room to
+		   spare) and too loose at minWidth with the longest label (the search
+		   box still overrunning by 19px). This 380px stands only until that
+		   first measurement runs. When a cap does bite, the count and group total —
 		   the part users scan for — survive, and the full text stays available
 		   as a tooltip. Ellipsis needs a block formatting context, hence
 		   inline-block + middle alignment to keep the toolbar's rhythm. */
@@ -343,8 +342,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		/* …except the paging strip, which File Station DOES separate from the
 		   rows above it. DSM's theme already styles that divider on
 		   .syno-ux-pagingtoolbar (measured in File Station: 1px solid
-		   rgba(198,212,224,0.4)); the rule above was suppressing it, so only
-		   the width is restored here — the colour stays the theme's, and so
+		   rgba(198,212,224,0.4)); the rule above suppresses it, so only the
+		   width is restored here — the colour stays the theme's, and so
 		   follows light/dark mode. */
 		'.df-app .x-panel-bbar .x-toolbar.syno-ux-pagingtoolbar{border-top-width:1px !important;}',
 
@@ -361,33 +360,28 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		   square, so widening this selector would break the match it exists to
 		   preserve. The footer wrapper is .x-panel-btns, NOT .x-toolbar: the
 		   buttons sit in a panel fbar, and a .x-toolbar selector silently
-		   matches nothing (verified in the live DOM). */
+		   matches nothing (verified in DSM's live DOM). */
 		'.df-search-menu .x-panel-btns .syno-ux-button{border-radius:100px;}',
 
 		/* NO grid row / header / group-header rules here, on purpose.
-		   Measured live in DSM 7.4 (2026-07-30) by disabling this stylesheet
-		   and diffing computed styles: on every text column DSM's own
-		   ux-all.css already renders this grid byte-identically to File
-		   Station — 13px/400 headers in --v-color-font-tier2 with 0 8px
-		   padding, rgba(198,212,224,0.4) dividers, rgba(5,127,235,0.04) hover,
+		   Measured in DSM 7.4 by disabling this stylesheet and diffing
+		   computed styles: on every text column DSM's own ux-all.css already
+		   renders this grid byte-identically to File Station — 13px/400
+		   headers in --v-color-font-tier2 with 0 8px padding,
+		   rgba(198,212,224,0.4) dividers, rgba(5,127,235,0.04) hover,
 		   rgba(5,127,235,0.1) selection, 28px rows, and group headers with
-		   DSM's own collapse arrow. The rules that used to sit here either did
-		   nothing (DSM's selectors are more specific) or actively diverged
-		   from File Station: an 11px bold header, a #f8f9fb header fill where
-		   File Station's is transparent — which was in turn the only reason a
-		   .scroll-menu-ct patch was needed to hide the column-picker seam.
-		   Do not reintroduce them. */
+		   DSM's own collapse arrow. Rules here would either do nothing (DSM's
+		   selectors are more specific) or diverge from File Station — an 11px
+		   bold header, say, or a #f8f9fb header fill where File Station's is
+		   transparent. Do not add any. */
 
 		/* Checkbox column, painted with DSM's OWN checkbox art (see
 		   dsmCheckboxSprite for why the image is referenced by URL rather than
 		   by putting DSM's class on the element). Sprite rows are DSM's:
 		   0=unchecked, -20=hover, -40=disabled, -60=checked, -120=grayed.
-		   (An earlier comment here claimed DSM's checkbox classes cannot paint
-		   arbitrary elements. That was wrong — it tested the wrong class name.
-		   Verified 2026-07-30 by injecting bare divs into the live app.)
 		   margin-top:4px is how DSM itself centres the 20px box in a 28px row
 		   (see .syno-ux-grid-enable-column-*), which keeps the row at DSM's
-		   28px — the old vertical-align:middle inflated it to 29.5px.
+		   28px (vertical-align:middle would inflate it to 29.5px).
 		   background-position is pinned because ext-all.css sets 2px 2px on
 		   .x-grid3-row .x-grid3-row-checker, which would offset the unchecked
 		   box from the states below (all addressed at 0). */
@@ -408,14 +402,13 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		   rows means. margin-top:4px is the same 20-in-28 centring DSM uses
 		   for the checker itself, so the padlock sits on the row's baseline
 		   rhythm rather than growing the row. */
-		/* The padlock is the Unicode character U+1F512, not artwork: hand-drawn
-		   shield/lock glyphs were deleted on 0122. It therefore needs no colour
-		   of its own (an emoji-presentation codepoint paints from the font, not
-		   from `color`), which also sidesteps the 0120 trap that made a
-		   currentColor SVG mis-inherit — ux-all.css carries
+		/* The padlock is the Unicode character U+1F512, not artwork, so it
+		   needs no colour of its own (an emoji-presentation codepoint paints
+		   from the font, not from `color`). A currentColor SVG here would
+		   mis-inherit: ux-all.css carries
 		   `.syno-ux-gridpanel div{color:rgb(65,75,85)}`, which matches any div
-		   we put in a grid cell directly. line-height pins the glyph to the
-		   20px box so a tall emoji font cannot grow the row. */
+		   put in a grid cell directly. line-height pins the glyph to the 20px
+		   box so a tall emoji font cannot grow the row. */
 		'.df-app .df-prot-lock{width:20px;height:20px;margin-top:4px;' +
 			'line-height:20px;font-size:13px;text-align:center;}',
 		'.df-app .df-row-capped .x-grid3-row-checker{background-position:0 -40px;cursor:default;}',
@@ -423,13 +416,12 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		   ROW class and never a second class on the checker itself — Ext's
 		   CheckboxSelectionModel.onMouseDown compares
 		   `t.className == "x-grid3-row-checker"` by STRING EQUALITY, so any
-		   extra class there silently kills every checkbox click in the grid
-		   (0077 shipped exactly that). df-row-capped is styled this way for
-		   the same reason. */
+		   extra class there silently kills every checkbox click in the grid.
+		   df-row-capped is styled this way for the same reason. */
 		'.df-app .df-row-nomove .x-grid3-row-checker{background-position:0 -40px;cursor:default;}',
-		/* Deliberately NOT greyed (removed 0122): unselectable rows keep normal
-		   text. Grey text is this app's "Missing"/"Loading" signal, so spending
-		   it on protection made two unrelated states look alike. The disabled
+		/* Deliberately NOT greyed: unselectable rows keep normal text. Grey
+		   text is this app's "Missing"/"Loading" signal, so spending it on
+		   protection would make two unrelated states look alike. The disabled
 		   checkbox and the padlock carry the signal on their own. */
 		'.df-app .x-grid3-hd-checker{display:none;}', /* no select-all header box, per design */
 		/* Conflicting Files verdicts. The row tint is deliberately faint — it has
@@ -459,8 +451,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		   in WebKit) centres the 8px thumb in a 20px gutter, keeping it 6px
 		   from the window edge so grabbing it never hits the resize handle. */
 		'.df-app ::-webkit-scrollbar{width:20px;height:20px;background:transparent;}',
-		/* No overflow-x rule here: measured 2026-07-30 that DSM's own skin
-		   already computes overflow-x:hidden on .x-grid3-scroller, with and
+		/* No overflow-x rule here: DSM's own skin already computes
+		   overflow-x:hidden on .x-grid3-scroller (measured), with and
 		   without this stylesheet. The zero-height pseudo-element below still
 		   earns its place — it removes the 20px gutter strip some WebKit
 		   builds reserve, so the row area runs straight down to the bottom
@@ -475,9 +467,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		'.df-app .x-grid3-scroller::-webkit-scrollbar:horizontal{display:none;height:0;}',
 		/* FleXcroll overlay thumb (the grid's scrollbar): stock flexcroll.css
 		   uses -10px, which seats the thumb ~2px inside the row's right edge.
-		   Measured on-device, File Station uses exactly this — the thumb
-		   right-justifies to (and overlaps) the table edge. An earlier -16px
-		   guess floated it 6px too far in; keep the stock value. */
+		   Measured in File Station, which uses exactly this — the thumb
+		   right-justifies to (and overlaps) the table edge; -16px would float
+		   it 6px too far in. Keep the stock value. */
 		'.df-app .vscrollerbar{margin-left:-10px;}',
 		'.df-app .hscrollerbar{margin-top:-10px;}',
 		'.df-app ::-webkit-scrollbar-thumb{background-color:rgba(0,0,0,0.12);border-radius:100px;',
@@ -487,10 +479,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		'.df-app ::-webkit-scrollbar-button{display:none;}',
 		/* trees (fallback folder picker + select-in-folder): File Station look */
 		/* The trees are SYNO.ux.TreePanel, so DSM sizes the rows (28px) and
-		   draws the expander from its own cate_tree_arrow.png — measured
-		   2026-07-30. The 30px rows, corner radius, row margins and the two
-		   hand-drawn chevron SVGs that used to live here all diverged from
-		   that and were removed; do not reintroduce them.
+		   draws the expander from its own cate_tree_arrow.png (measured in
+		   DSM 7.4). Hand-drawn row heights, corner radii, row margins or
+		   chevrons would diverge from that; do not add any.
 		   The hover/selected tints below are DSM's own token values, kept
 		   because our nodes are plain (no iconCls) and to keep the selected
 		   label legible. */
@@ -571,7 +562,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			var seq = win._pageSeq = (win._pageSeq || 0) + 1;
 			// A failed load must still end the load: Ext's LoadMask hides on
 			// the store's load OR exception event, and Store.loadRecords with
-			// success=false fires neither — so a failed page fetch used to
+			// success=false fires neither — so a failed page fetch would
 			// leave "Loading…" over the grid and its pager for good. Firing
 			// the proxy's exception (the store relays it) is what a stock
 			// proxy does on failure, and what unmasks.
@@ -642,12 +633,11 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		{ id: 'temp_files', label: 'Temporary Files', ico: railIco(
 			'<circle cx="12" cy="12.5" r="8.3" fill="#efa63c"/>' +
 			'<path d="M12 8 V12.7 L15.2 14.6" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>') },
-		/* "Conflicting Files", not "Corrupted Files" (renamed 0123 at the
-		   maintainer's request): the old name asserted of every row what the
-		   scan can only prove of a few. On the maintainer's own NAS the honest
-		   split was 108 files, 0 convicted — so the category name has to
-		   describe the DISAGREEMENT, which is what was actually found, and
-		   leave "Corrupted" to the per-row verdict that earns it.
+		/* "Conflicting Files", not "Corrupted Files": that name would assert
+		   of every row what the scan can only prove of a few — a typical NAS
+		   shows a hundred conflicting files and no convictions — so the
+		   category name describes the DISAGREEMENT, which is what was actually
+		   found, and leaves "Corrupted" to the per-row verdict that earns it.
 		   A warning triangle, single-tone with a white glyph, the way the
 		   Temporary Files clock is drawn — the other three icons' two-tone
 		   bevel has nothing to bevel here. The corners are rounded by stroking
@@ -666,8 +656,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 
 	// Tools whose results are GROUPS rather than a flat list of rows. Paging
 	// unit, the pager's count, the grouped grid, the row builder and the
-	// summary all branch on this — every one of them used to test the literal
-	// 'duplicates', which was correct only while it was the sole grouped tool.
+	// summary all branch on this — none of them may test the literal
+	// 'duplicates', which is correct only while it is the sole grouped tool.
 	var GROUPED = { duplicates: true, corrupted_files: true };
 	function isGrouped(tool) { return !!GROUPED[tool]; }
 
@@ -686,10 +676,10 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 
 	// The Status column's words. KEEP IN SYNC with verdictLabel() in
 	// server/corrupt.go, which writes the same three verdicts into the CSV
-	// export — they drifted once ("Unknown" in the export against
-	// "Undetermined" here), so a report disagreed with the screen it came from.
-	// Both halves are pinned by tests; the daemon's searchable synonyms
-	// (verdictSearchText) accept either wording regardless.
+	// export — if they drift ("Unknown" in the export against "Undetermined"
+	// here) a report disagrees with the screen it came from. Both halves are
+	// pinned by tests; the daemon's searchable synonyms (verdictSearchText)
+	// accept either wording regardless.
 	var VERDICT_TEXT = {
 		corrupt: 'Corrupted',
 		intact: 'Intact',
@@ -722,8 +712,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 	// derivable from each other: internal shares happen to use their name as
 	// the directory (/volume1/Backups ↔ "Backups"), but external ones do not
 	// — share "usbshare1" lives at /volumeUSB1/usbshare. Concatenating one
-	// side from the other is the bug that made every USB destination answer
-	// "This location cannot be used".
+	// side from the other makes every USB destination answer "This location
+	// cannot be used".
 	function shareToReal(sharePath) {
 		if (!sharePath) return null;
 		var p = String(sharePath);
@@ -899,7 +889,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			return (rec.get ? rec.get('path') : rec.path) + '/' + (rec.get ? rec.get('name') : rec.name);
 		},
 		// Toast: a bare styled element, NOT an Ext.Window — DSM's theme repaints
-		// window chrome white, which turned the old toast into a blank box.
+		// window chrome white, which would turn a window-based toast into a blank
+		// box.
 		/* Uses DSM's own SYNO.SDS.ToastBox, which renders into the owner
 		   component — so the toast is scoped to this app's window rather than
 		   floating over the whole desktop, the way DSM's own toasts behave.
@@ -918,8 +909,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				// bindEvents() to wire the close button) and then does
 				// Ext.apply(cfg, userCfg) — so a `listeners` key REPLACES the
 				// whole object, leaving a toast that never auto-dismisses and
-				// whose X does nothing. That shipped in 0079–0081; fixed in 0082
-				// by attaching after construction instead.
+				// whose X does nothing. Attach after construction instead.
 				this._toast = new UxToast({
 					owner: this,
 					text: esc(msg),
@@ -959,11 +949,10 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			var bar = new Ext.ProgressBar({ height: 18, animate: false });
 			// The count goes in its own line ABOVE the bar, never in the bar's
 			// own text. Ext renders progress text inside the bar element, and
-			// at the 18px height DSM's font needs it is clipped to a sliver —
-			// which is exactly how it shipped in 0107. The scan dialog has
-			// always kept its label outside the bar for the same reason; this
-			// now matches it. A non-breaking space holds the line's height so
-			// the dialog does not jump when the first update arrives.
+			// at the 18px height DSM's font needs it is clipped to a sliver.
+			// The scan dialog keeps its label outside the bar for the same
+			// reason; this matches it. A non-breaking space holds the line's
+			// height so the dialog does not jump when the first update arrives.
 			var progLine = new Ext.Panel({
 				border: false,
 				bodyStyle: 'padding:0 0 6px;font-size:' + FSMALL + ';color:' + FONT2 + ';',
@@ -1088,9 +1077,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			};
 			if (UxSearch) {
 				// The clear (X) trigger calls setValue('') + this.filter()
-				// WITHOUT any key event, so keyup-only wiring left state.query
-				// stale: clearing the box kept showing the old filtered page
-				// (bug fixed in 0083). filter() is TextFilter's one funnel for
+				// WITHOUT any key event, so keyup-only wiring would leave
+				// state.query stale: clearing the box would keep showing the old
+				// filtered page. filter() is TextFilter's one funnel for
 				// programmatic value changes, and with no store configured its
 				// stock body is a no-op — overriding it per-instance is the
 				// designed hook, not a clobbered constructor key.
@@ -1138,9 +1127,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				   'x-grid3-row-checker': Ext's CheckboxSelectionModel does
 				   `t.className == "x-grid3-row-checker"` — string equality, not
 				   a class-list test — so adding any second class silently stops
-				   every checkbox click from toggling selection. (Shipped that
-				   bug in 0077; fixed in 0078. DSM's checkbox art is applied by
-				   URL from the stylesheet instead — see dsmCheckboxSprite.)
+				   every checkbox click from toggling selection. (DSM's checkbox
+				   art is applied by URL from the stylesheet instead — see
+				   dsmCheckboxSprite.)
 				   This renderer therefore never DECORATES the checker; on a
 				   read-only reference row it emits a padlock INSTEAD of one,
 				   leaving every other row's checker byte-identical to stock.
@@ -1154,13 +1143,11 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				   must not reach into.
 				   The glyph is therefore the Unicode padlock U+1F512 (written
 				   as a numeric entity so the meaning survives any re-encoding
-				   of this file), NOT drawn art: 0121's hand-drawn shield SVG
-				   was deleted on 0122. That also retires the SVG hazard it
-				   carried — an SVG element's .className is an
-				   SVGAnimatedString, not a string, and Ext's event plumbing
-				   (getTarget, QuickTips) assumes a string, so an SVG node must
-				   never become an event target. A text node in a plain div
-				   cannot be one. */
+				   of this file), NOT drawn art, which also avoids an SVG
+				   hazard: an SVG element's .className is an SVGAnimatedString,
+				   not a string, and Ext's event plumbing (getTarget, QuickTips)
+				   assumes a string, so an SVG node must never become an event
+				   target. A text node in a plain div cannot be one. */
 				renderer: function (v, p, record) {
 					if (record && record.get('prot')) {
 						return '<div class="df-prot-lock" ext:qtip="Read-only reference file — cannot be moved">' +
@@ -1298,10 +1285,10 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				// on window resize and when columns are shown/hidden.
 				forceFit: true,
 				// df-row-prot marks a read-only reference row. It paints
-				// nothing since 0122 — protection is signalled by the padlock
-				// the selection model's renderer puts where the checkbox would
-				// be, not by the row's text colour — but the class stays as the
-				// row-level hook that says which rows those are.
+				// nothing — protection is signalled by the padlock the selection
+				// model's renderer puts where the checkbox would be, not by the
+				// row's text colour — but the class stays as the row-level hook
+				// that says which rows those are.
 				getRowClass: function (rec) {
 					// Composed, not returned early: a row can be both
 					// unmovable and verdict-tinted, and getRowClass gets one
@@ -1359,9 +1346,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					// Status sits beside the name because on that tool it is the
 					// column the whole listing exists to show.
 					// fixed: forceFit scales every other column to fill the grid, and
-				// with this tool's two extra columns showing it squeezed Status to
-				// 57px — narrower than the word it has to render. Measured on the
-				// DS916+; jsdom does no layout, so only on-device eyes catch this.
+					// with this tool's two extra columns showing it would squeeze Status
+					// to 57px — narrower than the word it has to render (measured
+					// on-device; jsdom does no layout).
 				{ header: 'Status', dataIndex: 'verdict', width: 110, fixed: true, sortable: false, hidden: true, renderer: function (v, m, r) {
 						if (!v) return '';
 						var ev = r.get('evidence');
@@ -1719,7 +1706,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			});
 			// Captured Date is read from photo EXIF and says nothing about
 			// corruption; on this tool its width is better spent on Evidence,
-			// which was measured squeezed to 145px on the DS916+.
+			// which is otherwise squeezed to 145px (measured on-device).
 			var ci = cm.findColumnIndex('captured');
 			if (ci >= 0 && cm.isHidden(ci) !== show) cm.setHidden(ci, show);
 			// The checker column goes with the ability to select: a row of
@@ -1762,12 +1749,10 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		},
 
 		/* --------------------------------------------------- row building */
-		// Turns one page of the daemon's JSON into grid rows (called by the
-		// store's proxy). Duplicate groups become a run of rows sharing a
-		// The one place a fetched page's whole-set metadata is recorded.
-		// pageToRows and fetchMeta used to each carry this literal, and a
-		// field added to one (dateRange was) silently went missing from the
-		// other path. scanned is written here and only here.
+		// The one place a fetched page's whole-set metadata is recorded. If
+		// pageToRows and fetchMeta each carried this literal, a field added to
+		// one would silently go missing from the other path. scanned is
+		// written here and only here.
 		noteResultMeta: function (tool, j) {
 			var total = j.total || {};
 			this.state.results[tool] = {
@@ -1796,8 +1781,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		dupGroupLabel: function (g, shown, whole) {
 			// g.prot is the daemon's protected count over the WHOLE group. On
 			// a trimmed group the rows on the page are a subset, so counting
-			// from them and pairing it with `whole` overstated the reclaimable
-			// figure — five protected copies off the page read as one kept.
+			// from them and pairing it with `whole` would overstate the
+			// reclaimable figure — five protected copies off the page would
+			// read as one kept.
 			var keep = Math.max(g.prot || 0, 1);
 			var recl = g.size * Math.max(0, whole - keep);
 			return fmtNum(whole) + ' identical files &nbsp;·&nbsp; ' + fmtBytes(g.size) + ' each &nbsp;·&nbsp; ' + esc(g.ext) +
@@ -1806,6 +1792,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					fmtNum(shown) + '</span>' : '');
 		},
 
+		// Turns one page of the daemon's JSON into grid rows (called by the
+		// store's proxy). Duplicate groups become a run of rows sharing a
 		// group key so the grouped view draws one header per group; flat
 		// tools map straight across. The page's whole-set metadata is kept
 		// for the summary, the badges and the truncation notice. The returned
@@ -1823,16 +1811,16 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					// result set — never its slot on the page. Ext's GroupingView
 					// keeps per-group collapse state under this value and clears
 					// it on nothing: not a reload, a page turn or a tool switch.
-					// A per-page index therefore made collapsing the 4th group on
-					// page 1 silently collapse whatever was 4th on page 2, and
-					// those hidden rows stay selectable and movable.
+					// A per-page index would therefore make collapsing the 4th
+					// group on page 1 silently collapse whatever is 4th on page 2,
+					// and those hidden rows stay selectable and movable.
 					//
-					// The tool prefix is the half that on-device testing caught:
-					// both grouped tools page from offset 0, so absolute position
-					// ALONE still collided across them, and a collapse on
-					// Duplicates hid an unrelated set of Conflicting Files. The
-					// prefix is constant within a tool, so the group ordering
-					// GroupingStore derives from this string is unaffected.
+					// The tool prefix matters as much: both grouped tools page from
+					// offset 0, so absolute position ALONE would still collide
+					// across them, and a collapse on Duplicates would hide an
+					// unrelated set of Conflicting Files. The prefix is constant
+					// within a tool, so the group ordering GroupingStore derives
+					// from this string is unaffected.
 					var gKey = tool + ':' + pad6((j.offset || 0) + gi);
 					grpIds[gKey] = [];
 					Ext.each(g.files, function (f) {
@@ -1943,9 +1931,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				/* A combo's dropdown renders to document.body by default, which
 				   puts it OUTSIDE the menu element — Ext's MenuMgr then reads
 				   the click on a list item as an outside click and hides the
-				   whole menu, losing every option mid-edit (the 0083 bug).
-				   getListParent is Ext's designed hook for exactly this: keep
-				   the list inside the menu so the click counts as inside. */
+				   whole menu, losing every option mid-edit. getListParent is
+				   Ext's designed hook for exactly this: keep the list inside
+				   the menu so the click counts as inside. */
 				c.getListParent = function () {
 					var m = this.el ? this.el.up('.x-menu') : null;
 					return m ? m.dom : document.body;
@@ -1961,8 +1949,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			   Construction mirrors what SYNO.ux.DateField.onTriggerClick does
 			   itself — ownerField + pickerCfg + the syno-ux-datefield-menu
 			   class + the onDateMenuHide wiring — so this stays DSM's own
-			   picker (0084 substituted a stock Ext.menu.DateMenu here, which
-			   is what made the calendar stop looking like File Station's). */
+			   picker (a stock Ext.menu.DateMenu here makes the calendar stop
+			   looking like File Station's). */
 			function datePicker(field, end) {
 				if (!UxDateMenu) return field;
 				var dm = new UxDateMenu(Ext.apply({
@@ -1976,9 +1964,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				   relay inside the same lazy branch that CREATES the menu, so
 				   assigning field.menu here skips it forever and a day click
 				   never reaches the field — the picker highlights the day, the
-				   value is never set and the menu never closes (shipped broken
-				   0087–0092; found on-device 2026-07-31). onSelect is what does
-				   setValue + fireEvent('select') + menu.hide(), so wiring it
+				   value is never set and the menu never closes. onSelect is
+				   what does setValue + fireEvent('select') + menu.hide(), so
+				   wiring it
 				   also restores the close-on-day-click that DSM's own menu-level
 				   handler cannot do here (it calls hide(true), which the deep-
 				   hide guard below deliberately refuses). */
@@ -1991,12 +1979,12 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				/* The year and month controls in DSM's picker are dropdown
 				   BUTTONS whose lists are themselves menus, parented to this
 				   picker. Ext.menu.Menu.onHide cascades a deep hide up the
-				   parentMenu chain, so choosing a year deep-hid the picker —
-				   and, because the picker names the search menu as ITS parent,
-				   tore the whole search menu down too (the 0087 report).
-				   File Station's picker stays open on a year change (verified
-				   on-device), and it only escapes the cascade because its
-				   picker has no parentMenu at all. Ours needs one, so refuse
+				   parentMenu chain, so choosing a year would deep-hide the
+				   picker — and, because the picker names the search menu as
+				   ITS parent, tear the whole search menu down too. File
+				   Station's picker stays open on a year change (verified in
+				   DSM), and it only escapes the cascade because its picker has
+				   no parentMenu at all. Ours needs one, so refuse
 				   the deep hide instead: a plain hide() — what a day click,
 				   closeDatePickers and MenuMgr.hideAll all use (hideAll passes
 				   no argument; measured) — still closes it normally. */
@@ -2010,7 +1998,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				   the data instead: From on the oldest file's month, To on the
 				   newest. update() moves only the displayed month — setValue()
 				   would silently fill the field with a date the user never
-				   picked (measured on-device), and there is no select to undo
+				   picked (measured in DSM), and there is no select to undo
 				   because setValue does not fire one. */
 				var stockTrigger = field.onTriggerClick;
 				field.onTriggerClick = function () {
@@ -2021,21 +2009,21 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					}
 					return r;
 				};
-				/* …but the trigger wrapper alone only fixed the FIRST open (the
-				   flaw carried from 0090 to 0092: every later open showed today,
-				   and since today is past maxValue the calendar arrived with all
-				   42 day cells disabled — nothing selectable, no hint where the
-				   data lives). Traced on-device: ~140ms after a re-open, DSM's
-				   own deferred `updateDateTime` calls `setValue('')`, which calls
+				/* …but the trigger wrapper alone only covers the FIRST open:
+				   every later open would show today, and since today is past
+				   maxValue the calendar would arrive with all 42 day cells
+				   disabled — nothing selectable, no hint where the data lives.
+				   Traced in DSM: ~140ms after a re-open, DSM's own deferred
+				   `updateDateTime` calls `setValue('')`, which calls
 				   `update('')`, and an empty date makes the picker fall back to
 				   today — landing after our wrapper has already run.
 				   Racing it with a later update() would be guesswork, so instead
 				   make the fallback itself correct: an update with no date shows
 				   the data's month. This is timing-independent and cannot commit
 				   a value, because update() only moves the displayed month —
-				   picker.value stays empty (verified across 5 open/close cycles:
-				   month right every time, field and picker.value both still
-				   empty, and a real day click still commits and closes). */
+				   picker.value stays empty (verified across repeated open/close
+				   cycles: month right every time, field and picker.value both
+				   still empty, and a real day click still commits and closes). */
 				if (dm.picker && dm.picker.update) {
 					var stockPickerUpdate = dm.picker.update;
 					dm.picker.update = function (d, forceRefresh) {
@@ -2064,9 +2052,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 						var r2 = stockHandler ? stockHandler.apply(this, arguments) : undefined;
 						/* Clear fires no select, so nothing else recomputes the
 						   pair's bounds: the OTHER field would go on being
-						   limited by the date just removed. (Seen in the wild
-						   on 0091 — From reported "must be 2019-04-30 or
-						   earlier" from a To that had already been cleared.) */
+						   limited by the date just removed, and From would
+						   report "must be <date> or earlier" from a To that had
+						   already been cleared. */
 						me.refreshDateBounds();
 						var back = me.pickerOpenDate(end, false);
 						if (back && dm.picker && dm.picker.update) dm.picker.update(back);
@@ -2170,10 +2158,10 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					   the menu open while a picker is up — but it also puts the
 					   picker inside this menu's chain, so MenuMgr stops treating
 					   clicks on the other fields as "outside" and the picker
-					   never auto-closes: both popups end up open at once (the
-					   0085 report). Close it here instead, on any mousedown in
-					   the menu that is not inside the picker itself or on the
-					   owning field's own trigger. */
+					   never auto-closes: both popups end up open at once. Close
+					   it here instead, on any mousedown in the menu that is not
+					   inside the picker itself or on the owning field's own
+					   trigger. */
 					afterrender: function (mnu) {
 						mnu.getEl().on('mousedown', function (e) {
 							me.closeDatePickers(e.getTarget());
@@ -2204,8 +2192,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		/* Menu show. The Location choices are always rebuilt (the scan scope can
 		   change between opens), but the FIELD VALUES are only re-read from
 		   state after an apply/reset — otherwise dismissing the menu without
-		   pressing Search would silently discard everything typed into it,
-		   which is half of what the 0083 "options are reset" report was.
+		   pressing Search would silently discard everything typed into it.
 		   Reset, Search and the X all set _soSynced=false to opt back in. */
 		syncSearchMenu: function () {
 			var f = this.soFields, so = this.state.searchOpts;
@@ -2533,8 +2520,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					unsel[r.get('gidx')] === 1;
 				Ext.fly(row)[capped ? 'addClass' : 'removeClass']('df-row-capped');
 				/* Say WHY the box cannot be ticked, on the box itself — this is
-				   the hover the user gets when they try to check it. Replaces
-				   the toast the capped case used to fire (removed in 0082).
+				   the hover the user gets when they try to check it.
 				   Only the capped case: a protected row's cell holds a padlock,
 				   not a box, and that padlock carries its own qtip straight
 				   from the renderer — a second one on the cell around it would
@@ -2771,8 +2757,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					win.close();
 					// The padlocks and the reclaimable totals follow the folders
 					// the stored results were SCANNED with (the daemon's list),
-					// not this dialog's: editing here used to unlock rows the
-					// move then refused as read-only. Say when they differ.
+					// not this dialog's: unlocking rows here would only have the
+					// move refuse them as read-only. Say when the lists differ.
 					var norm = function (a) { return (a || []).slice().sort().join('\n'); };
 					if (norm(me.state.refDirs) !== norm(me.state.scanRefDirs || [])) {
 						me.notify('Reference folder changes take effect at the next scan.');
@@ -2847,9 +2833,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		resumeMatchesSettings: function () {
 			var m = this._interrupted || {};
 			// Cleaned like the daemon cleans the marker (filepath.Clean), then
-			// deduplicated and sorted — a trailing slash in a stored preference
-			// used to make this say "changed" for a request the daemon would
-			// have resumed.
+			// deduplicated and sorted — otherwise a trailing slash in a stored
+			// preference makes this say "changed" for a request the daemon
+			// would resume.
 			var norm = function (a) {
 				a = (a || []).slice();
 				for (var j = 0; j < a.length; j++) a[j] = cleanPath(a[j]);
@@ -3056,8 +3042,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			var me = this;
 			// One /state in flight at a time: each call is a full CGI spawn on
 			// the NAS, and on a slow model a reply slower than the interval
-			// stacked them without bound — and at scan end every outstanding
-			// callback then ran the completion refresh again.
+			// would stack them without bound — and at scan end every outstanding
+			// callback would run the completion refresh again.
 			if (this._pollBusy) return;
 			this._pollBusy = true;
 			api('/state', 'GET', null, function (err, st) {
@@ -3102,7 +3088,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				// A run that ENDED without completing — Stop, or a failure the
 				// daemon reported — is no completion: replaying the previous
 				// finished scan's announcements here (its unreadable-locations
-				// toast, a jump back to page 1) was exactly wrong.
+				// toast, a jump back to page 1) would be exactly wrong.
 				if (st.lastEnd && st.lastEnd.completed === false) {
 					me.stopPolling();
 					me.notify('Scan stopped.');
@@ -3190,15 +3176,14 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		// The preserve option is answered BEFORE the folder picker, because it
 		// changes what the picked folder MEANS: with it ticked the move creates
 		// a new folder INSIDE the one that gets picked. Asked afterwards, the
-		// picker's Select button was ambiguous. The picker is now the last
+		// picker's Select button would be ambiguous. The picker is the last
 		// step, and its Select starts the move — so this dialog says so, and
 		// there is no confirmation after it.
 		openMoveDialog: function () {
 			var me = this;
 			var recs = this.sm.getSelections();
 			if (!recs.length) return;
-			// MEASURED ON DSM 7.4, 2026-08-02 — read this before "simplifying"
-			// anything below, and before filing a bug about it.
+			// MEASURED ON DSM 7.4 — read this before simplifying anything below.
 			//
 			// Both this dialog and the folder chooser are owned
 			// SYNO.SDS.ModalWindows, and DSM's afterShow masks the owner
@@ -3207,9 +3192,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// chooser flow the app window carries a full-window
 			// .ext-el-mask.sds-window-mask: elementFromPoint inside the window
 			// returns the mask, and the grid, the rail and the toolbar are all
-			// click-blocked. An earlier version of these comments claimed the
-			// opposite — that the app stayed clickable — and that false premise
-			// generated a string of phantom defect reports.
+			// click-blocked.
 			//
 			// Everything below is therefore DEFENCE IN DEPTH, not a fix for
 			// something a user can currently do. It is kept because every one
@@ -3240,9 +3223,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// while the daemon issues "f<n>" ids, and free to not depend on.
 			var wantIds = {}, wantCount = recs.length;
 			Ext.each(recs, function (r) { wantIds[r.id] = true; });
-			// Two mutually exclusive destinations layouts, so say so with radios
+			// Two mutually exclusive destination layouts, so say so with radios
 			// rather than a checkbox: "preserve" is a choice between two
-			// outcomes, not a modifier, and a tickbox made the alternative
+			// outcomes, not a modifier, and a tickbox would make the alternative
 			// invisible until you read the prose.
 			var mode = new UxRadioGroup({
 				columns: 1,
@@ -3274,9 +3257,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				width: 420,
 				// autoHeight, like showBusy: without it the window takes a fixed
 				// height, and a body of overflow:hidden then CLIPS whatever sits
-				// last. That is how the first cut of this dialog shipped with its
-				// control rendered, ticked and functional but only six pixels of
-				// it on screen.
+				// last — a control rendered, ticked and functional with only six
+				// pixels of it on screen.
 				autoHeight: true,
 				modal: false,
 				cls: 'df-app',
@@ -3380,13 +3362,10 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// deliberately separate from the scan poller (pollTask): their
 			// lifecycles differ and sharing the timer would tangle them.
 			//
-			// This comment used to justify that by asserting a move and a scan
-			// can never overlap. They could: until 0114 the daemon guarded only
-			// move-during-scan, never scan-during-move, and this client cannot
-			// enforce it anyway — a second DSM tab or a reload mid-move reaches
-			// /api/scan directly. The daemon refuses both directions now
-			// (scanAdmissionLocked / beginMove); do not reintroduce a client
-			// assumption about it.
+			// Nothing here may assume a move and a scan cannot be requested
+			// together: this client cannot prevent it — a second DSM tab or a
+			// reload mid-move reaches /api/scan directly. The daemon refuses
+			// both directions (scanAdmissionLocked / beginMove).
 			me._moveOrphaned = false;
 			var stopPoll = function () {
 				if (me._movePoll) { clearInterval(me._movePoll); me._movePoll = null; }
@@ -3528,8 +3507,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		openFileStation: function (path) {
 			try {
 				// "opendir" (share-space path) is File Station's supported way
-				// to open a folder. Its "openfile" highlight variant was tried
-				// and reverted: FS applies the highlight one-shot against a
+				// to open a folder. Its "openfile" highlight variant is not
+				// reliable: FS applies the highlight one-shot against a
 				// variable number of internal list loads, so it only sticks
 				// sometimes — opening the folder is the reliable behavior.
 				SYNO.SDS.AppLaunch('SYNO.SDS.App.FileStation3.Instance',

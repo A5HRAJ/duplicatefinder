@@ -9,7 +9,7 @@ PKG_DIST_SITE = https://github.com/A5HRAJ/duplicatefinder/archive/refs/tags
 PKG_DIST_FILE = $(PKG_NAME)-$(PKG_VERS).$(PKG_EXT)
 PKG_DIR = $(PKG_NAME)-$(PKG_VERS)
 
-# Go has no PPC target; the hand-built package never shipped ARMv5 either.
+# Go has no PPC target, and ARMv5 is not a target of this package.
 UNSUPPORTED_ARCHS = $(PPC_ARCHS) $(ARMv5_ARCHS)
 
 BUILD_DEPENDS = native/go

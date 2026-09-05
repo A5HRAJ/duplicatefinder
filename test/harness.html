@@ -17,8 +17,8 @@ SYNO.ux.Toolbar = Ext.Toolbar;
 // field for numbered buttons and ±5-page jumps; the plain Ext one shares its
 // API and store contract, which is what the app drives. The two DSM-only
 // members the app conditionally overrides are stubbed too — without them the
-// app's own guard skipped its override here, so that code ran only on the
-// NAS and no test could catch a regression in it.
+// app's own guard would skip its override here, so that code would run only
+// on the NAS and no test could catch a regression in it.
 SYNO.ux.PagingToolbar = Ext.extend(Ext.PagingToolbar, {
 	setButtonsVisible: function (visible) { this.navButtonsVisible = !!visible; },
 	getTotalPage: function () { return this.getPageData().pages; }
@@ -27,9 +27,9 @@ SYNO.ux.GridPanel = Ext.grid.GridPanel;
 SYNO.ux.Menu = Ext.menu.Menu;
 // Real DSM tags every button with `syno-ux-button` plus a variant class taken
 // from btnStyle — measured live: `x-btn syno-ux-button syno-ux-button-default
-// x-btn-noicon`, and `-blue` for btnStyle:'blue'. The bare Ext.Button alias
-// this replaced carried neither, so any CSS or assertion keyed on DSM's own
-// class names silently matched nothing here while working on the NAS.
+// x-btn-noicon`, and `-blue` for btnStyle:'blue'. A bare Ext.Button alias
+// would carry neither, so any CSS or assertion keyed on DSM's own class
+// names would silently match nothing here while working on the NAS.
 SYNO.ux.Button = Ext.extend(Ext.Button, {
 	initComponent: function () {
 		var variant = this.btnStyle || 'default';
@@ -78,9 +78,8 @@ SYNO.ux.TreePanel = Ext.extend(Ext.tree.TreePanel, {
 });
 
 // ToastBox / PercentageBar / CapacityRender stubs, modelled on the real DSM
-// 7.4 implementations read out of the browser (2026-07-30). Without these the
-// app silently takes its fallback paths and the DSM branches go untested —
-// which is how the 0077 checkbox regression slipped through.
+// 7.4 implementations read out of the browser. Without these the app silently
+// takes its fallback paths and the DSM branches go untested.
 SYNO.SDS.ToastBox = Ext.extend(Ext.Component, {
 	constructor: function (cfg) {
 		cfg = cfg || {};
@@ -92,7 +91,7 @@ SYNO.SDS.ToastBox = Ext.extend(Ext.Component, {
 		// builds its own (afterrender -> defineToastBoxBehavior, which starts
 		// the auto-dismiss timer and wires the close button) and then does
 		// Ext.apply(ownCfg, userCfg), so a user `listeners` key REPLACES them
-		// and the toast neither dismisses nor closes. Shipped in 0079-0081.
+		// and the toast neither dismisses nor closes.
 		window.__lastToastCfgHadListeners = Object.prototype.hasOwnProperty.call(cfg, 'listeners');
 		var c = Ext.apply({ cls: 'syno-sds-toast-box', html: cfg.text,
 			renderTo: cfg.owner.el ? cfg.owner.el : undefined }, cfg);
