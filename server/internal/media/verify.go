@@ -1,4 +1,10 @@
-package main
+// Package media reads the metadata and checks the structure of the file
+// formats Duplicate Finder understands, from bytes it does not control: EXIF
+// capture dates in JPEG, the TIFF-family raws, HEIF and QuickTime, and the
+// container validators behind the conflicting-files verdicts. Every reader
+// here bounds its allocations and loops, and expresses bounds as
+// subtractions so they cannot overflow on the 32-bit ARM build.
+package media
 
 // Corruption evidence — the checks that answer "which of these copies is the
 // damaged one?" once the scan has found files claiming to be the same file
@@ -41,17 +47,22 @@ import (
 	"os"
 )
 
-// intactness is what one file's own structure says about it. Deliberately
+// Intactness is what one file's own structure says about it. Deliberately
 // three-valued: "no validator covers this type" and "this file checks out"
 // must never collapse together, or every unrecognised extension would read as
 // a clean bill of health.
-type intactness int
+type Intactness int
 
 const (
-	unproven intactness = iota // no validator for this type, or it could not finish
-	proven                     // structure walked cleanly and every embedded checksum agreed
-	damaged                    // structure or a checksum is definitively wrong
+	Unproven Intactness = iota // no validator for this type, or it could not finish
+	Proven                     // structure walked cleanly and every embedded checksum agreed
+	Damaged                    // structure or a checksum is definitively wrong
 )
+
+// ErrCancelled is returned by CompareContent when the scan's cancel channel
+// closes mid-read. The scanner shares this value for its own reads, so a
+// single errors.Is answers "was this a cancel?" for either.
+var ErrCancelled = errors.New("cancelled")
 
 // maxVerifyBytes bounds the validators that must decompress to check a
 // checksum. Past it the file is left unproven rather than spending minutes of
@@ -74,18 +85,18 @@ const maxInflate = 8 << 30
 // so the healthy copy would be convicted and the rotted one called Intact.
 const minZeroBytes = 512
 
-// verifyContent walks one file's container and reports what its own structure
+// VerifyContent walks one file's container and reports what its own structure
 // proves. The magic bytes alone select the validator — never the file name,
 // because the whole point here is a file whose contents may not match its
 // name. The returned string is user-facing evidence and is empty unless the
 // verdict is meaningful.
-func verifyContent(open func() (*os.File, error), size int64) (intactness, string) {
+func VerifyContent(open func() (*os.File, error), size int64) (Intactness, string) {
 	if size <= 0 {
-		return unproven, ""
+		return Unproven, ""
 	}
 	f, err := open()
 	if err != nil {
-		return unproven, ""
+		return Unproven, ""
 	}
 	defer f.Close()
 
@@ -113,27 +124,27 @@ func verifyContent(open func() (*os.File, error), size int64) (intactness, strin
 	}
 	// GIF and the TIFF family carry no checksum and no end marker worth
 	// testing, so they deliberately have no arm above.
-	return unproven, ""
+	return Unproven, ""
 }
 
 // verifyPNG walks the chunk list and recomputes every CRC32. This is the
 // strongest check available anywhere in this file: a PNG proves its own
 // integrity byte for byte, with no second copy to compare against.
-func verifyPNG(f *os.File, size int64) (intactness, string) {
+func verifyPNG(f *os.File, size int64) (Intactness, string) {
 	pos := int64(8)
 	sawIHDR, sawIEND := false, false
 	crcBuf := make([]byte, 64<<10)
 	for pos < size {
 		var hdr [8]byte
 		if _, err := f.ReadAt(hdr[:], pos); err != nil {
-			return damaged, "PNG chunk list ends mid-header — the file is truncated"
+			return Damaged, "PNG chunk list ends mid-header — the file is truncated"
 		}
 		clen := int64(binary.BigEndian.Uint32(hdr[0:4]))
 		ctype := string(hdr[4:8])
 		// Overflow-safe: on 32-bit ARM builds pos+clen could wrap, so every
 		// bound is expressed as a subtraction against what is left.
 		if clen < 0 || clen > size-pos-12 {
-			return damaged, fmt.Sprintf("PNG chunk %q claims %d bytes but only %d remain — the file is truncated", ctype, clen, size-pos-12)
+			return Damaged, fmt.Sprintf("PNG chunk %q claims %d bytes but only %d remain — the file is truncated", ctype, clen, size-pos-12)
 		}
 		h := crc32.NewIEEE()
 		h.Write(hdr[4:8])
@@ -149,17 +160,17 @@ func verifyPNG(f *os.File, size int64) (intactness, string) {
 				h.Write(crcBuf[:got])
 			}
 			if err != nil {
-				return damaged, "PNG data ends early — the file is truncated"
+				return Damaged, "PNG data ends early — the file is truncated"
 			}
 			off += int64(got)
 			rest -= int64(got)
 		}
 		var want [4]byte
 		if _, err := f.ReadAt(want[:], pos+8+clen); err != nil {
-			return damaged, "PNG chunk checksum is missing — the file is truncated"
+			return Damaged, "PNG chunk checksum is missing — the file is truncated"
 		}
 		if h.Sum32() != binary.BigEndian.Uint32(want[:]) {
-			return damaged, fmt.Sprintf("PNG chunk %q fails its own CRC32 at offset %d — the stored bytes are damaged", ctype, pos)
+			return Damaged, fmt.Sprintf("PNG chunk %q fails its own CRC32 at offset %d — the stored bytes are damaged", ctype, pos)
 		}
 		switch ctype {
 		case "IHDR":
@@ -173,19 +184,19 @@ func verifyPNG(f *os.File, size int64) (intactness, string) {
 		}
 	}
 	if !sawIHDR || !sawIEND {
-		return damaged, "PNG is missing its end-of-image chunk — the file is truncated"
+		return Damaged, "PNG is missing its end-of-image chunk — the file is truncated"
 	}
-	return proven, "every PNG chunk matches its own CRC32"
+	return Proven, "every PNG chunk matches its own CRC32"
 }
 
 // verifyGzip inflates the stream so the trailing CRC32 and length are checked.
 // gzip.Reader reports both as ErrChecksum at EOF.
-func verifyGzip(f *os.File, size int64) (intactness, string) {
+func verifyGzip(f *os.File, size int64) (Intactness, string) {
 	if size > maxVerifyBytes {
-		return unproven, ""
+		return Unproven, ""
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return unproven, ""
+		return Unproven, ""
 	}
 	zr, err := gzip.NewReader(f)
 	if err != nil {
@@ -197,40 +208,40 @@ func verifyGzip(f *os.File, size int64) (intactness, string) {
 		// conviction is the worst outcome this file can produce, the header
 		// only ever decides whether there is a stream worth checking. Real
 		// damage is still caught below, where the CRC32 and ISIZE are.
-		return unproven, ""
+		return Unproven, ""
 	}
 	defer zr.Close()
 	n, err := io.Copy(io.Discard, io.LimitReader(zr, maxInflate))
 	switch {
 	case errors.Is(err, gzip.ErrChecksum):
-		return damaged, "gzip stream fails its own CRC32 — the stored bytes are damaged"
+		return Damaged, "gzip stream fails its own CRC32 — the stored bytes are damaged"
 	case errors.Is(err, io.ErrUnexpectedEOF):
-		return damaged, "gzip stream ends early — the file is truncated"
+		return Damaged, "gzip stream ends early — the file is truncated"
 	case err != nil:
-		return damaged, "gzip stream cannot be decompressed — the file is damaged"
+		return Damaged, "gzip stream cannot be decompressed — the file is damaged"
 	case n >= maxInflate:
-		return unproven, ""
+		return Unproven, ""
 	}
-	return proven, "gzip stream matches its own CRC32"
+	return Proven, "gzip stream matches its own CRC32"
 }
 
 // verifyZip checks every member's CRC32. Covers .zip and everything built on
 // it — .docx, .xlsx, .pptx, .odt, .jar, .apk — which between them are most of
 // the non-media documents on a NAS.
-func verifyZip(f *os.File, size int64) (intactness, string) {
+func verifyZip(f *os.File, size int64) (Intactness, string) {
 	if size > maxVerifyBytes {
-		return unproven, ""
+		return Unproven, ""
 	}
 	// archive/zip materialises one File per central-directory record before
 	// anything is checked, so a directory-only archive near maxVerifyBytes
 	// would cost gigabytes of heap on the scan goroutine. Read the entry
 	// count out of the end-of-central-directory record first.
 	if n, ok := zipEntryCount(f, size); ok && n > maxZipEntries {
-		return unproven, ""
+		return Unproven, ""
 	}
 	zr, err := zip.NewReader(f, size)
 	if err != nil {
-		return damaged, "ZIP directory is unreadable — the archive is damaged or truncated"
+		return Damaged, "ZIP directory is unreadable — the archive is damaged or truncated"
 	}
 	var total int64
 	for _, m := range zr.File {
@@ -241,36 +252,36 @@ func verifyZip(f *os.File, size int64) (intactness, string) {
 		// Doubly wrong: a damaged verdict at this rung SHORT-CIRCUITS the byte
 		// comparison that would find the copy actually at fault.
 		if m.Flags&0x1 != 0 {
-			return unproven, "" // encrypted payload: nothing here can check it
+			return Unproven, "" // encrypted payload: nothing here can check it
 		}
 		rc, err := m.Open()
 		if err != nil {
 			if errors.Is(err, zip.ErrAlgorithm) {
-				return unproven, "" // compression method this reader lacks
+				return Unproven, "" // compression method this reader lacks
 			}
-			return damaged, fmt.Sprintf("ZIP entry %q cannot be opened — the archive is damaged", m.Name)
+			return Damaged, fmt.Sprintf("ZIP entry %q cannot be opened — the archive is damaged", m.Name)
 		}
 		n, err := io.Copy(io.Discard, io.LimitReader(rc, maxInflate-total))
 		rc.Close()
 		total += n
 		switch {
 		case errors.Is(err, zip.ErrChecksum):
-			return damaged, fmt.Sprintf("ZIP entry %q fails its own CRC32 — the stored bytes are damaged", m.Name)
+			return Damaged, fmt.Sprintf("ZIP entry %q fails its own CRC32 — the stored bytes are damaged", m.Name)
 		case errors.Is(err, io.ErrUnexpectedEOF):
-			return damaged, fmt.Sprintf("ZIP entry %q ends early — the archive is truncated", m.Name)
+			return Damaged, fmt.Sprintf("ZIP entry %q ends early — the archive is truncated", m.Name)
 		case errors.Is(err, zip.ErrAlgorithm):
-			return unproven, "" // surfaced at read time rather than at Open
+			return Unproven, "" // surfaced at read time rather than at Open
 		case err != nil:
-			return damaged, fmt.Sprintf("ZIP entry %q cannot be decompressed — the archive is damaged", m.Name)
+			return Damaged, fmt.Sprintf("ZIP entry %q cannot be decompressed — the archive is damaged", m.Name)
 		}
 		if total >= maxInflate {
-			return unproven, ""
+			return Unproven, ""
 		}
 	}
 	if len(zr.File) == 0 {
-		return unproven, ""
+		return Unproven, ""
 	}
-	return proven, "every ZIP entry matches its own CRC32"
+	return Proven, "every ZIP entry matches its own CRC32"
 }
 
 // maxZipEntries bounds the archives verifyZip will open: past it the archive
@@ -323,15 +334,15 @@ func zipEntryCount(f *os.File, size int64) (uint64, bool) {
 // end-of-image marker is present. JPEG carries no checksum, so this catches
 // the truncation half of the problem and nothing else — which is why a clean
 // walk returns proven only in the weak sense the caller treats it as.
-func verifyJPEG(f *os.File, size int64) (intactness, string) {
+func verifyJPEG(f *os.File, size int64) (Intactness, string) {
 	pos := int64(2)
 	for pos < size-1 {
 		var m [4]byte
 		if _, err := f.ReadAt(m[:2], pos); err != nil {
-			return damaged, "JPEG segment list ends early — the file is truncated"
+			return Damaged, "JPEG segment list ends early — the file is truncated"
 		}
 		if m[0] != 0xFF {
-			return damaged, fmt.Sprintf("JPEG segment framing breaks at offset %d — the file is damaged", pos)
+			return Damaged, fmt.Sprintf("JPEG segment framing breaks at offset %d — the file is damaged", pos)
 		}
 		mk := m[1]
 		// 0xFF is a legal fill byte before a marker, not a marker code. Reading
@@ -351,11 +362,11 @@ func verifyJPEG(f *os.File, size int64) (intactness, string) {
 			continue
 		}
 		if _, err := f.ReadAt(m[2:4], pos+2); err != nil {
-			return damaged, "JPEG segment length is missing — the file is truncated"
+			return Damaged, "JPEG segment length is missing — the file is truncated"
 		}
 		seg := int64(binary.BigEndian.Uint16(m[2:4]))
 		if seg < 2 || seg > size-pos-2 {
-			return damaged, fmt.Sprintf("JPEG segment at offset %d claims more bytes than the file holds — it is truncated", pos)
+			return Damaged, fmt.Sprintf("JPEG segment at offset %d claims more bytes than the file holds — it is truncated", pos)
 		}
 		pos += 2 + seg
 	}
@@ -379,46 +390,46 @@ func verifyJPEG(f *os.File, size int64) (intactness, string) {
 			n++ // one byte of overlap, so a marker split across the seam is seen
 		}
 		if _, err := f.ReadAt(buf[:n], start); err != nil {
-			return unproven, ""
+			return Unproven, ""
 		}
 		if bytes.Contains(buf[:n], []byte{0xFF, 0xD9}) {
-			return proven, "JPEG segment structure is intact and the end-of-image marker is present"
+			return Proven, "JPEG segment structure is intact and the end-of-image marker is present"
 		}
 		end = start
 	}
-	return damaged, "JPEG has no end-of-image marker — the file is truncated"
+	return Damaged, "JPEG has no end-of-image marker — the file is truncated"
 }
 
 // verifyPDF checks the header and the trailer. PDFs are routinely appended to
 // (incremental updates), so only the two anchors are safe to insist on.
-func verifyPDF(f *os.File, size int64) (intactness, string) {
+func verifyPDF(f *os.File, size int64) (Intactness, string) {
 	tail := int64(2 << 10)
 	if tail > size {
 		tail = size
 	}
 	buf := make([]byte, tail)
 	if _, err := f.ReadAt(buf, size-tail); err != nil {
-		return unproven, ""
+		return Unproven, ""
 	}
 	if !bytes.Contains(buf, []byte("%%EOF")) {
-		return damaged, "PDF has no end-of-file marker — the file is truncated"
+		return Damaged, "PDF has no end-of-file marker — the file is truncated"
 	}
-	return proven, "PDF header and end-of-file marker are both present"
+	return Proven, "PDF header and end-of-file marker are both present"
 }
 
 // verifyISOBMFF walks the top-level box tree of the ISO base media formats —
 // MP4, MOV, HEIC, AVIF. The boxes must tile the file exactly; anything else
 // means bytes are missing.
-func verifyISOBMFF(f *os.File, size int64) (intactness, string) {
+func verifyISOBMFF(f *os.File, size int64) (Intactness, string) {
 	pos := int64(0)
 	boxes := 0
 	for pos < size {
 		if size-pos < 8 {
-			return damaged, fmt.Sprintf("media box list ends with %d stray bytes — the file is truncated", size-pos)
+			return Damaged, fmt.Sprintf("media box list ends with %d stray bytes — the file is truncated", size-pos)
 		}
 		var hdr [16]byte
 		if _, err := f.ReadAt(hdr[:8], pos); err != nil {
-			return damaged, "media box header is unreadable — the file is truncated"
+			return Damaged, "media box header is unreadable — the file is truncated"
 		}
 		bs := int64(binary.BigEndian.Uint32(hdr[0:4]))
 		btype := string(hdr[4:8])
@@ -429,33 +440,33 @@ func verifyISOBMFF(f *os.File, size int64) (intactness, string) {
 			bs = size - pos
 		case 1:
 			if size-pos < 16 {
-				return damaged, "media box claims a 64-bit size the file cannot hold — it is truncated"
+				return Damaged, "media box claims a 64-bit size the file cannot hold — it is truncated"
 			}
 			if _, err := f.ReadAt(hdr[8:16], pos+8); err != nil {
-				return damaged, "media box size is unreadable — the file is truncated"
+				return Damaged, "media box size is unreadable — the file is truncated"
 			}
 			u := binary.BigEndian.Uint64(hdr[8:16])
 			if u > uint64(size-pos) {
-				return damaged, fmt.Sprintf("media box %q claims %d bytes but only %d remain — the file is truncated", btype, u, size-pos)
+				return Damaged, fmt.Sprintf("media box %q claims %d bytes but only %d remain — the file is truncated", btype, u, size-pos)
 			}
 			bs = int64(u)
 			hlen = 16
 		}
 		if bs < hlen || bs > size-pos {
-			return damaged, fmt.Sprintf("media box %q claims %d bytes but only %d remain — the file is truncated", btype, bs, size-pos)
+			return Damaged, fmt.Sprintf("media box %q claims %d bytes but only %d remain — the file is truncated", btype, bs, size-pos)
 		}
 		boxes++
 		pos += bs
 	}
 	if boxes == 0 {
-		return unproven, ""
+		return Unproven, ""
 	}
-	return proven, "media box structure tiles the file exactly"
+	return Proven, "media box structure tiles the file exactly"
 }
 
 // ---------------------------------------------------------- content compare
 
-// diffShape describes HOW two copies differ, which is often enough to say
+// DiffShape describes HOW two copies differ, which is often enough to say
 // which one is wrong even when nothing else can. The three shapes worth
 // telling apart:
 //
@@ -465,19 +476,19 @@ func verifyISOBMFF(f *os.File, size int64) (intactness, string) {
 //     it says the set is genuinely damaged without saying which side;
 //   - anything larger and non-NUL — two different files that merely share a
 //     size and a timestamp, which is not corruption at all.
-type diffShape struct {
-	kind     string // "zeros", "tail", "bitflip", "mixed"
-	zeroSide int    // 0 or 1 for the side whose differing bytes are all NUL; -1 if neither
-	firstAt  int64  // offset of the first differing byte
-	bytes    int64  // how many bytes differ
-	bitsSet  int    // popcount of the difference, meaningful only when bytes is tiny
+type DiffShape struct {
+	Kind     string // "zeros", "tail", "bitflip", "mixed"
+	ZeroSide int    // 0 or 1 for the side whose differing bytes are all NUL; -1 if neither
+	FirstAt  int64  // offset of the first differing byte
+	Bytes    int64  // how many bytes differ
+	BitsSet  int    // popcount of the difference, meaningful only when bytes is tiny
 }
 
-// compareContent reads two same-size files in lockstep and classifies their
+// CompareContent reads two same-size files in lockstep and classifies their
 // difference. It is the one check here that costs a second full read of two
 // files, so the caller runs it only on sets already confirmed to differ and
 // only when the cheaper evidence came back silent.
-func compareContent(aOpen, bOpen func() (*os.File, error), size int64, cancel chan struct{}) (*diffShape, error) {
+func CompareContent(aOpen, bOpen func() (*os.File, error), size int64, cancel <-chan struct{}) (*DiffShape, error) {
 	af, err := aOpen()
 	if err != nil {
 		return nil, err
@@ -491,12 +502,14 @@ func compareContent(aOpen, bOpen func() (*os.File, error), size int64, cancel ch
 
 	const chunk = 256 << 10
 	ab, bb := make([]byte, chunk), make([]byte, chunk)
-	d := &diffShape{zeroSide: -1, firstAt: -1}
+	d := &DiffShape{ZeroSide: -1, FirstAt: -1}
 	aAllZero, bAllZero := true, true
 	var off, lastDiff int64
 	for {
-		if cancelled(cancel) {
-			return nil, errCancelled
+		select {
+		case <-cancel:
+			return nil, ErrCancelled
+		default:
 		}
 		an, aerr := io.ReadFull(af, ab)
 		bn, berr := io.ReadFull(bf, bb)
@@ -508,19 +521,19 @@ func compareContent(aOpen, bOpen func() (*os.File, error), size int64, cancel ch
 			if ab[i] == bb[i] {
 				continue
 			}
-			if d.firstAt < 0 {
-				d.firstAt = off + int64(i)
+			if d.FirstAt < 0 {
+				d.FirstAt = off + int64(i)
 			}
 			lastDiff = off + int64(i)
-			d.bytes++
+			d.Bytes++
 			if ab[i] != 0 {
 				aAllZero = false
 			}
 			if bb[i] != 0 {
 				bAllZero = false
 			}
-			if d.bytes <= 64 {
-				d.bitsSet += bits.OnesCount8(ab[i] ^ bb[i])
+			if d.Bytes <= 64 {
+				d.BitsSet += bits.OnesCount8(ab[i] ^ bb[i])
 			}
 		}
 		off += int64(n)
@@ -528,62 +541,62 @@ func compareContent(aOpen, bOpen func() (*os.File, error), size int64, cancel ch
 			break
 		}
 	}
-	if d.bytes == 0 {
+	if d.Bytes == 0 {
 		return nil, nil
 	}
 	switch {
-	case d.bytes <= 8 && d.bitsSet <= 2:
-		d.kind = "bitflip"
+	case d.Bytes <= 8 && d.BitsSet <= 2:
+		d.Kind = "bitflip"
 	// The floor is what keeps this arm honest — see minZeroBytes. Below it the
 	// difference falls through to "mixed", which reports what was seen and
 	// convicts nobody: the safe direction, since the bitflip arm above only
 	// protects runs of 8 bytes or fewer carrying 2 bits or fewer.
-	case aAllZero != bAllZero && d.bytes >= minZeroBytes:
-		d.kind = "zeros"
-		d.zeroSide = 1
+	case aAllZero != bAllZero && d.Bytes >= minZeroBytes:
+		d.Kind = "zeros"
+		d.ZeroSide = 1
 		if aAllZero {
-			d.zeroSide = 0
+			d.ZeroSide = 0
 		}
 		// A NUL run that reaches the end of the file is the signature of a
 		// transfer that stopped and left the rest of the allocation empty.
 		if lastDiff == size-1 {
-			d.kind = "tail"
+			d.Kind = "tail"
 		}
 	default:
-		d.kind = "mixed"
+		d.Kind = "mixed"
 	}
 	return d, nil
 }
 
-// describe renders a diffShape as the evidence string shown against the file
+// Describe renders a DiffShape as the evidence string shown against the file
 // at index side.
-func (d *diffShape) describe(side int) string {
-	switch d.kind {
+func (d *DiffShape) Describe(side int) string {
+	switch d.Kind {
 	case "bitflip":
 		bit := "bit"
-		if d.bitsSet != 1 {
+		if d.BitsSet != 1 {
 			bit = "bits"
 		}
-		return fmt.Sprintf("%d %s differ at offset %d — the signature of bit rot or faulty memory", d.bitsSet, bit, d.firstAt)
+		return fmt.Sprintf("%d %s differ at offset %d — the signature of bit rot or faulty memory", d.BitsSet, bit, d.FirstAt)
 	case "zeros", "tail":
-		where := fmt.Sprintf("%s of zeros at offset %d", fmtBytesGo(d.bytes), d.firstAt)
-		if d.kind == "tail" {
-			where = fmt.Sprintf("%s of zeros from offset %d to the end of the file", fmtBytesGo(d.bytes), d.firstAt)
+		where := fmt.Sprintf("%s of zeros at offset %d", FmtBytes(d.Bytes), d.FirstAt)
+		if d.Kind == "tail" {
+			where = fmt.Sprintf("%s of zeros from offset %d to the end of the file", FmtBytes(d.Bytes), d.FirstAt)
 		}
-		if side == d.zeroSide {
+		if side == d.ZeroSide {
 			return "holds " + where + " where the other copy holds data — an interrupted copy or lost blocks"
 		}
 		return "holds data where the other copy holds " + where
 	}
-	return fmt.Sprintf("%s of content differs from the other copy, starting at offset %d", fmtBytesGo(d.bytes), d.firstAt)
+	return fmt.Sprintf("%s of content differs from the other copy, starting at offset %d", FmtBytes(d.Bytes), d.FirstAt)
 }
 
-// fmtBytesGo is the daemon-side counterpart of the UI's fmtBytes, used only in
+// FmtBytes is the daemon-side counterpart of the UI's fmtBytes, used only in
 // evidence strings. It reproduces that function's rounding exactly — whole
 // bytes, then two decimals below 10, one below 100, none above — because the
 // evidence lands in a grid cell beside a Size column the UI formats, and two
 // renderings of one number on one row read as a discrepancy.
-func fmtBytesGo(n int64) string {
+func FmtBytes(n int64) string {
 	if n <= 0 {
 		return "0 B"
 	}

@@ -1,4 +1,4 @@
-package main
+package media
 
 import (
 	"encoding/binary"
@@ -13,7 +13,8 @@ import (
 //     capture time with timezone that iPhones record;
 //  2. mvhd creation_time — UTC seconds since 1904-01-01.
 //
-// open is the entry's pinned-handle opener (see fEnt.openContent).
+// open is the caller's opener for the file (the scanner's pinned-handle
+// opener).
 func qtCaptured(open func() (*os.File, error)) string {
 	f, err := open()
 	if err != nil {
@@ -58,6 +59,12 @@ func qtMvhdDate(f *os.File, moovStart, moovEnd int64) string {
 	return captureDate(t)
 }
 
+// TimeLayout is the form every date in a result row takes — modified,
+// created and captured alike. The daemon formats its own dates with it too;
+// the UI sorts and filters these values as strings, so the three columns
+// must agree to the character.
+const TimeLayout = "2006-01-02 15:04:05"
+
 // captureDate is the one formatter for capture dates read out of media
 // metadata. A file can carry any well-formed date at all — a QuickTime
 // creationdate of 1904 (its own epoch), an EXIF field of year 0001 — and
@@ -68,7 +75,7 @@ func captureDate(t time.Time) string {
 	if t.IsZero() || t.Year() < 1971 || t.Year() > 2100 {
 		return ""
 	}
-	return fmtTime(t)
+	return t.Format(TimeLayout)
 }
 
 // qtAppleCreationDate reads moov/meta/{keys,ilst}. The meta box has a

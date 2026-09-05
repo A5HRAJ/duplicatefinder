@@ -5,12 +5,10 @@ package main
 // interesting case here is about what the bytes actually are.
 
 import (
-	"archive/zip"
 	"bytes"
-	"compress/gzip"
-	"encoding/binary"
+	"dupfinder/internal/dirhandle"
+	"dupfinder/internal/media"
 	"fmt"
-	"hash/crc32"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -528,7 +526,7 @@ func TestSkewedCorruptKeyStillFindsTheOddCopy(t *testing.T) {
 
 	key := candHash(&fEnt{size: int64(len(body)), mod: mod}, corruptMatch)
 	// The ordinary window refuses a key this size and hands it back whole.
-	ents, over, _, werr := sp.window(0, 1, corruptMatch, []*dirHandle{nil}, []string{dir}, dupKeyFileCap, 0)
+	ents, over, _, werr := sp.window(0, 1, corruptMatch, []*dirhandle.Handle{nil}, []string{dir}, dupKeyFileCap, 0)
 	if werr != nil {
 		t.Fatal(werr)
 	}
@@ -539,7 +537,7 @@ func TestSkewedCorruptKeyStillFindsTheOddCopy(t *testing.T) {
 	s := &Server{}
 	acc := newCorruptTop(corruptFileCap)
 	cancel := make(chan struct{})
-	if !s.corruptSkewedKey(sp, key, []*dirHandle{nil}, []string{dir}, nil, cancel, acc, &toolResult{}, 50) {
+	if !s.corruptSkewedKey(sp, key, []*dirhandle.Handle{nil}, []string{dir}, nil, cancel, acc, &toolResult{}, 50) {
 		t.Fatal("skew pass reported cancellation")
 	}
 	groups, trunc := acc.final(s, corruptFileCap, cancel)
@@ -650,7 +648,7 @@ func TestSkewedCorruptKeyConvictsDeepRotBehindSharedPrefix(t *testing.T) {
 	s := &Server{}
 	acc := newCorruptTop(corruptFileCap)
 	cancel := make(chan struct{})
-	if !s.corruptSkewedKey(sp, key, []*dirHandle{nil}, []string{dir}, cache, cancel, acc, &toolResult{}, 50) {
+	if !s.corruptSkewedKey(sp, key, []*dirhandle.Handle{nil}, []string{dir}, cache, cancel, acc, &toolResult{}, 50) {
 		t.Fatal("skew pass reported cancellation")
 	}
 	groups, _ := acc.final(s, corruptFileCap, cancel)
@@ -772,7 +770,7 @@ func TestSkewedCorruptKeyConvictsDeepRotWhenChangedSetIsFull(t *testing.T) {
 	s := &Server{}
 	acc := newCorruptTop(corruptFileCap)
 	cancel := make(chan struct{})
-	if !s.corruptSkewedKey(sp, key, []*dirHandle{nil}, []string{dir}, cache, cancel, acc, &toolResult{}, 50) {
+	if !s.corruptSkewedKey(sp, key, []*dirhandle.Handle{nil}, []string{dir}, cache, cancel, acc, &toolResult{}, 50) {
 		t.Fatal("skew pass reported cancellation")
 	}
 	// Vacuity guard: the capped set really did refuse the entry — if this
@@ -837,7 +835,7 @@ func TestSkewedCorruptKeyIgnoresAnAllIdenticalFamily(t *testing.T) {
 	s := &Server{}
 	acc := newCorruptTop(corruptFileCap)
 	cancel := make(chan struct{})
-	if !s.corruptSkewedKey(sp, key, []*dirHandle{nil}, []string{dir}, nil, cancel, acc, &toolResult{}, 50) {
+	if !s.corruptSkewedKey(sp, key, []*dirhandle.Handle{nil}, []string{dir}, nil, cancel, acc, &toolResult{}, 50) {
 		t.Fatal("skew pass reported cancellation")
 	}
 	groups, _ := acc.final(s, corruptFileCap, cancel)
@@ -861,7 +859,8 @@ func TestAppendedTrailerIsNotMistakenForTruncation(t *testing.T) {
 	}
 	good := append(append([]byte(nil), base...), trailer...)
 
-	if st, why := verifyBytes(t, dir, "motion.jpg", good); st != proven {
+	probe := mkAt(t, dir, "probe/motion.jpg", good, fixedTime)
+	if st, why := media.VerifyContent(probe.openContent, probe.size); st != media.Proven {
 		t.Fatalf("a JPEG with an appended trailer must not read as truncated: %v (%s)", st, why)
 	}
 
@@ -1043,100 +1042,4 @@ func goodJPEG(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
-}
-
-func verifyBytes(t *testing.T, dir, name string, b []byte) (intactness, string) {
-	t.Helper()
-	e := mkAt(t, dir, name, b, fixedTime)
-	return verifyContent(e.openContent, e.size)
-}
-
-func TestVerifyContentPNG(t *testing.T) {
-	dir := t.TempDir()
-	good := goodPNG(t)
-	if st, why := verifyBytes(t, dir, "ok.png", good); st != proven {
-		t.Errorf("intact PNG: want proven, got %v (%s)", st, why)
-	}
-	rot := append([]byte(nil), good...)
-	rot[len(rot)/2] ^= 0x01
-	if st, _ := verifyBytes(t, dir, "rot.png", rot); st != damaged {
-		t.Errorf("PNG with a flipped byte: want damaged, got %v", st)
-	}
-	if st, _ := verifyBytes(t, dir, "cut.png", good[:len(good)-20]); st != damaged {
-		t.Errorf("truncated PNG: want damaged, got %v", st)
-	}
-}
-
-func TestVerifyContentGzip(t *testing.T) {
-	dir := t.TempDir()
-	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
-	zw.Write(bytes.Repeat([]byte("compress me please "), 500))
-	zw.Close()
-	good := buf.Bytes()
-	if st, why := verifyBytes(t, dir, "ok.gz", good); st != proven {
-		t.Errorf("intact gzip: want proven, got %v (%s)", st, why)
-	}
-	// Corrupt the payload but leave the trailing CRC32 alone, so only the
-	// checksum comparison can catch it.
-	rot := append([]byte(nil), good...)
-	rot[len(rot)/2] ^= 0x40
-	if st, _ := verifyBytes(t, dir, "rot.gz", rot); st != damaged {
-		t.Errorf("gzip failing its CRC32: want damaged, got %v", st)
-	}
-}
-
-func TestVerifyContentZip(t *testing.T) {
-	dir := t.TempDir()
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	w, _ := zw.Create("content.txt")
-	w.Write(bytes.Repeat([]byte("spreadsheet row\n"), 400))
-	zw.Close()
-	good := buf.Bytes()
-	if st, why := verifyBytes(t, dir, "ok.zip", good); st != proven {
-		t.Errorf("intact zip: want proven, got %v (%s)", st, why)
-	}
-	rot := append([]byte(nil), good...)
-	rot[60] ^= 0x7F
-	if st, _ := verifyBytes(t, dir, "rot.zip", rot); st != damaged {
-		t.Errorf("zip entry failing its CRC32: want damaged, got %v", st)
-	}
-}
-
-func TestVerifyContentUnknownTypeStaysUnproven(t *testing.T) {
-	dir := t.TempDir()
-	if st, _ := verifyBytes(t, dir, "notes.txt", []byte("just some text")); st != unproven {
-		t.Errorf("a format with no validator must not read as a clean bill of health, got %v", st)
-	}
-}
-
-// The validator is chosen by magic bytes, not by the extension — the whole
-// question here is whether a file's contents are what they claim to be.
-func TestVerifyContentIgnoresAMisleadingExtension(t *testing.T) {
-	dir := t.TempDir()
-	good := goodPNG(t)
-	if st, _ := verifyBytes(t, dir, "actually-a-png.dat", good); st != proven {
-		t.Errorf("PNG under a .dat name should still be verified, got %v", st)
-	}
-}
-
-// A PNG built by hand so the CRC is right, then truncated mid-chunk: catches
-// the "claims more bytes than remain" arm, which is the arithmetic that has to
-// stay overflow-safe on 32-bit ARM builds.
-func TestVerifyPNGRejectsAnOversizedChunkLength(t *testing.T) {
-	dir := t.TempDir()
-	var b bytes.Buffer
-	b.Write([]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A})
-	var l [4]byte
-	binary.BigEndian.PutUint32(l[:], 0x7FFFFFF0) // far past the end of the file
-	b.Write(l[:])
-	b.WriteString("IHDR")
-	b.Write(make([]byte, 13))
-	var c [4]byte
-	binary.BigEndian.PutUint32(c[:], crc32.ChecksumIEEE(append([]byte("IHDR"), make([]byte, 13)...)))
-	b.Write(c[:])
-	if st, _ := verifyBytes(t, dir, "huge.png", b.Bytes()); st != damaged {
-		t.Errorf("PNG chunk longer than the file: want damaged, got %v", st)
-	}
 }

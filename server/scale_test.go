@@ -7,6 +7,7 @@ package main
 
 import (
 	"bytes"
+	"dupfinder/internal/dirhandle"
 	"fmt"
 	"math/rand"
 	"os"
@@ -176,7 +177,7 @@ func TestSkewedKeyStillFindsDuplicatesPastTheCap(t *testing.T) {
 	key := candHash(&fEnt{size: size, mod: mod}, MatchOpts{})
 
 	// The ordinary window refuses the key and hands it back.
-	ents, over, skipped, err := sp.window(0, 1, MatchOpts{}, []*dirHandle{nil}, []string{dir}, dupKeyFileCap, 0)
+	ents, over, skipped, err := sp.window(0, 1, MatchOpts{}, []*dirhandle.Handle{nil}, []string{dir}, dupKeyFileCap, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +190,7 @@ func TestSkewedKeyStillFindsDuplicatesPastTheCap(t *testing.T) {
 	acc := newGroupTop(dupFileCap)
 	missing := 0
 	if err := s.resolveSkewedKey(sp, key, ScanReq{Tool: "duplicates"}, nil, nil,
-		[]*dirHandle{nil}, []string{dir}, make(chan struct{}), acc, 16, 96, &missing); err != nil {
+		[]*dirhandle.Handle{nil}, []string{dir}, make(chan struct{}), acc, 16, 96, &missing); err != nil {
 		t.Fatal(err)
 	}
 	groups, _ := acc.final(s, dupFileCap, nil)
@@ -248,7 +249,7 @@ func TestSkewedPrefixStillFindsDuplicatesPastTheCap(t *testing.T) {
 	acc := newGroupTop(dupFileCap)
 	missing := 0
 	if err := s.resolveSkewedKey(sp, key, ScanReq{Tool: "duplicates"}, nil, nil,
-		[]*dirHandle{nil}, []string{dir}, make(chan struct{}), acc, 16, 96, &missing); err != nil {
+		[]*dirhandle.Handle{nil}, []string{dir}, make(chan struct{}), acc, 16, 96, &missing); err != nil {
 		t.Fatal(err)
 	}
 	groups, _ := acc.final(s, dupFileCap, nil)
@@ -298,7 +299,7 @@ func TestCrowdedLadderPartitionEscalatesInsteadOfDropping(t *testing.T) {
 	missing := 0
 	key := candHash(&fEnt{size: size, mod: mod}, MatchOpts{})
 	if err := s.resolveSkewedKey(sp, key, ScanReq{Tool: "duplicates"}, nil, nil,
-		[]*dirHandle{nil}, []string{dir}, make(chan struct{}), acc, 16, 96, &missing); err != nil {
+		[]*dirhandle.Handle{nil}, []string{dir}, make(chan struct{}), acc, 16, 96, &missing); err != nil {
 		t.Fatal(err)
 	}
 	groups, trunc := acc.final(s, dupFileCap, nil)
@@ -357,7 +358,7 @@ func TestSkewLadderFeedsTheHashCache(t *testing.T) {
 	acc := newGroupTop(dupFileCap)
 	missing := 0
 	if err := s.resolveSkewedKey(sp, key, ScanReq{Tool: "duplicates"}, nil, cache,
-		[]*dirHandle{nil}, []string{dir}, make(chan struct{}), acc, 16, 96, &missing); err != nil {
+		[]*dirhandle.Handle{nil}, []string{dir}, make(chan struct{}), acc, 16, 96, &missing); err != nil {
 		t.Fatal(err)
 	}
 	groups, _ := acc.final(s, dupFileCap, nil)
@@ -387,7 +388,7 @@ func TestSkewLadderFeedsTheHashCache(t *testing.T) {
 	// runs entirely off this scan's own records.
 	acc2 := newGroupTop(dupFileCap)
 	if err := s.resolveSkewedKey(sp, key, ScanReq{Tool: "duplicates"}, nil, cache,
-		[]*dirHandle{nil}, []string{dir}, make(chan struct{}), acc2, 16, 96, &missing); err != nil {
+		[]*dirhandle.Handle{nil}, []string{dir}, make(chan struct{}), acc2, 16, 96, &missing); err != nil {
 		t.Fatal(err)
 	}
 	g2, _ := acc2.final(s, dupFileCap, nil)
@@ -415,7 +416,7 @@ func TestSkewLadderFeedsTheHashCache(t *testing.T) {
 	}
 	acc3 := newGroupTop(dupFileCap)
 	if err := s.resolveSkewedKey(sp, key, ScanReq{Tool: "duplicates"}, nil, cache2,
-		[]*dirHandle{nil}, []string{dir}, make(chan struct{}), acc3, 16, 96, &missing); err != nil {
+		[]*dirhandle.Handle{nil}, []string{dir}, make(chan struct{}), acc3, 16, 96, &missing); err != nil {
 		t.Fatal(err)
 	}
 	g3, _ := acc3.final(s, dupFileCap, nil)
@@ -504,7 +505,7 @@ func TestWindowHandsBackASkewedKeyInsteadOfTruncating(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, over, skipped, err := sp.window(0, 1, MatchOpts{}, []*dirHandle{nil}, []string{"/r"}, 50, 0)
+	got, over, skipped, err := sp.window(0, 1, MatchOpts{}, []*dirhandle.Handle{nil}, []string{"/r"}, 50, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,7 +558,7 @@ func TestTagWindowPartitionsWithoutLoss(t *testing.T) {
 	for _, parts := range []int{1, 2, 3, 5} {
 		seen := map[string]int{}
 		for p := 0; p < parts; p++ {
-			win, over, crowded, err := sub.tagWindow(p, parts, 0, 0, []*dirHandle{nil}, []string{"/r"})
+			win, over, crowded, err := sub.tagWindow(p, parts, 0, 0, []*dirhandle.Handle{nil}, []string{"/r"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -578,7 +579,7 @@ func TestTagWindowPartitionsWithoutLoss(t *testing.T) {
 		}
 	}
 	// With a cap, over-populated tags come back untouched — not truncated.
-	win, over, _, err := sub.tagWindow(0, 1, 5, 0, []*dirHandle{nil}, []string{"/r"})
+	win, over, _, err := sub.tagWindow(0, 1, 5, 0, []*dirhandle.Handle{nil}, []string{"/r"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -586,7 +587,7 @@ func TestTagWindowPartitionsWithoutLoss(t *testing.T) {
 		t.Fatalf("want all 6 tags handed back whole, got over=%d win=%d", len(over), len(win))
 	}
 	// tagSlice is the terminal step: one tag, capped, reporting what it left.
-	slice, skipped, err := sub.tagSlice(over[0], []*dirHandle{nil}, []string{"/r"}, 4)
+	slice, skipped, err := sub.tagSlice(over[0], []*dirhandle.Handle{nil}, []string{"/r"}, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -705,7 +706,7 @@ func TestSpillDistilAndWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	all, _, _, err := cs.window(0, 1, MatchOpts{}, []*dirHandle{nil}, []string{"/r"}, 0, 0)
+	all, _, _, err := cs.window(0, 1, MatchOpts{}, []*dirhandle.Handle{nil}, []string{"/r"}, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -722,7 +723,7 @@ func TestSpillDistilAndWindow(t *testing.T) {
 	for _, parts := range []int{2, 5, 9} {
 		var got []string
 		for p := 0; p < parts; p++ {
-			win, _, _, err := cs.window(p, parts, MatchOpts{}, []*dirHandle{nil}, []string{"/r"}, 0, 0)
+			win, _, _, err := cs.window(p, parts, MatchOpts{}, []*dirhandle.Handle{nil}, []string{"/r"}, 0, 0)
 			if err != nil {
 				t.Fatal(err)
 			}

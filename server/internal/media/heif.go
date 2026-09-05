@@ -1,4 +1,4 @@
-package main
+package media
 
 import (
 	"bytes"
@@ -11,7 +11,8 @@ import (
 // lists an item of type "Exif" and 'iloc' gives its position in the file.
 // The item payload is a 4-byte TIFF-header offset followed by the classic
 // EXIF block, which is handed to the same TIFF parser used for JPEG.
-// open is the entry's pinned-handle opener (see fEnt.openContent).
+// open is the caller's opener for the file (the scanner's pinned-handle
+// opener).
 func heifCaptured(open func() (*os.File, error)) string {
 	f, err := open()
 	if err != nil {

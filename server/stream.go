@@ -22,6 +22,7 @@ package main
 import (
 	"bufio"
 	"container/heap"
+	"dupfinder/internal/dirhandle"
 	"encoding/binary"
 	"errors"
 	"hash/fnv"
@@ -340,7 +341,7 @@ func (s *spill) distil(counter *keyCounter, m MatchOpts, out *spill) (int, error
 // parallel slices. max is a last-resort backstop on the window as a whole (0
 // disables it); the count it had to skip comes back so the scan can report it
 // rather than quietly thinning its results.
-func (s *spill) materialize(keep func(r *spillRec) bool, handles []*dirHandle, rootOf []string, max int) ([]fEnt, int, error) {
+func (s *spill) materialize(keep func(r *spillRec) bool, handles []*dirhandle.Handle, rootOf []string, max int) ([]fEnt, int, error) {
 	var out []fEnt
 	skipped := 0
 	err := s.each(func(r *spillRec) error {
@@ -380,7 +381,7 @@ func (s *spill) materialize(keep func(r *spillRec) bool, handles []*dirHandle, r
 // names it in over, for the caller to re-partition by content prefix. The
 // counting pass that finds them allocates one small map entry per key, never
 // a file record.
-func (s *spill) window(part, parts int, m MatchOpts, handles []*dirHandle, rootOf []string, keyCap, max int) (ents []fEnt, over []uint64, skipped int, err error) {
+func (s *spill) window(part, parts int, m MatchOpts, handles []*dirhandle.Handle, rootOf []string, keyCap, max int) (ents []fEnt, over []uint64, skipped int, err error) {
 	inPart := func(k uint64) bool { return parts <= 1 || k%uint64(parts) == uint64(part) }
 	// counts holds one small entry per candidate KEY in this partition, never
 	// a file record. In expectation that is about window/2 entries whatever
@@ -419,7 +420,7 @@ func (s *spill) window(part, parts int, m MatchOpts, handles []*dirHandle, rootO
 // tag holding more records than tagCap is left out and named in over, for the
 // caller to split further — truncating it here would lose duplicates exactly
 // the way truncating a candidate key would.
-func (s *spill) tagWindow(part, parts, tagCap, max int, handles []*dirHandle, rootOf []string) (ents []fEnt, over []uint64, crowded int, err error) {
+func (s *spill) tagWindow(part, parts, tagCap, max int, handles []*dirhandle.Handle, rootOf []string) (ents []fEnt, over []uint64, crowded int, err error) {
 	inPart := func(t uint64) bool { return parts <= 1 || t%uint64(parts) == uint64(part) }
 	counts := map[uint64]int{}
 	if err := s.each(func(r *spillRec) error {
@@ -474,7 +475,7 @@ func (s *spill) tagsIn(part, parts int) ([]uint64, error) {
 // by then a tag means "same full content", so the records share ONE group and
 // the cap is the per-group cap — a real limit on the result, not a silent
 // loss of some other group.
-func (s *spill) tagSlice(tag uint64, handles []*dirHandle, rootOf []string, max int) ([]fEnt, int, error) {
+func (s *spill) tagSlice(tag uint64, handles []*dirhandle.Handle, rootOf []string, max int) ([]fEnt, int, error) {
 	return s.materialize(func(r *spillRec) bool { return r.tag == tag }, handles, rootOf, max)
 }
 

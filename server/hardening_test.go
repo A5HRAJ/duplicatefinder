@@ -1,11 +1,10 @@
 package main
 
-// Tests pinning the input-hardening properties: parser bounds on the 32-bit
-// build, the archive entry cap, canonical reference protection, spill
-// bounds, synced atomic writes, epoch identity and date plausibility.
+// Tests pinning the daemon's hardening properties: canonical reference
+// protection, spill bounds, synced atomic writes and epoch identity. The
+// parser bounds live with the parsers, in internal/media.
 
 import (
-	"archive/zip"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -13,103 +12,6 @@ import (
 	"testing"
 	"time"
 )
-
-// isoBox builds an ISOBMFF box: uint32 size, 4-char type, payload.
-func isoBox(typ string, payload []byte) []byte {
-	b := make([]byte, 8+len(payload))
-	binary.BigEndian.PutUint32(b[0:4], uint32(8+len(payload)))
-	copy(b[4:8], typ)
-	copy(b[8:], payload)
-	return b
-}
-
-func fileWith(t *testing.T, data []byte) *os.File {
-	t.Helper()
-	f, err := os.CreateTemp(t.TempDir(), "box-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.Write(data); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { f.Close() })
-	return f
-}
-
-// An infe size just under 2^31 wraps `pos+size` negative on the 32-bit
-// build, where an additive bound would pass and the slice would panic; the
-// guard is a subtraction from len(buf), which cannot wrap.
-func TestHeifChildSizeNearIntMaxIsRefused(t *testing.T) {
-	payload := []byte{0, 0, 0, 0, 0, 1} // version 0, flags, entry_count = 1
-	child := make([]byte, 24)
-	binary.BigEndian.PutUint32(child[0:4], 0x7FFFFFF0)
-	copy(child[4:8], "infe")
-	payload = append(payload, child...)
-	data := isoBox("iinf", payload)
-	f := fileWith(t, data)
-	if id, ok := heifExifItemID(f, 0, int64(len(data))); ok {
-		t.Fatalf("hostile size accepted: id=%d", id)
-	}
-}
-
-func TestQtKeySizeNearIntMaxIsRefused(t *testing.T) {
-	kp := []byte{0, 0, 0, 0, 0, 0, 0, 1} // version/flags, count = 1
-	entry := make([]byte, 16)
-	binary.BigEndian.PutUint32(entry[0:4], 0x7FFFFFF0)
-	copy(entry[4:8], "mdta")
-	kp = append(kp, entry...)
-	data := isoBox("keys", kp)
-	f := fileWith(t, data)
-	if d := qtKeysIlst(f, 0, int64(len(data))); d != "" {
-		t.Fatalf("hostile size produced a date %q", d)
-	}
-}
-
-// Extents whose offset, length and index fields occupy zero bytes consume
-// nothing, so count × extent_count iterations ran on a buffer heifBoxMax
-// keeps small — hours of CPU from one crafted file. Refused outright now.
-func TestHeifIlocZeroSizedExtentsIsBounded(t *testing.T) {
-	p := []byte{0, 0, 0, 0, 0x00, 0x00} // version 0, flags, all size nibbles 0
-	const count = 20000
-	p = append(p, byte(count>>8), byte(count&0xFF))
-	for i := 0; i < count; i++ {
-		p = append(p, 0, 1, 0, 0, 0xFF, 0xFF) // item_id, data_ref_idx, extent_count = 65535
-	}
-	data := isoBox("iloc", p)
-	f := fileWith(t, data)
-	start := time.Now()
-	if _, _, ok := heifItemLocation(f, 0, int64(len(data)), 1); ok {
-		t.Fatal("zero-sized extents located an item")
-	}
-	if d := time.Since(start); d > 2*time.Second {
-		t.Fatalf("iloc walk took %v", d)
-	}
-}
-
-func TestZipEntryCountReadsTheDirectory(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "a.zip")
-	f, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	zw := zip.NewWriter(f)
-	for _, n := range []string{"a", "b", "c"} {
-		w, _ := zw.Create(n)
-		w.Write([]byte("x"))
-	}
-	zw.Close()
-	f.Close()
-	rf, _ := os.Open(path)
-	defer rf.Close()
-	st, _ := rf.Stat()
-	if n, ok := zipEntryCount(rf, st.Size()); !ok || n != 3 {
-		t.Fatalf("entry count = %d ok=%v, want 3", n, ok)
-	}
-	nf := fileWith(t, []byte("not a zip at all, but long enough to hold an EOCD record"))
-	if _, ok := zipEntryCount(nf, 60); ok {
-		t.Fatal("no EOCD must report !ok")
-	}
-}
 
 // A reference folder given through a symlink alias protects the rows that
 // display under the real path — decided through the root table, without a
@@ -222,22 +124,5 @@ func TestIdentMatchesUsesEpochWhenRecorded(t *testing.T) {
 	}
 	if _, ok := identMatches(e, []entIdent{{size: 11, modUnix: 1700000000}}); ok {
 		t.Fatal("a different size must not match")
-	}
-}
-
-func TestCaptureDateWindowAndFormatter(t *testing.T) {
-	if captureDate(time.Date(1904, 1, 1, 0, 0, 0, 0, time.UTC)) != "" {
-		t.Fatal("a 1904 date must read as absent")
-	}
-	if parseISODate("1904-01-01T00:00:00Z") != "" || parseISODate("0001-01-01T00:00:00") != "" {
-		t.Fatal("implausible ISO dates must read as absent")
-	}
-	if parseISODate("2023-06-22T01:11:21+0200") == "" {
-		t.Fatal("a plausible ISO date must format")
-	}
-	for n, want := range map[int64]string{512: "512 B", 1536: "1.50 KB", 15360: "15.0 KB", 153600: "150 KB", 0: "0 B"} {
-		if got := fmtBytesGo(n); got != want {
-			t.Fatalf("fmtBytesGo(%d) = %q, want %q", n, got, want)
-		}
 	}
 }

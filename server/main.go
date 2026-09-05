@@ -11,6 +11,7 @@ package main
 import (
 	"crypto/rand"
 	"crypto/subtle"
+	"dupfinder/internal/dirhandle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1238,7 +1239,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		// operation to files living elsewhere. (File Station is an external
 		// process, so the handle itself cannot carry the move — acting on
 		// the handle's canonical path is the strongest available guarantee.)
-		parentH, err := openDirHandle(filepath.Dir(src))
+		parentH, err := dirhandle.Open(filepath.Dir(src))
 		if err != nil {
 			errs = append(errs, map[string]string{"path": src, "error": "cannot resolve path"})
 			continue
@@ -1720,13 +1721,13 @@ func (s *Server) pruneMoved(canonPaths, dirPaths []string, canon *dirResolver) {
 // executed destination are never two different strings. The canonical
 // containment stays native (the vetting exception); "is this a usable folder
 // for this DSM session" is File Station's question.
-func (s *Server) vetDestination(w http.ResponseWriter, r *http.Request, dest string) (destH *dirHandle, destCanon, destShare string, sess *fsSession, ok bool) {
-	destH, err := openDirHandle(dest)
+func (s *Server) vetDestination(w http.ResponseWriter, r *http.Request, dest string) (destH *dirhandle.Handle, destCanon, destShare string, sess *fsSession, ok bool) {
+	destH, err := dirhandle.Open(dest)
 	if err != nil {
 		writeErr(w, 400, "destination is not a folder")
 		return nil, "", "", nil, false
 	}
-	fail := func(code int, msg string) (*dirHandle, string, string, *fsSession, bool) {
+	fail := func(code int, msg string) (*dirhandle.Handle, string, string, *fsSession, bool) {
 		destH.Close()
 		writeErr(w, code, msg)
 		return nil, "", "", nil, false

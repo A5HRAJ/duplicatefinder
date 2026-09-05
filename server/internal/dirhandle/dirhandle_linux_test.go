@@ -1,6 +1,6 @@
 //go:build linux
 
-package main
+package dirhandle
 
 // The property the move and scan vetting rest on: once a directory handle is
 // open, renaming the original path away and planting a symlink (or imposter
@@ -24,7 +24,7 @@ func TestDirHandleSurvivesPathSwap(t *testing.T) {
 	if err := os.MkdirAll(orig, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	h, err := openDirHandle(orig)
+	h, err := Open(orig)
 	if err != nil {
 		t.Fatal(err)
 	}

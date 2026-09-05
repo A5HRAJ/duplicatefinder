@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"dupfinder/internal/dirhandle"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,7 +41,7 @@ func TestSpillCandidates(t *testing.T) {
 	if _, err := sp.distil(counter, MatchOpts{}, cs); err != nil {
 		t.Fatal(err)
 	}
-	cands, _, _, err := cs.window(0, 1, MatchOpts{}, []*dirHandle{nil}, []string{"/vol1/root"}, 0, 0)
+	cands, _, _, err := cs.window(0, 1, MatchOpts{}, []*dirhandle.Handle{nil}, []string{"/vol1/root"}, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +81,7 @@ func TestSpillCandidatesMatchName(t *testing.T) {
 	if _, err := sp.distil(counter, m, cs); err != nil {
 		t.Fatal(err)
 	}
-	cands, _, _, err := cs.window(0, 1, m, []*dirHandle{nil}, []string{"/r"}, 0, 0)
+	cands, _, _, err := cs.window(0, 1, m, []*dirhandle.Handle{nil}, []string{"/r"}, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

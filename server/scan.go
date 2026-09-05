@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"dupfinder/internal/dirhandle"
+	"dupfinder/internal/media"
 	"encoding/csv"
 	"encoding/hex"
 	"errors"
@@ -35,8 +37,8 @@ type fEnt struct {
 	size            int64
 	mod, created    time.Time
 	isDir           bool
-	rel             string     // path relative to the pinned root
-	rh              *dirHandle // pinned root; nil only for hand-built test entries
+	rel             string            // path relative to the pinned root
+	rh              *dirhandle.Handle // pinned root; nil only for hand-built test entries
 }
 
 // dirEnt is a directory as the empty-folder scan keeps it: the fields the
@@ -195,7 +197,7 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 
 	// The pinned root handles must outlive every content read below —
 	// hashing and EXIF open entries through them, never by raw path.
-	var handles []*dirHandle
+	var handles []*dirhandle.Handle
 	defer func() {
 		for _, h := range handles {
 			h.Close()
@@ -498,7 +500,7 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 // receives the handle's index); they stay open so later content reads go
 // through them, and the caller closes them when the scan is done. Roots
 // must already be de-overlapped (runScan) — there is no seen-set here.
-func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan struct{}, visit func(rootIdx int, f fEnt), unreadable func(path string)) (errs []string, handles []*dirHandle, rootOf []string) {
+func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan struct{}, visit func(rootIdx int, f fEnt), unreadable func(path string)) (errs []string, handles []*dirhandle.Handle, rootOf []string) {
 	count := 0
 	// The error list is capped so a volume full of permission-denied
 	// subtrees cannot grow it without bound — but no cap here is silent, so
@@ -530,7 +532,7 @@ func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan 
 	// same entry through its pinned root for later content reads. created is
 	// left zero on purpose: Created Dates come from File Station only (see
 	// applyCrtimes) — never from a native statx/ctime approximation.
-	emit := func(rootIdx int, path, rel string, rh *dirHandle, d fs.DirEntry) {
+	emit := func(rootIdx int, path, rel string, rh *dirhandle.Handle, d fs.DirEntry) {
 		info, err := d.Info()
 		if err != nil {
 			return
@@ -565,7 +567,7 @@ func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan 
 		// Pin the root and re-check containment from the pinned object: the
 		// enumeration below goes through the handle, so a root swapped for
 		// an outside-pointing symlink after validation is never followed.
-		h, err := openDirHandle(root)
+		h, err := dirhandle.Open(root)
 		if err != nil {
 			addErr(root + ": " + err.Error())
 			noteUnreadable(root)
@@ -721,7 +723,7 @@ func (s *Server) enrichCreated(sess *fsSession, cands []fEnt, cancel chan struct
 // The prefix read is not wasted work — dupWindow would read the same 64 KiB
 // anyway — and none of this runs for a key small enough for one window.
 func (s *Server) resolveSkewedKey(cs *spill, key uint64, req ScanReq, sess *fsSession,
-	cache *hashCache, handles []*dirHandle, rootOf []string, cancel chan struct{},
+	cache *hashCache, handles []*dirhandle.Handle, rootOf []string, cancel chan struct{},
 	acc *groupTop, lo, hi float64, missingCreated *int) error {
 
 	s.setProgress(lo, "Comparing file contents…")
@@ -785,7 +787,7 @@ func (s *Server) resolveSkewedKey(cs *spill, key uint64, req ScanReq, sess *fsSe
 // by full content hash. A bucket that is still over the cap after this is a
 // single duplicate group, so the cap applied to it is the per-group cap.
 func (s *Server) resolveSkewedPrefix(sub *spill, keep func(*spillRec) bool, req ScanReq, sess *fsSession,
-	cache *hashCache, handles []*dirHandle, rootOf []string, cancel chan struct{},
+	cache *hashCache, handles []*dirhandle.Handle, rootOf []string, cancel chan struct{},
 	acc *groupTop, lo, hi float64, missingCreated *int) error {
 
 	full, n, err := s.hashSubSpill(sub, handles, rootOf, cancel, acc, cache, true, nil, keep)
@@ -866,7 +868,7 @@ type skipNoter interface{ noteSkipped(int) }
 // fact, but that set is capped (changedMax) — the callback is the uncapped
 // carrier for the pass that is consuming the evidence right now, so a full
 // set can never cost it the very finding this read just made.
-func (s *Server) hashSubSpill(src *spill, handles []*dirHandle, rootOf []string,
+func (s *Server) hashSubSpill(src *spill, handles []*dirhandle.Handle, rootOf []string,
 	cancel chan struct{}, acc skipNoter, cache *hashCache, full bool,
 	onRot func(path string), keep func(*spillRec) bool) (*spill, int, error) {
 
@@ -1202,7 +1204,7 @@ func (s *Server) fillCaptured(out []Group, slots []captureSlot, cancel chan stru
 		return
 	}
 	parallelEach(slots, cancel, func(sl captureSlot) {
-		out[sl.gi].Files[sl.fi].Captured = exifCaptured(sl.f.openContent, sl.f.name)
+		out[sl.gi].Files[sl.fi].Captured = media.Captured(sl.f.openContent, sl.f.name)
 	}, func(done, total int) {
 		s.setProgress(-1, "Reading capture dates… ("+humanCount(done)+" of "+humanCount(total)+")")
 	})
@@ -1707,6 +1709,13 @@ func humanCount(n int) string {
 		b.WriteRune(c)
 	}
 	return b.String()
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func max(a, b int) int {

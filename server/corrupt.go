@@ -33,6 +33,8 @@ package main
 // candidate in full on every rescan.
 
 import (
+	"dupfinder/internal/dirhandle"
+	"dupfinder/internal/media"
 	"errors"
 	"fmt"
 	"os"
@@ -185,7 +187,7 @@ func (t *corruptTop) noteSkipped(n int) {
 // reads the candidate spill the caller distilled with corruptMatch.
 //
 // lo/hi bound the progress it may report. Returns false when cancelled.
-func (s *Server) scanCorrupted(cs *spill, nCand int, handles []*dirHandle, rootOf []string,
+func (s *Server) scanCorrupted(cs *spill, nCand int, handles []*dirhandle.Handle, rootOf []string,
 	cache *hashCache, cancel chan struct{}, acc *corruptTop, res *toolResult, lo, hi float64) bool {
 
 	parts := 1
@@ -500,7 +502,7 @@ const corruptSkewSample = 500
 // One honest gap at this scale: hashSubSpill counts a member it cannot read
 // into the truncation report and drops it, so an I/O error inside a key this
 // large is reported as a number rather than as a convicted row.
-func (s *Server) corruptSkewedKey(cs *spill, key uint64, handles []*dirHandle, rootOf []string,
+func (s *Server) corruptSkewedKey(cs *spill, key uint64, handles []*dirhandle.Handle, rootOf []string,
 	cache *hashCache, cancel chan struct{}, acc *corruptTop, res *toolResult, lo float64) bool {
 
 	// A failure anywhere below leaves this one family unexamined. Say so:
@@ -661,7 +663,7 @@ func judgeSet(c *corruptSet, cancel chan struct{}) {
 	// Rung 3 — the file's own container. PNG, gzip and ZIP-family members
 	// carry checksums that convict a single copy with no comparison at all;
 	// the rest carry framing that must reach the end of the file.
-	checked := make([]intactness, len(c.files))
+	checked := make([]media.Intactness, len(c.files))
 	proof := make([]string, len(c.files))
 	for i := range c.files {
 		// Container validation reads whole files. Without this check Stop sits
@@ -674,9 +676,9 @@ func judgeSet(c *corruptSet, cancel chan struct{}) {
 		if m.readErr != nil {
 			continue
 		}
-		st, why := verifyContent(m.f.openContent, m.f.size)
+		st, why := media.VerifyContent(m.f.openContent, m.f.size)
 		checked[i], proof[i] = st, why
-		if st == damaged && m.verdict == "" {
+		if st == media.Damaged && m.verdict == "" {
 			m.verdict, m.evidence = verdictCorrupt, why
 		}
 	}
@@ -687,21 +689,21 @@ func judgeSet(c *corruptSet, cancel chan struct{}) {
 	if !anyVerdict(c, verdictCorrupt) && c.variants == 2 && c.size <= maxDiffBytes {
 		a, b := representatives(c)
 		if a >= 0 && b >= 0 {
-			if d, err := compareContent(c.files[a].f.openContent, c.files[b].f.openContent, c.size, cancel); err == nil && d != nil {
-				switch d.kind {
+			if d, err := media.CompareContent(c.files[a].f.openContent, c.files[b].f.openContent, c.size, cancel); err == nil && d != nil {
+				switch d.Kind {
 				case "zeros", "tail":
 					lost, kept := a, b
-					if d.zeroSide == 1 {
+					if d.ZeroSide == 1 {
 						lost, kept = b, a
 					}
-					judgeWithTwins(c, lost, verdictCorrupt, d.describe(d.zeroSide))
-					judgeWithTwins(c, kept, verdictIntact, d.describe(1-d.zeroSide))
+					judgeWithTwins(c, lost, verdictCorrupt, d.Describe(d.ZeroSide))
+					judgeWithTwins(c, kept, verdictIntact, d.Describe(1-d.ZeroSide))
 				default:
 					// A single flipped bit proves the set is damaged but is
 					// perfectly symmetric — saying which side rotted would be
 					// a guess, so it stays a note rather than a verdict.
 					for _, i := range []int{a, b} {
-						judgeWithTwins(c, i, "", d.describe(i))
+						judgeWithTwins(c, i, "", d.Describe(i))
 					}
 				}
 			}
@@ -713,7 +715,7 @@ func judgeSet(c *corruptSet, cancel chan struct{}) {
 	if anyVerdict(c, verdictCorrupt) {
 		for i := range c.files {
 			m := &c.files[i]
-			if m.verdict == "" && checked[i] == proven {
+			if m.verdict == "" && checked[i] == media.Proven {
 				m.verdict = verdictIntact
 				if m.evidence == "" {
 					// The validator's own words: only some formats carry a

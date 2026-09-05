@@ -1,4 +1,4 @@
-package main
+package media
 
 // Positive tests for the file-format readers: EXIF in JPEG and the TIFF
 // family, the EXIF item in HEIF, QuickTime creation dates, and the PDF and
@@ -195,7 +195,7 @@ func openerFor(t testing.TB, data []byte) (func() (*os.File, error), int64) {
 func TestExifCapturedFromJPEG(t *testing.T) {
 	for _, bo := range []binary.ByteOrder{binary.BigEndian, binary.LittleEndian} {
 		open, _ := openerFor(t, jpegWithExif(tiffWithDates(bo, "2021:05:04 10:11:12", "2019:12:31 23:59:58")))
-		if got := exifCaptured(open, "IMG_0001.JPG"); got != "2019-12-31 23:59:58" {
+		if got := Captured(open, "IMG_0001.JPG"); got != "2019-12-31 23:59:58" {
 			t.Errorf("%v: DateTimeOriginal must win: got %q", bo, got)
 		}
 	}
@@ -203,7 +203,7 @@ func TestExifCapturedFromJPEG(t *testing.T) {
 
 func TestExifCapturedFallsBackToDateTime(t *testing.T) {
 	open, _ := openerFor(t, jpegWithExif(tiffWithDates(binary.LittleEndian, "2021:05:04 10:11:12", "")))
-	if got := exifCaptured(open, "a.jpeg"); got != "2021-05-04 10:11:12" {
+	if got := Captured(open, "a.jpeg"); got != "2021-05-04 10:11:12" {
 		t.Errorf("IFD0 DateTime fallback: got %q", got)
 	}
 }
@@ -212,7 +212,7 @@ func TestExifCapturedFromTIFFFamily(t *testing.T) {
 	tiff := tiffWithDates(binary.BigEndian, "", "2020:02:29 08:00:00")
 	for _, name := range []string{"raw.dng", "raw.NEF", "raw.cr2", "raw.arw", "scan.tif"} {
 		open, _ := openerFor(t, tiff)
-		if got := exifCaptured(open, name); got != "2020-02-29 08:00:00" {
+		if got := Captured(open, name); got != "2020-02-29 08:00:00" {
 			t.Errorf("%s: got %q", name, got)
 		}
 	}
@@ -220,17 +220,17 @@ func TestExifCapturedFromTIFFFamily(t *testing.T) {
 
 func TestExifCapturedIgnoresOtherTypesAndBadDates(t *testing.T) {
 	open, _ := openerFor(t, jpegWithExif(tiffWithDates(binary.BigEndian, "", "2020:02:29 08:00:00")))
-	if got := exifCaptured(open, "notes.txt"); got != "" {
+	if got := Captured(open, "notes.txt"); got != "" {
 		t.Errorf("non-image name must not be parsed: %q", got)
 	}
 	for _, bad := range []string{"0001:01:01 00:00:00", "not a date", "2020:13:40 99:00:00"} {
 		open, _ := openerFor(t, jpegWithExif(tiffWithDates(binary.BigEndian, "", bad)))
-		if got := exifCaptured(open, "a.jpg"); got != "" {
+		if got := Captured(open, "a.jpg"); got != "" {
 			t.Errorf("%q must read as absent, got %q", bad, got)
 		}
 	}
 	plain, _ := openerFor(t, seedJPEG())
-	if got := exifCaptured(plain, "a.jpg"); got != "" {
+	if got := Captured(plain, "a.jpg"); got != "" {
 		t.Errorf("JPEG without APP1: got %q", got)
 	}
 }
@@ -245,7 +245,7 @@ func TestHeifCapturedReadsTheExifItem(t *testing.T) {
 	// The same file reached through exifCaptured's extension dispatch.
 	for _, name := range []string{"IMG.HEIC", "img.heif", "img.hif", "img.avif"} {
 		open, _ := openerFor(t, seedHEIF(tiffWithDates(binary.LittleEndian, "", "2023:06:22 01:08:15")))
-		if got := exifCaptured(open, name); got != "2023-06-22 01:08:15" {
+		if got := Captured(open, name); got != "2023-06-22 01:08:15" {
 			t.Errorf("%s: got %q", name, got)
 		}
 	}
@@ -292,7 +292,7 @@ func TestQtCapturedFromTheMovieHeader(t *testing.T) {
 		}
 	}
 	open, _ := openerFor(t, seedMOV(when, false))
-	if got := exifCaptured(open, "clip.mov"); got != "2020-01-02 03:04:05" {
+	if got := Captured(open, "clip.mov"); got != "2020-01-02 03:04:05" {
 		t.Errorf("through exifCaptured: got %q", got)
 	}
 	// A zero creation time is absent, not 1904.
@@ -319,12 +319,12 @@ func TestQtCapturedPrefersAppleCreationDate(t *testing.T) {
 
 func TestVerifyPDFNeedsItsTrailer(t *testing.T) {
 	open, size := openerFor(t, seedPDF())
-	if st, why := verifyContent(open, size); st != proven || why == "" {
+	if st, why := VerifyContent(open, size); st != Proven || why == "" {
 		t.Errorf("intact PDF: %v %q", st, why)
 	}
 	cut := bytes.Replace(seedPDF(), []byte("%%EOF"), []byte("%%EO"), 1)
 	open, size = openerFor(t, cut)
-	if st, _ := verifyContent(open, size); st != damaged {
+	if st, _ := VerifyContent(open, size); st != Damaged {
 		t.Errorf("PDF without %%EOF: %v", st)
 	}
 }
@@ -333,28 +333,28 @@ func TestVerifyISOBMFFTilesTheFile(t *testing.T) {
 	when := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
 	good := seedMOV(when, false)
 	open, size := openerFor(t, good)
-	if st, why := verifyContent(open, size); st != proven || why == "" {
+	if st, why := VerifyContent(open, size); st != Proven || why == "" {
 		t.Errorf("tiling boxes: %v %q", st, why)
 	}
 	open, size = openerFor(t, good[:len(good)-3])
-	if st, _ := verifyContent(open, size); st != damaged {
+	if st, _ := VerifyContent(open, size); st != Damaged {
 		t.Errorf("truncated last box: %v", st)
 	}
 	// A 64-bit-sized box and a size-0 (to end of file) box both tile.
 	wide := cat(be32(1), []byte("free"), be64(16+4), []byte("abcd"))
 	last := cat(be32(0), []byte("free"), []byte("tail"))
 	open, size = openerFor(t, cat(good, wide, last))
-	if st, _ := verifyContent(open, size); st != proven {
+	if st, _ := VerifyContent(open, size); st != Proven {
 		t.Errorf("64-bit and open-ended boxes: %v", st)
 	}
 	// A box header claiming less than its own header length is damage.
 	open, size = openerFor(t, cat(good, be32(4), []byte("free")))
-	if st, _ := verifyContent(open, size); st != damaged {
+	if st, _ := VerifyContent(open, size); st != Damaged {
 		t.Errorf("undersized box: %v", st)
 	}
 	// Stray bytes that cannot hold a header.
 	open, size = openerFor(t, cat(good, []byte{1, 2, 3}))
-	if st, _ := verifyContent(open, size); st != damaged {
+	if st, _ := VerifyContent(open, size); st != Damaged {
 		t.Errorf("stray tail bytes: %v", st)
 	}
 }
@@ -363,18 +363,18 @@ func TestVerifyJPEGWithExifAndTrailingMovie(t *testing.T) {
 	// A phone "motion photo": a complete JPEG with an MP4 appended after EOI.
 	motion := cat(jpegWithExif(tiffWithDates(binary.BigEndian, "", "2020:02:29 08:00:00")), seedMOV(time.Unix(1600000000, 0), false))
 	open, size := openerFor(t, motion)
-	if st, _ := verifyContent(open, size); st != proven {
+	if st, _ := VerifyContent(open, size); st != Proven {
 		t.Errorf("JPEG with trailing movie must not read as truncated: %v", st)
 	}
 	j := seedJPEG()
 	open, size = openerFor(t, j[:len(j)-2])
-	if st, _ := verifyContent(open, size); st != damaged {
+	if st, _ := VerifyContent(open, size); st != Damaged {
 		t.Errorf("JPEG without EOI: %v", st)
 	}
 	// Fill bytes before a marker are legal.
 	filled := cat(j[:2], []byte{0xFF}, j[2:])
 	open, size = openerFor(t, filled)
-	if st, _ := verifyContent(open, size); st != proven {
+	if st, _ := VerifyContent(open, size); st != Proven {
 		t.Errorf("fill byte before a marker: %v", st)
 	}
 }

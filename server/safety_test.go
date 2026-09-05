@@ -8,6 +8,7 @@ package main
 // fsapi_test.go.
 
 import (
+	"dupfinder/internal/dirhandle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -350,7 +351,7 @@ func TestOpenRelRefusesSwappedSymlink(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "sub", "f.txt"), []byte("inside"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	h, err := openDirHandle(root)
+	h, err := dirhandle.Open(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,14 +566,14 @@ func TestDirHandleBasics(t *testing.T) {
 	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := openDirHandle(file); err == nil {
+	if _, err := dirhandle.Open(file); err == nil {
 		t.Fatal("openDirHandle must refuse a regular file")
 	}
 	alias := filepath.Join(dir, "alias")
 	if err := os.Symlink(real, alias); err != nil {
 		t.Fatal(err)
 	}
-	h, err := openDirHandle(alias)
+	h, err := dirhandle.Open(alias)
 	if err != nil {
 		t.Fatal(err)
 	}

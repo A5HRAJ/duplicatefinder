@@ -1,4 +1,4 @@
-package main
+package media
 
 import (
 	"encoding/binary"
@@ -7,12 +7,15 @@ import (
 	"time"
 )
 
-// exifCaptured returns the EXIF DateTimeOriginal ("YYYY-MM-DD HH:MM") for
-// JPEG/TIFF/HEIC images, or "" when unavailable. The parser is deliberately
-// minimal: it only walks IFD0 → Exif IFD looking for tags 0x9003/0x0132.
-// open is the entry's pinned-handle opener (fEnt.openContent): metadata is
-// read from inside the vetted tree, never through a raw path.
-func exifCaptured(open func() (*os.File, error), name string) string {
+// Captured returns the capture date ("YYYY-MM-DD HH:MM:SS") recorded in a
+// media file, or "" when there is none: EXIF DateTimeOriginal for JPEG,
+// the TIFF-family raws and HEIF/HEIC/AVIF, the QuickTime creation date for
+// MOV/MP4/M4V. The format is chosen by the file's extension; the EXIF walk
+// is deliberately minimal (IFD0 → Exif IFD, tags 0x9003/0x9004/0x0132). open
+// is the caller's opener for the file — the scanner passes its
+// pinned-handle opener, so metadata is read from inside the vetted tree,
+// never through a raw path.
+func Captured(open func() (*os.File, error), name string) string {
 	l := strings.ToLower(name)
 	isJpeg := strings.HasSuffix(l, ".jpg") || strings.HasSuffix(l, ".jpeg")
 	isTiff := strings.HasSuffix(l, ".tif") || strings.HasSuffix(l, ".tiff") ||
