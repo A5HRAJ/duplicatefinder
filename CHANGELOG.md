@@ -16,6 +16,7 @@ package versions shown in Package Center.
   the PNG/gzip/ZIP/JPEG/PDF/media validators, the byte comparison and the
   daemon's own on-disk files), a `test/fuzz.sh` runner and a weekly `Fuzz`
   workflow; positive tests for the metadata readers, which had none.
+- A beta-testing guide and a structured bug-report issue template.
 
 ### Fixed
 - The packaging test compared the stamped filename against the literal

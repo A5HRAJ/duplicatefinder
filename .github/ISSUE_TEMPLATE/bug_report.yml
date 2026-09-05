@@ -1,0 +1,67 @@
+name: Bug report
+description: Something did not work as the README says it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing. The four fields below are what makes a report
+        reproducible; the rest is optional.
+  - type: input
+    id: model
+    attributes:
+      label: NAS model and architecture
+      placeholder: DS920+ (x86_64), DS218 (armv8), DS216j (armv7)...
+    validations:
+      required: true
+  - type: input
+    id: dsm
+    attributes:
+      label: DSM version
+      placeholder: DSM 7.2.2-72806 Update 3
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Duplicate Finder version
+      description: As shown in Package Center, and whether it is the SynoCommunity build or one you built yourself.
+      placeholder: 1.0.1-2 (SynoCommunity)
+    validations:
+      required: true
+  - type: input
+    id: filesystem
+    attributes:
+      label: Volume filesystem(s) involved
+      description: Storage Manager shows this per volume. Say if a USB or eSATA disk was involved.
+      placeholder: btrfs volume 1, ext4 volume 2, exFAT USB
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you did
+      description: The tool, the scan scope, the folders picked, which buttons were pressed.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: Copy any message the app showed, word for word.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Daemon log excerpt
+      description: |
+        `/var/packages/<package id>/var/dupfinder.log` on the NAS, readable
+        as root over SSH. Paste the lines from around the time of the
+        problem. Paths in the log are your own file names; redact what you
+        do not want public.
+      render: text

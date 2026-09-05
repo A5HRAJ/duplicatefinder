@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Beta testing guide
+    url: https://github.com/A5HRAJ/duplicatefinder/blob/master/docs/beta-testing.md
+    about: What to test on hardware and DSM versions the maintainer does not have, and how to report the result.

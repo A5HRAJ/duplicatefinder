@@ -97,10 +97,11 @@ and linux/arm/v7, each executing in a Docker container of that platform
 (QEMU for armv7 on Apple Silicon), with persistence enabled so the binary
 state layouts are exercised on 32-bit. The node harness stays on the host with
 the fixture bind-mounted at an identical path. This is a local, pre-release
-check rather than part of CI: emulation is slow, and the run has shown an
-intermittent failure in the junk-folder move step on armv7 that is not yet
-understood. Treat a failure there as something to investigate, not to rerun
-until green.
+check rather than part of CI, because emulation is slow. The runner once
+showed a single intermittent failure in the junk-folder move step on armv7;
+it did not reproduce in 18 consecutive runs afterwards, and the suite prints
+the daemon's full move response if it ever recurs. Treat a failure there as
+something to investigate, not to rerun until green.
 
 ### Unit tests alone
 

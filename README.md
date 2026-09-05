@@ -146,7 +146,8 @@ names it, not only the app.
 | ext4 volumes, several volumes, DSM 7.0 to 7.3 | not yet tested |
 
 If you run Duplicate Finder on anything in the last two rows, an issue
-reporting how it went, good or bad, is welcome.
+reporting how it went, good or bad, is welcome; the
+[beta testing guide](docs/beta-testing.md) says what to try.
 
 ## Reporting a problem
 
@@ -160,7 +161,9 @@ you did. The daemon's log is `/var/packages/<package id>/var/dupfinder.log`
 - [Architecture](docs/architecture.md): how the scanner, the results service,
   persistence and the move flow work, and the safety model in detail.
 - [Development](docs/development.md): running the daemon off-NAS, the test
-  suites, continuous integration and the release checklist.
+  suites, fuzzing, continuous integration and the release checklist.
+- [Beta testing](docs/beta-testing.md): what to try on hardware and DSM
+  versions the maintainer does not have, and how to report it.
 - [Changelog](CHANGELOG.md).
 - [SynoCommunity packaging](spksrc/README.md): the spksrc recipe and the state
   of the submission.
