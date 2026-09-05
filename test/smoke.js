@@ -487,23 +487,23 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     check('a chosen date is left to seed the picker itself',
       win.pickerOpenDate('lo', true) === null && win.pickerOpenDate('hi', true) === null);
     check('the picker is only re-aimed, never given a value',
-      /picker\.update\(d\)/.test(String(win.getSearchMenu)) &&
-      !/picker\.setValue/.test(String(win.getSearchMenu)));
+      /picker\.update\(d\)/.test(String(win.bindDatePicker)) &&
+      !/picker\.setValue/.test(String(win.bindDatePicker)));
     // Clear must land back on the opening month, not today. The button lives
     // inside the rendered picker, so the wiring itself can only be checked
     // on-device; what is asserted here is that Clear is wired at all and that
     // it reuses pickerOpenDate (so it can never drift from the open month).
     check('Clear is wired to return to the opening month',
-      /__clearHooked/.test(String(win.getSearchMenu)) &&
-      /clear-btn/.test(String(win.getSearchMenu)) &&
-      /pickerOpenDate\(end, false\)/.test(String(win.getSearchMenu)) &&
-      /picker\.update\(back\)/.test(String(win.getSearchMenu)));
+      /__clearHooked/.test(String(win.bindDatePicker)) &&
+      /clear-btn/.test(String(win.bindDatePicker)) &&
+      /pickerOpenDate\(end, false\)/.test(String(win.bindDatePicker)) &&
+      /picker\.update\(back\)/.test(String(win.bindDatePicker)));
     // Clear fires no select event, so it must recompute the pair's bounds
     // itself — otherwise the OTHER field stays limited by the date just
     // removed, and From claims "must be <date> or earlier" long after that To
     // date has been cleared.
     check('Clear recomputes the pair\'s bounds',
-      /refreshDateBounds\(\)/.test(String(win.getSearchMenu)));
+      /refreshDateBounds\(\)/.test(String(win.bindDatePicker)));
     {
       // simulate exactly that sequence: To set, then cleared
       f.from.setValue(''); f.to.setValue('');

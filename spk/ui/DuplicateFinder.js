@@ -998,10 +998,23 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		},
 
 		/* ------------------------------------------------- build the UI */
+		// The window's pieces, built once by the constructor. Each builder owns
+		// one region and stores what it creates on `this`; the order matters
+		// only where a later region embeds an earlier one: the grid takes the
+		// selection model, store and pager, and the center panel takes both
+		// toolbars, the idle panel and the grid.
 		buildComponents: function () {
-			var me = this;
+			this.buildRail();
+			this.buildTopToolbar();
+			this.buildGrid();
+			this.buildBottomToolbar();
+			this.buildCenterPanel();
+		},
 
-			/* --- west rail: tools + volume card --- */
+		// The left rail: the five tools with their badges, and the volume card
+		// beneath them.
+		buildRail: function () {
+			var me = this;
 			this.toolsStore = new Ext.data.JsonStore({
 				fields: ['id', 'label', 'badge', 'ico'],
 				data: TOOLS
@@ -1038,8 +1051,12 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				layoutConfig: { align: 'stretch' },
 				items: [this.toolsView, this.volPanel]
 			});
+		},
 
-			/* --- top toolbar --- */
+		// The top toolbar: Scan, Scope, the Match menu, the summary and DSM's
+		// own search box.
+		buildTopToolbar: function () {
+			var me = this;
 			this.scanBtn = new UxButton({
 				btnStyle: 'blue',
 				text: 'Scan',
@@ -1113,8 +1130,101 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					this.searchField
 				]
 			});
+		},
 
-			/* --- results grid --- */
+		// The results grid: the checkbox selection model with its padlock
+		// renderer, the paging store, DSM's pager, the grouping view and the
+		// grid that carries them.
+		buildGrid: function () {
+			this.buildSelectionModel();
+			this.buildStore();
+			this.buildPager();
+			this.grid = new UxGrid({
+				border: false,
+				store: this.store,
+				sm: this.sm,
+				// the pager belongs to the grid, directly under the rows —
+				// where File Station puts it
+				bbar: this.pager,
+				// Every page turn is a round trip. Without the mask the grid
+				// would show its "No results" text while one is in flight,
+				// which on a big result set reads as "nothing found".
+				loadMask: true,
+				enableColumnHide: true,
+				columns: [
+					this.sm,
+					// GroupingView needs the grouped field present in the column
+					// model; keep it permanently hidden.
+					{ header: 'Group', dataIndex: 'gidx', hidden: true, hideable: false, width: 10 },
+					{ id: 'name', header: 'Name', dataIndex: 'name', width: 240, sortable: true, renderer: function (v, m, r) {
+						// Second explanation for the same fact, and deliberately
+						// so: the padlock carries the full sentence on hover,
+						// but the eye lands on the name, not on a 20px glyph.
+						if (r.get('prot')) m.attr = 'ext:qtip="Read-only reference"';
+						return esc(v);
+					} },
+					// Conflicting Files only, hidden everywhere else (setToolColumns).
+					// Status sits beside the name because on that tool it is the
+					// column the whole listing exists to show.
+					// fixed: forceFit scales every other column to fill the grid, and
+					// with this tool's two extra columns showing it would squeeze Status
+					// to 57px — narrower than the word it has to render (measured
+					// on-device; jsdom does no layout).
+				{ header: 'Status', dataIndex: 'verdict', width: 110, fixed: true, sortable: false, hidden: true, renderer: function (v, m, r) {
+						if (!v) return '';
+						var ev = r.get('evidence');
+						if (ev) m.attr = 'ext:qtip="' + qtipText(ev) + '"';
+						return '<span class="df-verdict df-verdict-' + esc(v) + '">' + esc(VERDICT_TEXT[v] || v) + '</span>';
+					} },
+					{ header: 'Evidence', dataIndex: 'evidence', width: 300, sortable: false, hidden: true, renderer: function (v) {
+						if (!v) return '<span class="df-dim">no evidence either way</span>';
+						return '<span ext:qtip="' + qtipText(v) + '">' + esc(v) + '</span>';
+					} },
+					{ header: 'Location', dataIndex: 'path', width: 260, sortable: true, renderer: function (v) {
+						return '<span class="df-loc" ext:qtip="Open in File Station">' + esc(v) + '</span>';
+					} },
+					{ header: 'Size', dataIndex: 'size', width: 90, align: 'right', sortable: true, renderer: function (v, m, r) {
+						return r.get('isDir') ? 'Empty' : fmtBytes(v);
+					} },
+					{ header: 'Created Date', dataIndex: 'created', width: 160, sortable: true, hidden: false, renderer: fmtDate },
+					{ header: 'Modified Date', dataIndex: 'date', width: 160, sortable: true, renderer: fmtDate },
+					{ header: 'Captured Date', dataIndex: 'captured', width: 160, sortable: true, hidden: false, renderer: fmtDate },
+					{ header: 'Hash', dataIndex: 'hash', width: 150, sortable: false, renderer: function (v) {
+						return '<span class="df-mono">' + esc(v || '—') + '</span>';
+					} }
+				],
+				view: this.buildGridView(),
+				listeners: {
+					scope: this,
+					// re-apply the dynamic checker states and the manual sort
+					// arrow after any full re-render wipes them
+					viewready: function (g) {
+						g.getView().on('refresh', this.updateCheckerStates, this);
+						g.getView().on('refresh', this.updateFlatSortIcon, this);
+					},
+					rowclick: function (grid, idx, e) {
+						if (e.getTarget('.x-grid3-row-checker')) return;
+						if (e.getTarget('.df-loc')) {
+							this.openFileStation(grid.getStore().getAt(idx).get('path'));
+							return;
+						}
+						var rec = grid.getStore().getAt(idx);
+						if (rec.get('prot')) {
+							// silent: the padlock and its two tooltips already say
+							// this, so a toast just repeated it
+							return;
+						}
+						if (this.sm.isSelected(idx)) this.sm.deselectRow(idx);
+						else this.sm.selectRow(idx, true);
+					}
+				}
+			});
+		},
+
+		// The checkbox column. Its renderer is where the padlock for a read-only
+		// reference row and the disabled box for an unaddressable file come from,
+		// and beforerowselect is the one chokepoint every selection path passes.
+		buildSelectionModel: function () {
 			this.sm = new Ext.grid.CheckboxSelectionModel({
 				// checkOnly disables the model's own mousedown row-select, which
 				// would fire before rowclick can tell a Location link was hit
@@ -1198,6 +1308,12 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					selectionchange: this.updateSelectionUI
 				}
 			});
+		},
+
+		// The paging store behind the grid, driven by the daemon's page API, with
+		// header-click sorting routed to the daemon for the flat tools.
+		buildStore: function () {
+			var me = this;
 			// paramNames.start is 'offset': DSM's own paging stores use
 			// offset/limit, and so does the daemon's results API — so the
 			// PagingToolbar's page buttons request pages directly, with no
@@ -1237,6 +1353,10 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				}
 				return origStoreSort.apply(this, arguments);
 			};
+		},
+
+		// DSM's own paging toolbar, counting in the unit the tool pages in.
+		buildPager: function () {
 			// DSM's own pager: numbered pages, ±5-page jumps, first/last, the
 			// item count and a refresh button — the same control File Station
 			// puts under a long folder listing. It hides its own navigation
@@ -1262,6 +1382,11 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					basePager.setButtonsVisible.call(this, this.getTotalPage() > 1);
 				};
 			}
+		},
+
+		// The grouping view, built through DSM's FleXcroll factory when the
+		// desktop provides it and on the stock view otherwise.
+		buildGridView: function () {
 			// Grid view: DSM ships SYNO.SDS.DefineGridView, the factory it
 			// uses to build its own FleXcroll grid views (overlay scrollbar,
 			// like File Station). Synology never made a grouped variant, but
@@ -1318,94 +1443,12 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				// thumb floats over the row-line ends, like File Station.
 				viewCfg.scrollOffset = 20;
 			}
-			this.grid = new UxGrid({
-				border: false,
-				store: this.store,
-				sm: this.sm,
-				// the pager belongs to the grid, directly under the rows —
-				// where File Station puts it
-				bbar: this.pager,
-				// Every page turn is a round trip. Without the mask the grid
-				// would show its "No results" text while one is in flight,
-				// which on a big result set reads as "nothing found".
-				loadMask: true,
-				enableColumnHide: true,
-				columns: [
-					this.sm,
-					// GroupingView needs the grouped field present in the column
-					// model; keep it permanently hidden.
-					{ header: 'Group', dataIndex: 'gidx', hidden: true, hideable: false, width: 10 },
-					{ id: 'name', header: 'Name', dataIndex: 'name', width: 240, sortable: true, renderer: function (v, m, r) {
-						// Second explanation for the same fact, and deliberately
-						// so: the padlock carries the full sentence on hover,
-						// but the eye lands on the name, not on a 20px glyph.
-						if (r.get('prot')) m.attr = 'ext:qtip="Read-only reference"';
-						return esc(v);
-					} },
-					// Conflicting Files only, hidden everywhere else (setToolColumns).
-					// Status sits beside the name because on that tool it is the
-					// column the whole listing exists to show.
-					// fixed: forceFit scales every other column to fill the grid, and
-					// with this tool's two extra columns showing it would squeeze Status
-					// to 57px — narrower than the word it has to render (measured
-					// on-device; jsdom does no layout).
-				{ header: 'Status', dataIndex: 'verdict', width: 110, fixed: true, sortable: false, hidden: true, renderer: function (v, m, r) {
-						if (!v) return '';
-						var ev = r.get('evidence');
-						if (ev) m.attr = 'ext:qtip="' + qtipText(ev) + '"';
-						return '<span class="df-verdict df-verdict-' + esc(v) + '">' + esc(VERDICT_TEXT[v] || v) + '</span>';
-					} },
-					{ header: 'Evidence', dataIndex: 'evidence', width: 300, sortable: false, hidden: true, renderer: function (v) {
-						if (!v) return '<span class="df-dim">no evidence either way</span>';
-						return '<span ext:qtip="' + qtipText(v) + '">' + esc(v) + '</span>';
-					} },
-					{ header: 'Location', dataIndex: 'path', width: 260, sortable: true, renderer: function (v) {
-						return '<span class="df-loc" ext:qtip="Open in File Station">' + esc(v) + '</span>';
-					} },
-					{ header: 'Size', dataIndex: 'size', width: 90, align: 'right', sortable: true, renderer: function (v, m, r) {
-						return r.get('isDir') ? 'Empty' : fmtBytes(v);
-					} },
-					{ header: 'Created Date', dataIndex: 'created', width: 160, sortable: true, hidden: false, renderer: fmtDate },
-					{ header: 'Modified Date', dataIndex: 'date', width: 160, sortable: true, renderer: fmtDate },
-					{ header: 'Captured Date', dataIndex: 'captured', width: 160, sortable: true, hidden: false, renderer: fmtDate },
-					{ header: 'Hash', dataIndex: 'hash', width: 150, sortable: false, renderer: function (v) {
-						return '<span class="df-mono">' + esc(v || '—') + '</span>';
-					} }
-				],
-				view: new ViewClass(viewCfg),
-				listeners: {
-					scope: this,
-					// re-apply the dynamic checker states and the manual sort
-					// arrow after any full re-render wipes them
-					viewready: function (g) {
-						g.getView().on('refresh', this.updateCheckerStates, this);
-						g.getView().on('refresh', this.updateFlatSortIcon, this);
-					},
-					rowclick: function (grid, idx, e) {
-						if (e.getTarget('.x-grid3-row-checker')) return;
-						if (e.getTarget('.df-loc')) {
-							this.openFileStation(grid.getStore().getAt(idx).get('path'));
-							return;
-						}
-						var rec = grid.getStore().getAt(idx);
-						if (rec.get('prot')) {
-							// silent: the padlock and its two tooltips already say
-							// this, so a toast just repeated it
-							return;
-						}
-						if (this.sm.isSelected(idx)) this.sm.deselectRow(idx);
-						else this.sm.selectRow(idx, true);
-					}
-				}
-			});
-			/* --- idle panel --- */
-			this.idlePanel = new Ext.Panel({
-				border: false,
-				html: '',
-				autoScroll: true
-			});
+			return new ViewClass(viewCfg);
+		},
 
-			/* --- bottom toolbar --- */
+		// The bottom toolbar: the selection summary, Select, Move to… and
+		// Export.
+		buildBottomToolbar: function () {
 			this.selText = new Ext.Toolbar.TextItem('Select files to act on them');
 			this.moveBtn = new UxButton({
 				btnStyle: 'blue',
@@ -1434,8 +1477,17 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			this.bottomToolbar = new UxToolbar({
 				items: [this.selText, '->', this.selectMenuBtn, this.moveBtn, this.exportBtn]
 			});
+		},
 
-			/* --- center card panel --- */
+		// The center card panel, switching between the idle text and the grid,
+		// with both toolbars.
+		buildCenterPanel: function () {
+			this.idlePanel = new Ext.Panel({
+				border: false,
+				html: '',
+				autoScroll: true
+			});
+
 			this.centerPanel = new Ext.Panel({
 				region: 'center',
 				layout: 'card',
@@ -1919,13 +1971,55 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		getSearchMenu: function () {
 			if (this.searchMenu) return this.searchMenu;
 			var me = this;
-			function pairStore(pairs) {
-				return new Ext.data.ArrayStore({ fields: ['v', 't'], data: pairs });
-			}
-			function combo(pairs, value, extra) {
+			var f = this.buildSearchFields();
+			/* A To date before the From date can only ever return nothing, so
+			   the pickers constrain each other — File Station does exactly this
+			   on its own two fields:
+			     from select -> to.setMinValue(date)
+			     to   select -> from.setMaxValue(date)
+			   which greys the impossible days out in the other picker. Clearing
+			   a date restores that side's original bound (FS has no Clear on
+			   these, so this part is ours). */
+			// DSM's own wide defaults, kept as the fallback for a date field no
+			// file carries (nothing to derive a range from)
+			this._dateBounds = { toMin: f.to.minValue, fromMax: f.from.maxValue };
+			f.from.on('select', function () { me.refreshDateBounds(); });
+			f.to.on('select', function () { me.refreshDateBounds(); });
+			f.dateBy.on('select', function () { me.refreshDateBounds(); });
+			var form = this.buildSearchForm(f);
+			this.searchMenu = new UxMenu({
+				// df-search-menu scopes the footer buttons' pill shape — see the
+				// rule in the injected stylesheet for why a menu needs it and a
+				// window does not.
+				cls: 'df-app df-search-menu',
+				items: [form],
+				listeners: {
+					show: function () { me.syncSearchMenu(); },
+					/* Naming this menu as the pickers' parentMenu (above) keeps
+					   the menu open while a picker is up — but it also puts the
+					   picker inside this menu's chain, so MenuMgr stops treating
+					   clicks on the other fields as "outside" and the picker
+					   never auto-closes: both popups end up open at once. Close
+					   it here instead, on any mousedown in the menu that is not
+					   inside the picker itself or on the owning field's own
+					   trigger. */
+					afterrender: function (mnu) {
+						mnu.getEl().on('mousedown', function (e) {
+							me.closeDatePickers(e.getTarget());
+						});
+					}
+				}
+			});
+			return this.searchMenu;
+		},
+
+		// searchCombo is one dropdown of the search menu, in File Station's
+		// configuration: not editable, every option shown on click, local data
+		// from (value, text) pairs.
+		searchCombo: function (pairs, value, extra) {
 				var c = new UxCombo(Ext.apply({
 					editable: false, triggerAction: 'all', mode: 'local',
-					store: pairStore(pairs), valueField: 'v', displayField: 't',
+					store: new Ext.data.ArrayStore({ fields: ['v', 't'], data: pairs }), valueField: 'v', displayField: 't',
 					value: value, anchor: '100%'
 				}, extra));
 				/* A combo's dropdown renders to document.body by default, which
@@ -1939,7 +2033,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					return m ? m.dom : document.body;
 				};
 				return c;
-			}
+		},
+
 			/* Same class of problem for date pickers, different mechanism: the
 			   field shows its picker with show(el, pos) — no third argument —
 			   so the picker's parentMenu is undefined, MenuMgr treats our menu
@@ -1951,7 +2046,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			   class + the onDateMenuHide wiring — so this stays DSM's own
 			   picker (a stock Ext.menu.DateMenu here makes the calendar stop
 			   looking like File Station's). */
-			function datePicker(field, end) {
+		bindDatePicker: function (field, end) {
+			var me = this;
 				if (!UxDateMenu) return field;
 				var dm = new UxDateMenu(Ext.apply({
 					cls: 'syno-ux-datefield-menu',
@@ -2062,14 +2158,19 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					};
 				});
 				return field;
-			}
+		},
+
+		// buildSearchFields creates the search form's controls, keyed the way
+		// applySearchMenu and syncSearchMenu read them (this.soFields).
+		buildSearchFields: function () {
+			var me = this;
 			// paired fields sit side by side in a composite row, so they take
 			// flex rather than anchor (File Station: flex 1 each, 8px gutter)
 			var LEFT = { flex: 1, margins: '0 8 0 0' }, RIGHT = { flex: 1 };
 			var f = this.soFields = {
 				kw: new UxText({ fieldLabel: 'Keyword', anchor: '100%' }),
-				loc: combo([['', 'All folders in scope']], '', { anchor: '100%' }),
-				type: combo([
+				loc: this.searchCombo([['', 'All folders in scope']], '', { anchor: '100%' }),
+				type: this.searchCombo([
 					['', 'Any'], ['dir', 'Any Folder'], ['file', 'Any File'],
 					['docs', 'Documents'], ['video', 'Videos'], ['pic', 'Pictures'],
 					['audio', 'Audio'], ['web', 'Web pages'], ['exe', 'Executable files'],
@@ -2078,17 +2179,17 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					me.soFields.ext.setDisabled(c.getValue() !== 'ext');
 				} } }, LEFT)),
 				ext: new UxText(Ext.apply({ emptyText: 'File extension', disabled: true }, RIGHT)),
-				dateBy: combo([
+				dateBy: this.searchCombo([
 					['modified', 'Modified Date'], ['created', 'Created Date'],
 					['captured', 'Captured Date']
 				], 'modified', { anchor: '100%' }),
 				// editable:false + format:'Y-m-d' + a From/To emptyText is
 				// exactly how File Station configures these two fields
-				from: datePicker(new UxDate(Ext.apply({ format: 'Y-m-d',
+				from: this.bindDatePicker(new UxDate(Ext.apply({ format: 'Y-m-d',
 					editable: false, emptyText: 'From' }, LEFT)), 'lo'),
-				to: datePicker(new UxDate(Ext.apply({ format: 'Y-m-d',
+				to: this.bindDatePicker(new UxDate(Ext.apply({ format: 'Y-m-d',
 					editable: false, emptyText: 'To' }, RIGHT)), 'hi'),
-				sizeOp: combo([
+				sizeOp: this.searchCombo([
 					['', 'Any'], ['eq', 'equals'], ['gt', 'is greater than'], ['lt', 'is less than']
 				], '', Ext.apply({ listeners: { select: function (c) {
 					me.soFields.size.setDisabled(!c.getValue());
@@ -2096,27 +2197,23 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				size: new UxNumber(Ext.apply({ emptyText: 'Size (MB)',
 					allowNegative: false, allowDecimals: false, disabled: true }, RIGHT))
 			};
-			/* A To date before the From date can only ever return nothing, so
-			   the pickers constrain each other — File Station does exactly this
-			   on its own two fields:
-			     from select -> to.setMinValue(date)
-			     to   select -> from.setMaxValue(date)
-			   which greys the impossible days out in the other picker. Clearing
-			   a date restores that side's original bound (FS has no Clear on
-			   these, so this part is ours). */
-			// DSM's own wide defaults, kept as the fallback for a date field no
-			// file carries (nothing to derive a range from)
-			this._dateBounds = { toMin: f.to.minValue, fromMax: f.from.maxValue };
-			f.from.on('select', function () { me.refreshDateBounds(); });
-			f.to.on('select', function () { me.refreshDateBounds(); });
-			f.dateBy.on('select', function () { me.refreshDateBounds(); });
-			function row(label, left, right) {
+			return f;
+		},
+
+		// searchRow pairs two controls on one composite row, as File Station's
+		// search form does.
+		searchRow: function (label, left, right) {
 				return new UxComposite(Ext.apply(
 					label ? { fieldLabel: label } : { hideLabel: true },
 					{ anchor: '100%', items: [left, right] }
 				));
-			}
-			var form = new Ext.Panel({
+		},
+
+		// buildSearchForm lays the controls out in File Station's row grouping
+		// and adds the Reset and Search buttons.
+		buildSearchForm: function (f) {
+			var me = this;
+			return new Ext.Panel({
 				border: false, layout: 'form', labelAlign: 'top', width: 340,
 				bodyStyle: 'padding:12px 14px 4px;',
 				// File Station's own row grouping: the paired controls share a
@@ -2126,10 +2223,10 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				items: [
 					f.kw,
 					Ext.apply(f.loc, { fieldLabel: 'Location' }),
-					row('File Type', f.type, f.ext),
+					this.searchRow('File Type', f.type, f.ext),
 					Ext.apply(f.dateBy, { fieldLabel: 'Date' }),
-					row(null, f.from, f.to),
-					row('Size (MB)', f.sizeOp, f.size)
+					this.searchRow(null, f.from, f.to),
+					this.searchRow('Size (MB)', f.sizeOp, f.size)
 				],
 				buttonAlign: 'right',
 				buttons: [
@@ -2146,30 +2243,6 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					} })
 				]
 			});
-			this.searchMenu = new UxMenu({
-				// df-search-menu scopes the footer buttons' pill shape — see the
-				// rule in the injected stylesheet for why a menu needs it and a
-				// window does not.
-				cls: 'df-app df-search-menu',
-				items: [form],
-				listeners: {
-					show: function () { me.syncSearchMenu(); },
-					/* Naming this menu as the pickers' parentMenu (above) keeps
-					   the menu open while a picker is up — but it also puts the
-					   picker inside this menu's chain, so MenuMgr stops treating
-					   clicks on the other fields as "outside" and the picker
-					   never auto-closes: both popups end up open at once. Close
-					   it here instead, on any mousedown in the menu that is not
-					   inside the picker itself or on the owning field's own
-					   trigger. */
-					afterrender: function (mnu) {
-						mnu.getEl().on('mousedown', function (e) {
-							me.closeDatePickers(e.getTarget());
-						});
-					}
-				}
-			});
-			return this.searchMenu;
 		},
 
 		// Hide any open date picker unless the click landed inside it (its own
