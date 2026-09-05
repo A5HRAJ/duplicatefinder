@@ -5,9 +5,48 @@ This directory mirrors the two folders a SynoCommunity submission adds to
 and `cross/duplicatefinder` into a spksrc checkout to build with
 `make -C spk/duplicatefinder arch-x64-7.1` (or any DSM 7 arch).
 
-It is a draft. Nothing here has been built through spksrc yet, and it is
-NOT what `build.sh` produces: `build.sh` keeps shipping the hand-built
-`DuplicateFinder` package until this route is proven on the DS916+.
+It builds: on 2026-09-04 the recipe went through the spksrc toolchain for
+x64, aarch64 and armv7 on the DSM 7.1 toolchains, first try on each, with
+no warnings (see "Building it" below). It is still NOT what `build.sh`
+produces: `build.sh` keeps shipping the hand-built `DuplicateFinder`
+package, which is the one installed on the DS916+, and the two cannot be
+installed side by side (same port, same `dsmappname`).
+
+## Building it
+
+The spksrc image is amd64 and builds fine under emulation on Apple Silicon,
+but on Docker Desktop for macOS the checkout must live in a Docker named
+volume, not a bind mount: extracting Synology's toolchain applies read-only
+directory modes before filling the directories, and on a bind mount the
+container's root does not get root's bypass, so `tar` fails thousands of
+times. Nothing is wrong with the package when that happens.
+
+```bash
+docker pull --platform linux/amd64 ghcr.io/synocommunity/spksrc:latest
+git clone --depth 1 https://github.com/SynoCommunity/spksrc.git spksrc-src
+cp -R spksrc/spk/duplicatefinder spksrc-src/spk/
+cp -R spksrc/cross/duplicatefinder spksrc-src/cross/
+docker volume create spksrc-work
+docker run --rm --platform linux/amd64 -v spksrc-work:/spksrc -v "$PWD/spksrc-src":/src:ro   ghcr.io/synocommunity/spksrc:latest cp -a /src/. /spksrc/
+docker run --rm --platform linux/amd64 -v spksrc-work:/spksrc -w /spksrc   ghcr.io/synocommunity/spksrc:latest /bin/bash -c   'make setup && make -C spk/duplicatefinder arch-x64-7.1 arch-aarch64-7.1 arch-armv7-7.1'
+docker run --rm -v spksrc-work:/spksrc -v "$PWD/dist":/out alpine cp /spksrc/packages/duplicatefinder_*.spk /out/
+```
+
+`make setup` only writes `local.mk`. The generic arch names on DSM 7 are
+`x64`, `aarch64` and `armv7`. Each arch takes about two minutes after the
+one-off image pull: toolchain download and extraction, native Go, then the
+package. The volume keeps the toolchains and Go for later builds.
+
+What was checked on the results, per arch: INFO fields (`package`,
+`version`, `arch` family, `os_min_ver`, `dsmuidir`, `dsmappname`, the
+description with its parentheses intact), the checksum against
+`package.tgz`, a static stripped `bin/dupfinder` of the right ELF
+architecture, `ui/api.cgi` and the stamped script byte-identical to the
+sources, `ui/config` naming exactly the shipped script, seven icons, the
+`SSS_SCRIPT` copy shipped unchanged, every generated script passing
+`sh -n`, and `conf/privilege` carrying `run-as: package`. The x64 daemon was
+also started inside the build container: it wrote its token and ready file,
+refused a token-less request with 401, and reported version `1.0.0`.
 
 ## The package id changes: `DuplicateFinder` -> `duplicatefinder`
 
@@ -74,4 +113,10 @@ scan state, does not carry over).
 - `LICENSE = MIT` matches the repository's LICENSE file.
 - The daemon's `/api/info` will report `1.0.0`, not `1.0.0-1`: the cross
   package cannot see `SPK_REV`.
-- Nothing here has been built through the spksrc toolchain yet.
+- Built through the spksrc toolchain on 2026-09-04 for x64, aarch64 and
+  armv7 (`duplicatefinder_<arch>-7.1_1.0.0-1.spk`). Note `os_min_ver` comes
+  out as 7.1 from those toolchains, against the hand-built package's 7.0.
+- Not yet installed anywhere: on the DS916+ it would collide with the
+  hand-built package on port 9807 and on `dsmappname`, so an install trial
+  means removing that package first, which is the maintainer's call.
+- The pull request to SynoCommunity/spksrc itself has not been opened.
