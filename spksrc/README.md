@@ -125,5 +125,10 @@ scan state, does not carry over).
   package path, the app's requests go to
   `/webman/3rdparty/duplicatefinder/api.cgi`. The service user is new, so
   the shared-folder grants (README step 3) have to be made again for
-  `sc-duplicatefinder` before a scan can read anything.
+  `sc-duplicatefinder` before a scan can read anything; with them in
+  place the scan reproduced the known baseline exactly.
+- Upgraded in place to 1.0.1-2 the same day through the same route. An
+  upgrade auto-starts (a fresh install does not), the persisted results
+  survived, and the unreadable-location hint now names
+  `sc-duplicatefinder`.
 - The pull request to SynoCommunity/spksrc itself has not been opened.
