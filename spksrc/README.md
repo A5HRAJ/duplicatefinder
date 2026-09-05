@@ -7,9 +7,9 @@ and `cross/duplicatefinder` into a spksrc checkout to build with
 
 It builds: on 2026-09-04 the recipe went through the spksrc toolchain for
 x64, aarch64 and armv7 on the DSM 7.1 toolchains, first try on each, with
-no warnings (see "Building it" below). It is still NOT what `build.sh`
-produces: `build.sh` keeps shipping the hand-built `DuplicateFinder`
-package, and the two cannot be installed side by side (same port, same
+no warnings (see "Building it" below). It is NOT what `build.sh` produces:
+`build.sh` builds the hand-built `DuplicateFinder` package for local
+testing, and the two cannot be installed side by side (same port, same
 `dsmappname`). Since 2026-09-04 the DS916+ runs this recipe's
 `duplicatefinder` package instead (see "State of the submission").
 
@@ -63,21 +63,21 @@ version (`1.0.0` for that build).
 
 SynoCommunity package ids are lowercase (every one of the 173 packages in
 spksrc is), and spksrc writes `SPK_NAME` verbatim into INFO's `package=`.
-DSM keys everything on that id, and until 0136 four places in the source
-tree hardcoded the old one. They now discover the id at runtime, so one
-source tree serves both builds and neither id appears in code:
+DSM keys everything on that id, and four places in the source tree depend
+on it. They discover the id at runtime, so one source tree serves both
+builds and neither id appears in code:
 
 | File | How the id is found now |
 | --- | --- |
 | `spk/ui/DuplicateFinder.js` | DSM loads the app through a script tag whose src is `/webman/3rdparty/<id>/DuplicateFinder-<stamp>.js`; `API_BASE` is that path with the filename replaced by `api.cgi`. `document.currentScript` first, then a scan of `document.scripts` for the `DuplicateFinder*.js` stem. No tag at all throws at load. Under the dev daemon and the jsdom harness the script is served from the root, giving `/api.cgi`, which dev.go routes. |
 | `spk/ui/api.cgi` | `readlink -f "$0"` resolves to `/volumeN/@appstore/<id>/ui/api.cgi` whichever symlink the web server came through; `SCRIPT_FILENAME` and `SCRIPT_NAME` are the fallbacks. The id must match `[A-Za-z0-9._-]+` and `/var/packages/<id>/target/bin/dupfinder` must exist, or the request is refused with a 500 rather than guessed. `/debug` reports `pkgId` and `pkgIdSource`. |
-| `server/main.go` | `DUPFINDER_VAR` from the shim as before; the fallback is now `argv[0]/../../var`, which is `/var/packages/<id>/var` for any id (argv[0], not `os.Executable`, because the resolved path lives under `@appstore`). |
+| `server/main.go` | `DUPFINDER_VAR` from the shim; the fallback is `argv[0]/../../var`, which is `/var/packages/<id>/var` for any id (argv[0], not `os.Executable`, because the resolved path lives under `@appstore`). |
 | `server/dev.go` | strips any `/webman/3rdparty/<id>` prefix instead of the literal one. |
 
 `spk/scripts/start-stop-status` keeps its literal for the hand-built package;
 the spksrc copy in `spk/duplicatefinder/src/` reads `SYNOPKG_PKGNAME`
-instead. The spk Makefile's last step still greps the staged UI for the old
-literal paths so they cannot come back.
+instead. The spk Makefile's last step greps the staged UI for the
+hand-built id's literal paths so they cannot come back.
 
 Consequence for the DS916+: DSM treats `duplicatefinder` as a different
 package from `DuplicateFinder`, so the SynoCommunity build never upgrades
