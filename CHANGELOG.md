@@ -24,6 +24,12 @@ package versions shown in Package Center.
   It now asks `build.sh` for the version.
 
 ### Changed
+- The Go module is organized by concern: the format readers and validators
+  moved to `internal/media` and the pinned directory handle to
+  `internal/dirhandle`; the former `main.go` and `scan.go` are split into
+  files named for what they hold; and the scan orchestrator, the move
+  handler and the UI's window and search-menu builders read as sequences of
+  named steps instead of one long function each. No behaviour change.
 - Source comments describe the current behaviour and its reasons; they no
   longer refer to internal build numbers or to earlier versions. No
   user-visible behaviour changed. The only code changes are cosmetic: two

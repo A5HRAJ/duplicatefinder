@@ -3,7 +3,13 @@
 ## Layout
 
 ```
-server/        Go daemon, CGI proxy and scanners (dev.go is compiled only with -tags dev)
+server/        Go module: the daemon (daemon.go), the CGI proxy (cgi.go), the
+               HTTP handlers, the scanner passes (scan.go, walk.go,
+               duplicates.go, emptyfolders.go, tempfiles.go, corrupt.go), the
+               results service, persistence, the move flow (move.go) and the
+               File Station client (fsapi.go); dev.go is compiled only with -tags dev
+server/internal/media      the EXIF, HEIF and QuickTime readers and the container validators
+server/internal/dirhandle  the pinned directory handle and the O_NOFOLLOW relative open
 spk/ui/        The DSM desktop app (DuplicateFinder.js), its ui/config and api.cgi
 spk/scripts/   Package lifecycle scripts (start-stop-status and no-op hooks)
 spk/conf/      privilege: run as the package user
@@ -115,12 +121,13 @@ cd server && go test -race ./...
 FUZZTIME=1m test/fuzz.sh
 ```
 
-Every reader of bytes the daemon does not control has a fuzz target in
-`server/fuzz_test.go`: the EXIF, HEIF and QuickTime metadata readers, the
-container validators behind Conflicting Files, the byte-level comparison, and
-the daemon's own spill, hash-store and results files. Each target is seeded
-with a valid file built by `server/parsers_test.go`, and asserts that the
-reader neither panics nor runs away and that its output is well-formed.
+Every reader of bytes the daemon does not control has a fuzz target: the
+EXIF, HEIF and QuickTime metadata readers, the container validators behind
+Conflicting Files and the byte-level comparison in
+`server/internal/media/fuzz_test.go`, and the daemon's own spill, hash-store
+and results files in `server/fuzz_test.go`. Each target is seeded with a
+valid file built by the media package's `parsers_test.go`, and asserts that
+the reader neither panics nor runs away and that its output is well-formed.
 `go test` replays the seeds and any saved crashers on every run; the script
 above runs the targets for real, for `FUZZTIME` each (default 30 seconds). A
 crasher is written to `server/testdata/fuzz/<Target>/` and fails `go test`
@@ -131,6 +138,11 @@ same script weekly and on demand from the Actions tab.
 
 - Go code is `gofmt`-formatted and `staticcheck`-clean; the gate enforces
   both. Exemptions are made inline with `//lint:ignore` and a reason.
+- Files are named for one concern each, and a function does one job: the
+  orchestrators (`runScan`, `handleMove`) read as a sequence of named steps.
+  Code that parses bytes the daemon does not control lives in
+  `internal/media`, behind a small exported surface, so the trust boundary is
+  visible in the import graph.
 - The UI is ES5 (`var`, no arrow functions) because it runs inside DSM's
   ExtJS 3.4 desktop page; it is loaded by jsdom in the tests, so a syntax
   error fails the suite.

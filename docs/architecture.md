@@ -32,10 +32,12 @@ bin/dupfinder -mode daemon  127.0.0.1:9807, started by start-stop-status as the 
   administrators group, and execs the Go binary in CGI mode. A request that
   carries a SynoToken must validate it; an empty or invalid token never falls
   back to cookie-only authentication.
-- **The CGI proxy** (`server/main.go`, `runCGI`) forwards the request to the
+- **The CGI proxy** (`server/cgi.go`) forwards the request to the
   daemon over loopback, attaching the shared daemon token from
   `var/.authtoken` and the local DSM base URL the session is valid against.
-- **The daemon** (`server/`, one Go module, no cgo) serves `/api/*` on
+- **The daemon** (`server/`, one Go module, no cgo; the format readers live in
+  `internal/media` and the pinned directory handle in `internal/dirhandle`)
+  serves `/api/*` on
   loopback only. Every request must carry the daemon token, so other local
   processes cannot drive it. Scans, moves, exports and cancels additionally
   require the caller's DSM session, forwarded through the proxy; a raw call
@@ -50,20 +52,21 @@ sleeping, so Package Center never reports a daemon that then died. The log
 
 ## Scanning
 
-A scan runs on one goroutine (`runScan` in `server/scan.go`) with a
-per-tool accumulator; the tree is never materialized in memory.
+A scan runs on one goroutine (`runScan` in `server/scan.go`, which hands each
+tool its own pass) with a per-tool accumulator; the tree is never materialized
+in memory.
 
 ### The walk
 
 Every scan root is opened as a pinned directory handle
-(`server/dirhandle_linux.go`) and re-checked for containment from the handle's
+(`server/internal/dirhandle`) and re-checked for containment from the handle's
 canonical path, so a root swapped for a symlink after validation is refused
 rather than followed. Enumeration goes through the handle; symlinks below a
 root are skipped; Synology system directories (`@eaDir`, `#recycle`,
 `#snapshot`) and hidden names are skipped. Overlapping or aliased roots are
 de-overlapped by canonical path first, so no file is visited twice under two
 names. Content reads (hashing, EXIF) open files through the pinned root with
-`O_NOFOLLOW` on every path component (`server/openrel.go`), which works on
+`O_NOFOLLOW` on every path component (`openrel.go` in that package), which works on
 DSM's 3.10 kernels without `openat2`.
 
 Unreadable locations are collected into the scan's error list, capped at
@@ -195,9 +198,10 @@ the marker, and a marker that cannot be removed is neutralized in place.
 
 ## Moves and exports
 
-`handleMove` (`server/main.go`) is one long request under a move lock. Its
-checks run in this order, and every one of them compares symlink-resolved
-paths so an alias cannot slip past a prefix test:
+`handleMove` (`server/move.go`) is one long request under a move lock: it
+decodes the request, builds the vetting sets once, then runs `moveOne` per
+path. The checks run in this order, and every one of them compares
+symlink-resolved paths so an alias cannot slip past a prefix test:
 
 1. The tool must not be read-only, and in preserve mode must have a folder
    name in the daemon's own table; the client's string is only ever a key.
@@ -280,8 +284,9 @@ globs that define those walls).
   encoding in `qtipText`); CSV cells are neutralized against formula
   injection.
 - Parsers of untrusted file content (HEIF, QuickTime, EXIF, ZIP, PNG, gzip,
-  JPEG) bound every allocation and loop, and express bounds as subtractions
-  so they cannot overflow on the 32-bit ARM build.
+  JPEG, all in `server/internal/media`) bound every allocation and loop,
+  express bounds as subtractions so they cannot overflow on the 32-bit ARM
+  build, and are fuzzed.
 
 ## Packaging
 

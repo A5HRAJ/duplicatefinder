@@ -71,7 +71,7 @@ builds and neither id appears in code:
 | --- | --- |
 | `spk/ui/DuplicateFinder.js` | DSM loads the app through a script tag whose src is `/webman/3rdparty/<id>/DuplicateFinder-<stamp>.js`; `API_BASE` is that path with the filename replaced by `api.cgi`. `document.currentScript` first, then a scan of `document.scripts` for the `DuplicateFinder*.js` stem. No tag at all throws at load. Under the dev daemon and the jsdom harness the script is served from the root, giving `/api.cgi`, which dev.go routes. |
 | `spk/ui/api.cgi` | `readlink -f "$0"` resolves to `/volumeN/@appstore/<id>/ui/api.cgi` whichever symlink the web server came through; `SCRIPT_FILENAME` and `SCRIPT_NAME` are the fallbacks. The id must match `[A-Za-z0-9._-]+` and `/var/packages/<id>/target/bin/dupfinder` must exist, or the request is refused with a 500 rather than guessed. `/debug` reports `pkgId` and `pkgIdSource`. |
-| `server/main.go` | `DUPFINDER_VAR` from the shim; the fallback is `argv[0]/../../var`, which is `/var/packages/<id>/var` for any id (argv[0], not `os.Executable`, because the resolved path lives under `@appstore`). |
+| `server/cgi.go` | `DUPFINDER_VAR` from the shim; the fallback is `argv[0]/../../var`, which is `/var/packages/<id>/var` for any id (argv[0], not `os.Executable`, because the resolved path lives under `@appstore`). |
 | `server/dev.go` | strips any `/webman/3rdparty/<id>` prefix instead of the literal one. |
 
 `spk/scripts/start-stop-status` keeps its literal for the hand-built package;
