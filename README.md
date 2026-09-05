@@ -16,11 +16,17 @@ folder path mirrored inside it; results can be exported as CSV.
    (Allow installation of packages from *Any publisher* in Package Center
    settings, since this package is not signed by Synology.)
 3. **Grant folder access** — the package runs as its own low-privilege user
-   (`DuplicateFinder`), so give it permissions on the shared folders you want
-   to scan or move files into:
+   (`DuplicateFinder` for the hand-built package, `sc-duplicatefinder` for
+   the SynoCommunity build), so give it permissions on the shared folders
+   you want to scan or move files into:
    *Control Panel → Shared Folder → \<folder\> → Edit → Permissions →
-   switch the dropdown to **System internal user** → `DuplicateFinder` →
+   switch the dropdown to **System internal user** → the package user →
    Read/Write.*
+   DSM deletes that user, and every grant made to it, when the package is
+   uninstalled, so the step is needed again after a reinstall or after
+   switching between the two builds. Without it a scan reports
+   "permission denied" for the folder, and a reference folder is refused as
+   "not a folder".
 4. Open **Duplicate Finder** from the DSM main menu (admin users only).
 
 ## How it works

@@ -116,7 +116,14 @@ scan state, does not carry over).
 - Built through the spksrc toolchain on 2026-09-04 for x64, aarch64 and
   armv7 (`duplicatefinder_<arch>-7.1_1.0.0-1.spk`). Note `os_min_ver` comes
   out as 7.1 from those toolchains, against the hand-built package's 7.0.
-- Not yet installed anywhere: on the DS916+ it would collide with the
-  hand-built package on port 9807 and on `dsmappname`, so an install trial
-  means removing that package first, which is the maintainer's call.
+- Installed on the DS916+ on 2026-09-04 after the hand-built package was
+  uninstalled (the two cannot coexist: same port 9807, same `dsmappname`).
+  Verified: package running (a fresh install needs an explicit start; DSM
+  only auto-starts on upgrade or when the install call asks for it), the
+  CGI resolves the id `duplicatefinder` from its own path and runs as
+  `sc-duplicatefinder`, the desktop loads the stamped script from the new
+  package path, the app's requests go to
+  `/webman/3rdparty/duplicatefinder/api.cgi`. The service user is new, so
+  the shared-folder grants (README step 3) have to be made again for
+  `sc-duplicatefinder` before a scan can read anything.
 - The pull request to SynoCommunity/spksrc itself has not been opened.
