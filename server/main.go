@@ -23,6 +23,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/user"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -72,6 +73,16 @@ const (
 	// token is loaded; the start script waits for it.
 	readyFile = "dupfinder.ready"
 )
+
+// serviceUser is the name of the account this process runs as, "" when
+// the platform cannot say. Pure-Go os/user reads /etc/passwd, where DSM
+// lists its package accounts, so this works in the CGO_ENABLED=0 build.
+func serviceUser() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return os.Getenv("USER")
+}
 
 // cgiVarDir resolves the package var dir for the CGI process. api.cgi
 // exports DUPFINDER_VAR. Failing that, DSM's layout is the fallback: the
@@ -618,6 +629,12 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := map[string]any{
 		"version": appVersion, "hashAlgo": hashAlgoName, "volumes": out,
+		// The account the daemon runs as. DSM names it after the package
+		// (DuplicateFinder for the hand-built spk, sc-duplicatefinder for the
+		// SynoCommunity build), and it is the account the user must grant
+		// shared-folder access to — so the UI's permission hint asks the
+		// daemon rather than guessing a name.
+		"user": serviceUser(),
 	}
 	if warn != "" {
 		// An empty picker must be distinguishable from a broken session:

@@ -1514,6 +1514,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				}
 				me.state.volumes = j.volumes || [];
 				me.state.hashAlgo = j.hashAlgo || 'Blake3';
+				// the account to grant shared-folder access to; it differs
+				// between builds, so the daemon reports it (see serviceUser)
+				me.state.serviceUser = j.user || '';
 				VOLUMES = me.state.volumes;
 				// an empty picker with a warning is a broken session/API, not
 				// "no volumes" — say so instead of silently showing nothing
@@ -3160,8 +3163,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			if (res.errors && res.errors.length) {
 				var first = String(res.errors[0]);
 				if (first.length > 90) first = first.substring(0, 90) + '…';
+				var who = this.state.serviceUser ? 'the "' + this.state.serviceUser + '" user' : "the package's user";
 				parts.push(res.errors.length + (res.errors.length === 1 ? ' location' : ' locations') +
-					' could not be read: ' + first + ' — grant the "DuplicateFinder" user access under Control Panel → Shared Folder → Edit → Permissions → System internal user');
+					' could not be read: ' + first + ' — grant ' + who + ' access under Control Panel → Shared Folder → Edit → Permissions → System internal user');
 			}
 			if (res.truncated) {
 				var tr = res.truncated;
