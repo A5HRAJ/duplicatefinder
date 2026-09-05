@@ -9,8 +9,9 @@ It builds: on 2026-09-04 the recipe went through the spksrc toolchain for
 x64, aarch64 and armv7 on the DSM 7.1 toolchains, first try on each, with
 no warnings (see "Building it" below). It is still NOT what `build.sh`
 produces: `build.sh` keeps shipping the hand-built `DuplicateFinder`
-package, which is the one installed on the DS916+, and the two cannot be
-installed side by side (same port, same `dsmappname`).
+package, and the two cannot be installed side by side (same port, same
+`dsmappname`). Since 2026-09-04 the DS916+ runs this recipe's
+`duplicatefinder` package instead (see "State of the submission").
 
 ## Building it
 
@@ -46,7 +47,8 @@ sources, `ui/config` naming exactly the shipped script, seven icons, the
 `SSS_SCRIPT` copy shipped unchanged, every generated script passing
 `sh -n`, and `conf/privilege` carrying `run-as: package`. The x64 daemon was
 also started inside the build container: it wrote its token and ready file,
-refused a token-less request with 401, and reported version `1.0.0`.
+refused a token-less request with 401, and reported `PKG_VERS` as its
+version (`1.0.0` for that build).
 
 ## The package id changes: `DuplicateFinder` -> `duplicatefinder`
 
@@ -69,10 +71,13 @@ instead. The spk Makefile's last step still greps the staged UI for the old
 literal paths so they cannot come back.
 
 Consequence for the DS916+: DSM treats `duplicatefinder` as a different
-package from `DuplicateFinder`. The first SynoCommunity build will install
-alongside the hand-built one rather than upgrade it, and the old one has to
-be uninstalled by hand (its var dir, including the hash cache and interrupted
-scan state, does not carry over).
+package from `DuplicateFinder`, so the SynoCommunity build never upgrades
+the hand-built one and nothing carries over from it (its var dir, including
+the hash cache and interrupted scan state). Because both claim port 9807 and
+the same `dsmappname`, the hand-built one has to be uninstalled by hand
+first, which is what the DS916+ trial below did. From one spksrc build to
+the next it is an ordinary DSM upgrade, and the var dir stays (the
+1.0.0-1 to 1.0.1-2 upgrade kept its results).
 
 ## What is kept from the hand-built package, and how
 
@@ -111,24 +116,30 @@ scan state, does not carry over).
   unavoidable, since the hashes depend on the archive's bytes, and harmless:
   spksrc reads `digests` from its own tree, never from the archive.
 - `LICENSE = MIT` matches the repository's LICENSE file.
-- The daemon's `/api/info` will report `1.0.0`, not `1.0.0-1`: the cross
-  package cannot see `SPK_REV`.
+- The daemon's `/api/info` reports `PKG_VERS` alone (`1.0.1`, never
+  `1.0.1-2`): the cross package cannot see `SPK_REV`.
 - Built through the spksrc toolchain on 2026-09-04 for x64, aarch64 and
-  armv7 (`duplicatefinder_<arch>-7.1_1.0.0-1.spk`). Note `os_min_ver` comes
-  out as 7.1 from those toolchains, against the hand-built package's 7.0.
-- Installed on the DS916+ on 2026-09-04 after the hand-built package was
-  uninstalled (the two cannot coexist: same port 9807, same `dsmappname`).
-  Verified: package running (a fresh install needs an explicit start; DSM
-  only auto-starts on upgrade or when the install call asks for it), the
-  CGI resolves the id `duplicatefinder` from its own path and runs as
-  `sc-duplicatefinder`, the desktop loads the stamped script from the new
-  package path, the app's requests go to
-  `/webman/3rdparty/duplicatefinder/api.cgi`. The service user is new, so
-  the shared-folder grants (README step 3) have to be made again for
-  `sc-duplicatefinder` before a scan can read anything; with them in
-  place the scan reproduced the known baseline exactly.
-- Upgraded in place to 1.0.1-2 the same day through the same route. An
-  upgrade auto-starts (a fresh install does not), the persisted results
-  survived, and the unreadable-location hint now names
-  `sc-duplicatefinder`.
+  armv7 as 1.0.0-1 (`duplicatefinder_<arch>-7.1_1.0.0-1.spk`, the build the
+  per-arch checks under "Building it" describe), then again as 1.0.1-2 for
+  x64, the DS916+'s arch. Note `os_min_ver` comes out as 7.1 from those
+  toolchains, against the hand-built package's 7.0.
+- DS916+ trial, 2026-09-04:
+  - 1.0.0-1 installed after the hand-built package was uninstalled (the
+    two cannot coexist: same port 9807, same `dsmappname`). Verified:
+    package running after an explicit start (DSM auto-starts a package
+    only on upgrade, or when the install call asks for it), the CGI
+    resolves the id `duplicatefinder` from its own path and runs as
+    `sc-duplicatefinder`, the desktop loads the stamped script from the
+    new package path, the app's requests go to
+    `/webman/3rdparty/duplicatefinder/api.cgi`. The service user is new,
+    so the shared-folder grants (the top-level README's Install step 3)
+    had to be made again for `sc-duplicatefinder` before a scan could
+    read anything; with them made, a scan returned the same results the
+    hand-built package had been producing. A scan on this build also
+    surfaced the unreadable-location hint naming the hand-built package's
+    user, the bug 1.0.1 fixes (see the Makefile's `CHANGELOG`).
+  - Upgraded in place to 1.0.1-2 by installing the new spk over it.
+    Verified: DSM started it unasked (the upgrade case above), the
+    persisted results survived the upgrade, and the hint now names the
+    account the daemon reports, `sc-duplicatefinder`.
 - The pull request to SynoCommunity/spksrc itself has not been opened.
