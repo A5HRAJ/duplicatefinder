@@ -4,7 +4,7 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
-## [Unreleased]
+## [1.1.0] - 2026-09-05
 
 ### Added
 - The scan scope lives in the sidebar, and each tool has a checkbox: one

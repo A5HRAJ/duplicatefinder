@@ -114,19 +114,19 @@ the next it is an ordinary DSM upgrade, and the var dir stays (the
 ## State of the submission
 
 - The public repository is https://github.com/A5HRAJ/duplicatefinder, and
-  `MAINTAINER`, `HOMEPAGE` and `PKG_DIST_SITE` name it. Tag `v1.0.1` marks
-  the source this recipe builds (1.0.1-2; `v1.0.0` was 1.0.0-1); `digests`
-  holds the SHA1, SHA256 and MD5 of the archive GitHub serves for that tag
-  (`archive/refs/tags/v1.0.1.tar.gz`, 327,634 bytes, downloaded twice and
-  byte-identical on 2026-09-04, top directory `duplicatefinder-1.0.1`). A
-  new release means a new tag, a new `PKG_VERS`/`SPK_VERS`, `SPK_REV` one
-  higher, a `CHANGELOG` line, and `make digests` in `cross/duplicatefinder`.
+  `MAINTAINER`, `HOMEPAGE` and `PKG_DIST_SITE` name it. Tag `v1.1.0` marks
+  the source this recipe builds (1.1.0-3; `v1.0.1` was 1.0.1-2 and `v1.0.0`
+  1.0.0-1); `digests` holds the SHA1, SHA256 and MD5 of the archive GitHub
+  serves for that tag (`archive/refs/tags/v1.1.0.tar.gz`, top directory
+  `duplicatefinder-1.1.0`). A new release means a new tag, a new
+  `PKG_VERS`/`SPK_VERS`, `SPK_REV` one higher, a `CHANGELOG` line, and
+  `make digests` in `cross/duplicatefinder`.
 - The tagged archive itself still carries the zeroed `digests` file. That is
   unavoidable, since the hashes depend on the archive's bytes, and harmless:
   spksrc reads `digests` from its own tree, never from the archive.
 - `LICENSE = MIT` matches the repository's LICENSE file.
-- The daemon's `/api/info` reports `PKG_VERS` alone (`1.0.1`, never
-  `1.0.1-2`): the cross package cannot see `SPK_REV`.
+- The daemon's `/api/info` reports `PKG_VERS` alone (`1.1.0`, never
+  `1.1.0-3`): the cross package cannot see `SPK_REV`.
 - Built through the spksrc toolchain on 2026-09-04 for x64, aarch64 and
   armv7 as 1.0.0-1 (`duplicatefinder_<arch>-7.1_1.0.0-1.spk`, the build the
   per-arch checks under "Building it" describe), then again as 1.0.1-2 for
