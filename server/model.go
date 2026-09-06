@@ -57,8 +57,9 @@ type FileEnt struct {
 	// Pfx is the first half of the file's 64 KiB-prefix BLAKE3, recorded by
 	// the duplicates scan only — it is the one tool whose result asserts
 	// something about a file's CONTENT, and the move re-checks it before
-	// touching anything. Results written by an older build carry none, and
-	// the check is simply skipped for them.
+	// touching anything. A persisted duplicates result whose rows carry none
+	// was written by an older build and is dropped at load (lacksFingerprints)
+	// rather than moved from without the check.
 	Pfx   string `json:"pfx,omitempty"`
 	Ext   string `json:"ext"`
 	IsDir bool   `json:"isDir,omitempty"`

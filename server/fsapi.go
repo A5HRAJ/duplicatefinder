@@ -375,8 +375,16 @@ func (s *fsSession) copyMoveOnce(srcShare, destShare string) error {
 	if err != nil {
 		return err
 	}
+	// Polled until File Station answers "finished" or stops answering. There
+	// is deliberately no deadline: a move across volumes or onto a slow
+	// external disk takes as long as it takes, and a daemon that gave up early
+	// would release the scan/move exclusion while File Station was still
+	// moving files, and report as failed a move that then completed. A task
+	// DSM never finishes holds this request until the package is restarted,
+	// which is visible in the app's move progress and, hourly, in the log.
 	delay := 200 * time.Millisecond
-	deadline := time.Now().Add(copyMoveMax)
+	startedAt := time.Now()
+	nextLog := time.Hour
 	for {
 		var st struct {
 			Finished bool `json:"finished"`
@@ -389,8 +397,9 @@ func (s *fsSession) copyMoveOnce(srcShare, destShare string) error {
 		if st.Finished {
 			return nil
 		}
-		if time.Now().After(deadline) {
-			return errMoveTimeout
+		if waited := time.Since(startedAt); waited >= nextLog {
+			log.Printf("move of %s still running in File Station after %s", srcShare, waited.Round(time.Minute))
+			nextLog += time.Hour
 		}
 		time.Sleep(delay)
 		if delay < 2*time.Second {
@@ -480,16 +489,6 @@ func (e parkedError) Error() string {
 // race, and after this many rounds it is reported rather than spun on.
 const nameClaimTries = 25
 
-// copyMoveMax bounds one CopyMove task's status polling. A cross-volume move
-// of a large tree legitimately takes hours; past this the task is treated as
-// an unknown outcome — the caller probes for the entry rather than guessing
-// — instead of holding the move lock for ever on a task DSM never finishes.
-const copyMoveMax = 12 * time.Hour
-
-// errMoveTimeout is deliberately NOT an fsError: it is the absence of an
-// answer, and moveOutcomeUnknown must say so.
-var errMoveTimeout = errors.New("File Station did not finish the move within 12 hours") //lint:ignore ST1005 File Station is a proper noun
-
 // moveOutcomeUnknown reports that an error carries NO answer from File
 // Station (connection dropped, reply mangled): the operation may well have
 // completed. A coded fsError is the opposite — DSM answered, the state is
@@ -514,8 +513,10 @@ func moveOutcomeUnknown(err error) bool {
 // On success it returns the name the entry finally landed under — the
 // original base name, or the " (n)" variant a collision forced — which is
 // what lets the caller find the moved file again, e.g. to read it back for
-// verification.
-func moveViaFS(s *fsSession, srcShare, outShare string) (string, error) {
+// verification. want is the identity the scan recorded for the entry; when
+// File Station's answer is lost it decides whether the entry now at the
+// destination is ours (arrived).
+func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, error) {
 	base := filepath.Base(srcShare)
 	// Probe for the collision by asking File Station about that one name
 	// before the first attempt: the common case goes straight to staging, and
@@ -538,13 +539,30 @@ func moveViaFS(s *fsSession, srcShare, outShare string) (string, error) {
 		// user a completed move failed (and never verifies it).
 		if moveOutcomeUnknown(err) {
 			if srcThere, _, serr := s.statShare(srcShare); serr == nil && !srcThere {
-				if destThere, _, derr := s.statShare(outShare + "/" + base); derr == nil && destThere {
-					return base, nil
-				}
+				return s.arrived(outShare+"/"+base, base, want)
 			}
 		}
 		if !worthStaging(err) {
 			return "", err
+		}
+		if !isCollision(err) {
+			// A generic failure code earns the staging retry only when the name
+			// really is taken at the destination. Otherwise the retry would fail
+			// the same way — or worse: a directory File Station moved HALF of
+			// before failing has its name at the destination and its remainder
+			// at the source, and staging the remainder would split it across two
+			// names. Source and destination both present for a directory is
+			// therefore reported, not staged.
+			there, _, perr := s.statShare(outShare + "/" + base)
+			if perr != nil || !there {
+				return "", err
+			}
+			if srcThere, _, serr := s.statShare(srcShare); serr == nil && !srcThere {
+				return s.arrived(outShare+"/"+base, base, want)
+			}
+			if want.isDir {
+				return "", fmt.Errorf("%v — a folder named %q now exists at the destination while the source is still in place, so File Station may have moved part of it; check both before retrying", err, base)
+			}
 		}
 	}
 	buf := make([]byte, 8)
@@ -601,12 +619,13 @@ func moveViaFS(s *fsSession, srcShare, outShare string) (string, error) {
 		// sitting in staging is unambiguous.
 		if moveOutcomeUnknown(err) {
 			if inTmp, _, terr := s.statShare(tmpShare + "/" + cur); terr == nil && !inTmp {
-				if atDest, _, derr := s.statShare(outShare + "/" + cur); derr == nil && atDest {
+				name, aerr := s.arrived(outShare+"/"+cur, cur, want)
+				if aerr == nil {
 					if derr := s.deletePath(tmpShare); derr != nil {
 						log.Printf("move staging folder %s could not be removed: %v", tmpShare, derr)
 					}
-					return cur, nil
 				}
+				return name, aerr
 			}
 		}
 		if !worthStaging(err) {
@@ -619,6 +638,23 @@ func moveViaFS(s *fsSession, srcShare, outShare string) (string, error) {
 		}
 	}
 	return "", parkedError{tmpShare: tmpShare, name: cur, cause: fmt.Errorf("could not find a free name for %s", base)}
+}
+
+// arrived settles a move whose answer was lost, once the source is known to
+// be gone: the entry at share must be OURS — the type, size and modified time
+// that left — so a namesake another writer put there is not mistaken for the
+// file that was moved. A match is a completed move. Anything else is reported
+// with the source gone (movedButError), so the row prunes and the message
+// says where to look rather than claiming a success nobody verified.
+func (s *fsSession) arrived(share, name string, want entIdent) (string, error) {
+	if info, err := s.getInfo([]string{share}, []string{"size", "time"}); err == nil {
+		if e, ok := info[share]; ok && e.exists() {
+			if _, same := identMatches(e, []entIdent{want}); same {
+				return name, nil
+			}
+		}
+	}
+	return "", movedButError{"File Station's answer to the move was lost and the source is gone, but no entry matching the original's size and modified time is at the destination — check both locations before deleting anything"}
 }
 
 // fsCannotAddress reports whether File Station's API refuses to see an entry

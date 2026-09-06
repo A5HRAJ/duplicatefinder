@@ -197,6 +197,19 @@ func (s *Server) saveState() {
 	}
 }
 
+// lacksFingerprints reports whether any row of a duplicates result carries no
+// prefix fingerprint — the mark of a result an older build persisted.
+func lacksFingerprints(res *toolResult) bool {
+	for gi := range res.Groups {
+		for _, f := range res.Groups[gi].Files {
+			if f.Pfx == "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // loadState restores the persisted results at daemon start. Anything wrong
 // with the file (missing, corrupt, unknown schema) means starting empty —
 // stale-looking data is worse than no data, and every move is re-verified
@@ -242,6 +255,17 @@ func (s *Server) loadState() {
 			if r == nil {
 				delete(ps.Results, tool)
 			}
+		}
+		// A duplicates row without a content fingerprint was recorded by a
+		// build that kept none, and the move's prefix re-read — promised for
+		// every duplicate — would silently be skipped for it. Such results are
+		// dropped, with the conflicting-files set that rode on the same scan,
+		// rather than served: the next scan records them properly, and until
+		// then the app shows no duplicates to move.
+		if dup := ps.Results["duplicates"]; dup != nil && lacksFingerprints(dup) {
+			delete(ps.Results, "duplicates")
+			delete(ps.Results, "corrupted_files")
+			log.Printf("dropped persisted duplicates results recorded without content fingerprints; scan again to rebuild them")
 		}
 		s.results = ps.Results
 		s.invalidateDerivedLocked() // anything derived describes the pre-load results

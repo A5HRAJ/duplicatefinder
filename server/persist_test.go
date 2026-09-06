@@ -367,7 +367,7 @@ func TestStatePersistenceRoundTrip(t *testing.T) {
 			"duplicates": {
 				Tool: "duplicates",
 				Groups: []Group{mkGroup("g0", 9,
-					FileEnt{Name: "a", Dir: "/v/x"}, FileEnt{Name: "a", Dir: "/v/y"})},
+					FileEnt{Name: "a", Dir: "/v/x", Pfx: "p"}, FileEnt{Name: "a", Dir: "/v/y", Pfx: "p"})},
 				Truncated: &TruncInfo{Groups: 1, Files: 3, Cap: 100},
 				Match:     &MatchOpts{Name: true},
 				Scanned:   "then",
@@ -634,7 +634,7 @@ func TestLoadStateDropsRetiredTools(t *testing.T) {
 		results: map[string]*toolResult{
 			"duplicates": {Tool: "duplicates", Scanned: "then",
 				Groups: []Group{mkGroup("g0", 9,
-					FileEnt{Name: "a", Dir: "/v/x"}, FileEnt{Name: "a", Dir: "/v/y"})}},
+					FileEnt{Name: "a", Dir: "/v/x", Pfx: "p"}, FileEnt{Name: "a", Dir: "/v/y", Pfx: "p"})}},
 			"big_files": {Tool: "big_files", Scanned: "then",
 				Files: []FileEnt{{ID: "f9", Name: "huge.iso", Dir: "/v/z", Size: 1 << 30}}},
 		}}

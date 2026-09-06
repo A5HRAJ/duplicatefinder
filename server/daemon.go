@@ -320,9 +320,16 @@ func loadOrCreateToken(path string) (string, error) {
 	return t, nil
 }
 
-// withAuth requires the shared token on every API request. Without a token
-// configured (dev/test runs without -var) it is a passthrough, so the local
-// dev flow and the smoke suite are unaffected.
+// maxRequestBody bounds every request body the daemon (and the CGI proxy in
+// front of it) will read. A move naming 100,000 files is a few megabytes; no
+// request the app sends comes near this, and decoding an arbitrary one would
+// cost the daemon memory in the middle of a scan or a move.
+const maxRequestBody = 64 << 20
+
+// withAuth requires the shared token on every API request and bounds the
+// body. Without a token configured (dev/test runs without -var) the token
+// check is a passthrough, so the local dev flow and the smoke suite are
+// unaffected.
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.authToken != "" &&
@@ -330,6 +337,7 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			writeErr(w, http.StatusUnauthorized, "missing or invalid daemon token")
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 		next.ServeHTTP(w, r)
 	})
 }

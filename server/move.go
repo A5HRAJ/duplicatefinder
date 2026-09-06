@@ -18,9 +18,10 @@ import (
 )
 
 // MoveReq is the body of POST /api/move. Files are full paths. Tool names
-// the result set the files came from; it is required only when Preserve is
-// set, where it selects — through moveFolderNames, never as a path fragment
-// — the name of the one folder the batch is moved into.
+// the result set the files came from and is required for every move: the
+// allowlist and the identities the files must still match are that tool's
+// alone, and in preserve mode it also selects — through moveFolderNames,
+// never as a path fragment — the name of the one folder the batch moves into.
 type MoveReq struct {
 	Files    []string `json:"files"`
 	Dest     string   `json:"dest"`
@@ -93,6 +94,14 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	defer s.endMove()
 
 	v := s.newMoveVet(req, sess)
+	// A reference folder is read-only in both directions: nothing leaves it,
+	// and nothing is moved INTO it either. A move that fills a master library
+	// with "Duplicates" folders modifies exactly the tree the user asked to
+	// have left alone.
+	if isUnder(destCanon, v.canonRefs) {
+		writeErr(w, 400, "the destination is inside a read-only reference folder")
+		return
+	}
 
 	// In preserve mode the whole batch moves into ONE new folder at the
 	// destination (batchFolder). It is allocated here, inside moveMu, not
@@ -211,18 +220,20 @@ func decodeMoveRequest(w http.ResponseWriter, r *http.Request) (req MoveReq, fol
 		writeErr(w, 400, "Conflicting Files is a report — move these files from File Station once you have decided which copy to keep")
 		return req, "", false
 	}
-	// Resolved before anything can be created: the destination is not open
-	// yet, no DSM session is needed and moveMu is not held, so an unrecognised
-	// tool cannot leave a half-built state or an orphaned folder behind. Only
-	// preserve mode needs a name, so plain moves keep working without the
-	// field. An upgraded daemon serving a browser that still has the previous
-	// build's JS cached is the likely source of a miss, so say so.
-	if req.Preserve {
-		var found bool
-		if folderName, found = moveFolderNames[req.Tool]; !found {
-			writeErr(w, 400, "unknown tool — reload Duplicate Finder, the package was upgraded")
-			return req, "", false
-		}
+	// Every move names the result set its files come from. The allowlist and
+	// the identities a file must still match are built from that tool's rows
+	// alone, so a row another tool listed — possibly with a newer identity,
+	// after the file was rewritten — cannot stand in for it, and the
+	// preserve-mode folder is that tool's by construction. Resolved before
+	// anything can be created: the destination is not open yet, no DSM
+	// session is needed and moveMu is not held, so an unrecognised tool cannot
+	// leave a half-built state or an orphaned folder behind. An upgraded
+	// daemon serving a browser that still has the previous build's JS cached
+	// is the likely source of a miss, so say so.
+	var found bool
+	if folderName, found = moveFolderNames[req.Tool]; !found {
+		writeErr(w, 400, "unknown tool — reload Duplicate Finder, the package was upgraded")
+		return req, "", false
 	}
 	return req, folderName, true
 }
@@ -236,6 +247,7 @@ func decodeMoveRequest(w http.ResponseWriter, r *http.Request) (req MoveReq, fol
 // through a symlink and slip past the string-prefix guards. Responses still
 // carry the paths as the client sent them.
 type moveVet struct {
+	tool      string // the result set this request acts on
 	canon     *dirResolver
 	canonRefs []string
 	allowed   map[string]bool
@@ -254,19 +266,17 @@ func (s *Server) newMoveVet(req MoveReq, sess *fsSession) *moveVet {
 		for p := range s.keepers {
 			k[p] = true
 		}
-		// Every entry of every cached result: the daemon moves only what a
-		// scan surfaced, so these become the move allowlist — and their
-		// size/mod/type become the identity the file must still have.
-		//
-		// A read-only tool's rows are excluded. Otherwise a path that appears
-		// ONLY in a corrupted set would be movable through a request naming
-		// some other tool, which would make "Conflicting Files never moves
-		// anything" true of the button and false of the daemon.
+		// Every entry of the REQUESTED tool's result, and no other: the
+		// daemon moves only what a scan surfaced, so these become the move
+		// allowlist — and their size/mod/type become the identity the file
+		// must still have. Another tool's row for the same path is no
+		// substitute: recorded later, after the file was rewritten, it would
+		// vouch for content the requested tool never saw, and a duplicates
+		// row would lose its prefix re-read to a temp-files row that has none.
+		// (decodeMoveRequest has already refused the read-only tools, so a
+		// path that appears only in a corrupted set is never movable.)
 		var ents []FileEnt
-		for tool, res := range s.results {
-			if readOnlyTools[tool] {
-				continue
-			}
+		if res := s.results[req.Tool]; res != nil {
 			ents = append(ents, res.Files...)
 			for gi := range res.Groups {
 				ents = append(ents, res.Groups[gi].Files...)
@@ -282,11 +292,11 @@ func (s *Server) newMoveVet(req MoveReq, sess *fsSession) *moveVet {
 	}
 
 	// The move allowlist, canonically keyed: a request may name any string,
-	// but only paths some scan actually surfaced are movable — the raw API
-	// must not double as a generic file mover for anything in the volumes.
-	// idents carries what the scan saw at each path (several views when
-	// multiple tools surfaced it); the move later refuses a file whose
-	// current File Station identity matches none of them.
+	// but only paths this tool's scan actually surfaced are movable — the raw
+	// API must not double as a generic file mover for anything in the
+	// volumes. idents carries what that scan saw at each path (more than one
+	// view when aliases of one directory were both in scope); the move later
+	// refuses a file whose current File Station identity matches none of them.
 	allowed := make(map[string]bool, len(cachedEnts))
 	idents := make(map[string][]entIdent, len(cachedEnts))
 	for _, f := range cachedEnts {
@@ -331,8 +341,9 @@ func (s *Server) newMoveVet(req MoveReq, sess *fsSession) *moveVet {
 	// no longer has the scan's identity is not a surviving copy of the
 	// group's CONTENT either — so File Station is asked which members of
 	// the touched groups still exist as recorded.
-	exists := groupExistence(sess, groups, requested, canon, idents)
+	exists := groupExistence(sess, groups, requested, canon)
 	return &moveVet{
+		tool:      req.Tool,
 		canon:     canon,
 		canonRefs: canonRefs,
 		allowed:   allowed,
@@ -445,6 +456,19 @@ func (s *Server) moveOne(v *moveVet, batch func() (string, error), sess *fsSessi
 	cp = filepath.Join(pCanon, filepath.Base(src))
 	if err := v.refuse(cp); err != nil {
 		return cp, false, err
+	}
+	// An empty-folder row is a claim about the folder's CONTENTS, and the
+	// identity check in execMoveFS sees only its type and modified time. Ask
+	// again, now, whether it still holds nothing but junk: content that
+	// arrived since the scan must not ride along into the cleanup folder.
+	if v.tool == "empty_folders" && isDirIdent(v.idents[cp]) {
+		empty, cerr := confirmEmpty(cp, sess)
+		if cerr != nil {
+			return cp, false, errors.New("could not confirm the folder is still empty — " + cerr.Error())
+		}
+		if !empty {
+			return cp, false, errors.New("the folder is no longer empty — rescan and try again")
+		}
 	}
 	err = execMoveFS(sess, src, cp, destShare, destCanon, v.idents[cp], batch, verify, note)
 	var mbe movedButError
@@ -632,7 +656,7 @@ func execMoveFS(sess *fsSession, src, cp, destShare, destCanon string, wants []e
 			return err
 		}
 	}
-	finalName, err := moveViaFS(sess, srcShare, outShare)
+	finalName, err := moveViaFS(sess, srcShare, outShare, want)
 	if err != nil {
 		var pe parkedError
 		if errors.As(err, &pe) {
@@ -847,7 +871,7 @@ func (s *Server) pruneMoved(canonPaths, dirPaths []string, canon *dirResolver) {
 // keep-one outcome cannot change). On a File Station error the map stays
 // empty, which fails in the safe direction: unknown existence counts as
 // missing, so more is held back, never less.
-func groupExistence(sess *fsSession, groups []Group, requested map[string]bool, canon *dirResolver, idents map[string][]entIdent) map[string]bool {
+func groupExistence(sess *fsSession, groups []Group, requested map[string]bool, canon *dirResolver) map[string]bool {
 	byShare := map[string][]string{} // share path → canonical members
 	want := map[string][]entIdent{}  // share path → identities the scan recorded
 	var shares []string
@@ -869,11 +893,11 @@ func groupExistence(sess *fsSession, groups []Group, requested map[string]bool, 
 					shares = append(shares, sp)
 				}
 				byShare[sp] = append(byShare[sp], cp)
-				if ids := idents[cp]; len(ids) > 0 {
-					want[sp] = append(want[sp], ids...)
-				} else {
-					want[sp] = append(want[sp], identOf(f))
-				}
+				// The GROUP ROW's own identity, never another tool's record of
+				// the same path: a member rewritten in place and then listed by
+				// a later temp-files scan would otherwise pass as a surviving
+				// copy of content it no longer holds.
+				want[sp] = append(want[sp], identOf(f))
 			}
 		}
 	}

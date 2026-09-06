@@ -106,7 +106,20 @@ func runCGI(port int) {
 			"error": "Duplicate Finder service is not running. Start the package in Package Center.",
 		})
 	}
-	if err := cgi.Serve(proxy); err != nil {
+	// Bound the body before it reaches the daemon: no request the app sends
+	// comes near this, and decoding an arbitrary one would cost the daemon
+	// memory in the middle of a scan or a move.
+	limited := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength > maxRequestBody {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			json.NewEncoder(w).Encode(map[string]string{"error": "request too large"})
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+		proxy.ServeHTTP(w, r)
+	})
+	if err := cgi.Serve(limited); err != nil {
 		fmt.Fprintf(os.Stderr, "cgi: %v\n", err)
 		os.Exit(1)
 	}

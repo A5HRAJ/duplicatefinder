@@ -95,7 +95,7 @@ func TestMoveViaFSHappyPath(t *testing.T) {
 	}))
 	defer ts.Close()
 	sess := &fsSession{base: ts.URL}
-	if final, err := moveViaFS(sess, "/Backups/a.txt", "/Moved"); err != nil {
+	if final, err := moveViaFS(sess, "/Backups/a.txt", "/Moved", entIdent{}); err != nil {
 		t.Fatal(err)
 	} else if final != "a.txt" && final != "a (1).txt" {
 		t.Fatalf("unexpected final name %q", final)
@@ -168,7 +168,7 @@ func TestMoveViaFSCollisionStagesAndRenames(t *testing.T) {
 	}))
 	defer ts.Close()
 	sess := &fsSession{base: ts.URL}
-	final, err := moveViaFS(sess, "/Backups/a.txt", "/Moved")
+	final, err := moveViaFS(sess, "/Backups/a.txt", "/Moved", entIdent{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +236,7 @@ func TestMoveViaFSNested1001Collision(t *testing.T) {
 	}))
 	defer ts.Close()
 	sess := &fsSession{base: ts.URL}
-	if final, err := moveViaFS(sess, "/Backups/a.txt", "/Moved"); err != nil {
+	if final, err := moveViaFS(sess, "/Backups/a.txt", "/Moved", entIdent{}); err != nil {
 		t.Fatal(err)
 	} else if final != "a.txt" && final != "a (1).txt" {
 		t.Fatalf("unexpected final name %q", final)
@@ -272,7 +272,7 @@ func TestMoveViaFSGenuine1001Reported(t *testing.T) {
 	}))
 	defer ts.Close()
 	sess := &fsSession{base: ts.URL}
-	_, err := moveViaFS(sess, "/Backups/a.txt", "/Moved")
+	_, err := moveViaFS(sess, "/Backups/a.txt", "/Moved", entIdent{})
 	if err == nil || !strings.Contains(err.Error(), "error 1001") {
 		t.Fatalf("want the genuine 1001 surfaced, got %v", err)
 	}

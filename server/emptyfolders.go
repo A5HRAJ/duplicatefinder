@@ -4,6 +4,8 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -24,7 +26,40 @@ func confirmEmpty(p string, sess *fsSession) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return sess.folderHoldsOnlyJunk(sp)
+	if ok, err := sess.folderHoldsOnlyJunk(sp); err != nil || !ok {
+		return ok, err
+	}
+	// Then the daemon's own reading of the directory. It sees every name
+	// whatever File Station's listing chooses to show, so a hidden directory
+	// such as .git — content the walk skipped over — rejects the folder even
+	// on a DSM whose listing omitted it. Stricter only: a name seen here can
+	// make the folder non-empty, never empty.
+	return dirHoldsOnlyJunk(p)
+}
+
+// dirHoldsOnlyJunk is confirmEmpty's native half: every entry of the
+// directory must be junk (isTempName) or Synology's @eaDir cache. It fails
+// closed — a directory that cannot be read has unknown contents.
+func dirHoldsOnlyJunk(p string) (bool, error) {
+	d, err := os.Open(p)
+	if err != nil {
+		return false, err
+	}
+	defer d.Close()
+	for {
+		names, err := d.Readdirnames(256)
+		for _, n := range names {
+			if n != "@eaDir" && !isTempName(n) {
+				return false, nil
+			}
+		}
+		if err == io.EOF {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
 }
 
 // emptyFolderScan turns the walk's entry stream into topmost-empty-folder
