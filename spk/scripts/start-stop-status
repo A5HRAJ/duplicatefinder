@@ -87,9 +87,11 @@ case "$1" in
 				kill -0 "$PID" 2>/dev/null || break
 				sleep 1
 			done
-			# Only if it is still there — never fire KILL at a number the
-			# kernel may already have handed to someone else.
-			if kill -0 "$PID" 2>/dev/null; then
+			# Only if it is still there — and still the daemon: pid_running
+			# re-reads the process's command line, so a number the kernel
+			# has meanwhile handed to some other process is left alone
+			# rather than killed.
+			if pid_running; then
 				kill -9 "$PID" 2>/dev/null
 			fi
 		fi

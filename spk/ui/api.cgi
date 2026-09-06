@@ -66,13 +66,25 @@ urldecode() {
 }
 TOKEN=""
 TOKEN_SENT=0
-# The parameter is matched as a whole name at the start of the string or
-# after '&' — never as a substring — and the FIRST occurrence wins, so a
-# second empty "SynoToken=" cannot blank out the real one.
+# The parameter is matched as a whole name — the query string is split on
+# '&' and only a field that IS "SynoToken=…" counts, never a substring. A
+# request carrying more than one such field, or one that is empty, is refused
+# outright: choosing between two tokens is choosing which one an attacker
+# meant, and an empty one is not a token-less request. The decoded value is
+# then confined to a token's alphabet before it is handed to authenticate.cgi
+# as a query string of its own, so a percent-encoded '&' inside it cannot
+# smuggle a second parameter into that call.
 case "&$QUERY_STRING" in
 	*\&SynoToken=*)
 		TOKEN_SENT=1
-		TOKEN="$(urldecode "$(printf '&%s' "$QUERY_STRING" | sed -n 's/^.*[&]SynoToken=\([^&]*\).*$/\1/p' | head -n 1)")"
+		TOKENS="$(printf '&%s' "$QUERY_STRING" | tr '&' '\n' | sed -n 's/^SynoToken=//p')"
+		if [ "$(printf '%s\n' "$TOKENS" | grep -c .)" -ne 1 ]; then
+			deny "400 Bad Request" "Malformed request"
+		fi
+		TOKEN="$(urldecode "$TOKENS")"
+		case "$TOKEN" in
+			*[!A-Za-z0-9._-]*) deny "400 Bad Request" "Malformed request" ;;
+		esac
 		;;
 esac
 if [ -n "$HTTP_X_SYNO_TOKEN" ]; then
@@ -90,13 +102,21 @@ fi
 # branch. Both invocations get /dev/null for stdin — the request body is
 # for the daemon, and an authenticate.cgi that peeked at it on a POST would
 # leave the proxied request with a truncated body.
+# authenticate.cgi prints the user name on success and nothing otherwise, and
+# its exit status has to be zero as well: a helper that failed part-way must
+# not open the gate on whatever it managed to print first.
 USER=""
+OUT=""
 if [ -x "$AUTH" ]; then
 	if [ -n "$TOKEN" ]; then
-		USER="$(QUERY_STRING="SynoToken=$TOKEN" REQUEST_METHOD=GET \
-			HTTP_X_SYNO_TOKEN="$TOKEN" "$AUTH" 2>/dev/null </dev/null | head -n 1 | tr -d '\r\n')"
+		if OUT="$(env QUERY_STRING="SynoToken=$TOKEN" REQUEST_METHOD=GET \
+			HTTP_X_SYNO_TOKEN="$TOKEN" "$AUTH" 2>/dev/null </dev/null)"; then
+			USER="$(printf '%s' "$OUT" | head -n 1 | tr -d '\r\n')"
+		fi
 	elif [ "$TOKEN_SENT" = 0 ]; then
-		USER="$(REQUEST_METHOD=GET CONTENT_LENGTH= "$AUTH" 2>/dev/null </dev/null | head -n 1 | tr -d '\r\n')"
+		if OUT="$(env REQUEST_METHOD=GET CONTENT_LENGTH= "$AUTH" 2>/dev/null </dev/null)"; then
+			USER="$(printf '%s' "$OUT" | head -n 1 | tr -d '\r\n')"
+		fi
 	fi
 fi
 
