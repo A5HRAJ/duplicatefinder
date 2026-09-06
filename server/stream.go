@@ -239,6 +239,12 @@ func (s *spill) addRaw(rootIdx int, size, mod int64, rel string, tag uint64) err
 	if _, err := s.w.WriteString(rel); err != nil {
 		return err
 	}
+	// The count bounds every later pass over this file. On the 32-bit ARM
+	// build int holds two billion, and a tree that large is refused with a
+	// reason rather than read back with a wrapped count.
+	if s.n == math.MaxInt {
+		return errors.New("too many files for this build to count")
+	}
 	s.n++
 	return nil
 }

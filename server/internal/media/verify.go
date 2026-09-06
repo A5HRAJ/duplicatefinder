@@ -18,15 +18,21 @@ package media
 //     twin needed — the only thing that can settle the common two-copy case,
 //     where there is no majority to count and the hashes alone say only that
 //     somebody is wrong.
-//  2. Structural walks. JPEG, PDF and the ISO base-media formats (MP4/MOV/
-//     HEIC/AVIF) carry no content checksum, but their framing has to tile
-//     exactly to the end of the file. A box tree that runs off the end, or a
-//     JPEG with no end-of-image marker, is a truncated transfer.
+//  2. Decoders. A JPEG carries no checksum, but its entropy-coded image data
+//     either decodes to the end or it does not: a complete decode covers
+//     every byte of the payload, which is what lets a JPEG be called Proven.
+//     A PDF's compressed streams are zlib streams, each closed by an Adler-32
+//     checksum, so a PDF whose every stream is compressed proves itself the
+//     same way the archive formats do.
+//  3. Structural walks. PDF anchors and the ISO base-media box tree (MP4/MOV/
+//     HEIC/AVIF) have to tile exactly to the end of the file, so they catch
+//     truncation. They say nothing about the bytes inside, and so they can
+//     only ever report DAMAGE — a clean walk stays Unproven.
 //
-// A validator never reports "intact" on its own: a file can satisfy every
-// checksum it carries and still be the wrong bytes, and most formats carry
-// none at all. It reports DAMAGE, and its silence becomes evidence only
-// alongside a sibling that is positively damaged.
+// Proven therefore always means the check reached the payload. A validator
+// never reports "intact" on its own even then: a file can satisfy every
+// checksum it carries and still be the wrong bytes. Its silence becomes
+// evidence only alongside a sibling that is positively damaged.
 //
 // All of this runs on the scan goroutine — runScan's deferred recover is the
 // daemon's only one, and parallelEach's workers have none (a malformed-input
@@ -38,13 +44,16 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"compress/zlib"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"image/jpeg"
 	"io"
 	"math/bits"
 	"os"
+	"strconv"
 )
 
 // Intactness is what one file's own structure says about it. Deliberately
@@ -54,9 +63,9 @@ import (
 type Intactness int
 
 const (
-	Unproven Intactness = iota // no validator for this type, or it could not finish
-	Proven                     // structure walked cleanly and every embedded checksum agreed
-	Damaged                    // structure or a checksum is definitively wrong
+	Unproven Intactness = iota // no validator covers the payload, or the check could not finish
+	Proven                     // a payload-covering check passed: every checksum agreed, or the image decoded completely
+	Damaged                    // structure, a checksum or the decode is definitively wrong
 )
 
 // ErrCancelled is returned by CompareContent when the scan's cancel channel
@@ -64,16 +73,43 @@ const (
 // single errors.Is answers "was this a cancel?" for either.
 var ErrCancelled = errors.New("cancelled")
 
-// maxVerifyBytes bounds the validators that must decompress to check a
-// checksum. Past it the file is left unproven rather than spending minutes of
-// a scan on one member of one set; the structural walks have no such limit
-// because they only read framing.
-const maxVerifyBytes = 512 << 20
-
 // maxInflate bounds decompressed output, so a zip bomb inside a corrupted set
 // cannot turn a verdict into an outage. Hitting it yields unproven — the check
-// did not fail, it did not finish.
+// did not fail, it did not finish. There is deliberately no bound on the size
+// of the file itself: a check that stops at a size cap leaves exactly the
+// large files unproven, and every validator here polls the scan's cancel
+// channel, so a long check is one the user can stop.
 const maxInflate = 8 << 30
+
+// maxDecodePixels bounds the JPEG decode. Decoding materialises the image, so
+// a 100-megapixel photo costs hundreds of megabytes on a NAS that may have
+// half a gigabyte in total; past this the file is left unproven.
+const maxDecodePixels = 50_000_000
+
+// cancelReader fails a read as soon as the scan's cancel channel closes, so a
+// decoder or decompressor deep inside a large file stops within one read.
+type cancelReader struct {
+	r      io.Reader
+	cancel <-chan struct{}
+}
+
+func (c *cancelReader) Read(p []byte) (int, error) {
+	select {
+	case <-c.cancel:
+		return 0, ErrCancelled
+	default:
+	}
+	return c.r.Read(p)
+}
+
+func isCancelled(cancel <-chan struct{}) bool {
+	select {
+	case <-cancel:
+		return true
+	default:
+		return false
+	}
+}
 
 // minZeroBytes is the smallest run of zeros that may be read as an interrupted
 // copy or a lost block. Storage does not lose data in ones and twos: a sector
@@ -89,8 +125,9 @@ const minZeroBytes = 512
 // proves. The magic bytes alone select the validator — never the file name,
 // because the whole point here is a file whose contents may not match its
 // name. The returned string is user-facing evidence and is empty unless the
-// verdict is meaningful.
-func VerifyContent(open func() (*os.File, error), size int64) (Intactness, string) {
+// verdict is meaningful. A closed cancel channel ends the check early with
+// Unproven; nil means no cancellation.
+func VerifyContent(open func() (*os.File, error), size int64, cancel <-chan struct{}) (Intactness, string) {
 	if size <= 0 {
 		return Unproven, ""
 	}
@@ -106,21 +143,21 @@ func VerifyContent(open func() (*os.File, error), size int64) (Intactness, strin
 
 	switch {
 	case bytes.HasPrefix(magic, []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}):
-		return verifyPNG(f, size)
+		return verifyPNG(f, size, cancel)
 	// CM (byte 3) must be 8 — deflate is the only method gzip defines. Every
 	// other arm here matches on 3–8 bytes; matching gzip on 2 would route any
 	// file that happens to begin 1F 8B into a validator that then convicts it.
 	case bytes.HasPrefix(magic, []byte{0x1F, 0x8B, 0x08}):
-		return verifyGzip(f, size)
+		return verifyGzip(f, size, cancel)
 	case bytes.HasPrefix(magic, []byte{'P', 'K', 0x03, 0x04}),
 		bytes.HasPrefix(magic, []byte{'P', 'K', 0x05, 0x06}):
-		return verifyZip(f, size)
+		return verifyZip(f, size, cancel)
 	case bytes.HasPrefix(magic, []byte{0xFF, 0xD8, 0xFF}):
-		return verifyJPEG(f, size)
+		return verifyJPEG(f, size, cancel)
 	case bytes.HasPrefix(magic, []byte("%PDF-")):
-		return verifyPDF(f, size)
+		return verifyPDF(f, size, cancel)
 	case len(magic) >= 12 && string(magic[4:8]) == "ftyp":
-		return verifyISOBMFF(f, size)
+		return verifyISOBMFF(f, size, cancel)
 	}
 	// GIF and the TIFF family carry no checksum and no end marker worth
 	// testing, so they deliberately have no arm above.
@@ -130,11 +167,14 @@ func VerifyContent(open func() (*os.File, error), size int64) (Intactness, strin
 // verifyPNG walks the chunk list and recomputes every CRC32. This is the
 // strongest check available anywhere in this file: a PNG proves its own
 // integrity byte for byte, with no second copy to compare against.
-func verifyPNG(f *os.File, size int64) (Intactness, string) {
+func verifyPNG(f *os.File, size int64, cancel <-chan struct{}) (Intactness, string) {
 	pos := int64(8)
 	sawIHDR, sawIEND := false, false
 	crcBuf := make([]byte, 64<<10)
 	for pos < size {
+		if isCancelled(cancel) {
+			return Unproven, ""
+		}
 		var hdr [8]byte
 		if _, err := f.ReadAt(hdr[:], pos); err != nil {
 			return Damaged, "PNG chunk list ends mid-header — the file is truncated"
@@ -191,14 +231,11 @@ func verifyPNG(f *os.File, size int64) (Intactness, string) {
 
 // verifyGzip inflates the stream so the trailing CRC32 and length are checked.
 // gzip.Reader reports both as ErrChecksum at EOF.
-func verifyGzip(f *os.File, size int64) (Intactness, string) {
-	if size > maxVerifyBytes {
-		return Unproven, ""
-	}
+func verifyGzip(f *os.File, size int64, cancel <-chan struct{}) (Intactness, string) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return Unproven, ""
 	}
-	zr, err := gzip.NewReader(f)
+	zr, err := gzip.NewReader(&cancelReader{f, cancel})
 	if err != nil {
 		// NO header failure convicts. 1F 8B 08 occurs by chance in files that
 		// are not gzip at all, and such a file is indistinguishable from a
@@ -213,6 +250,8 @@ func verifyGzip(f *os.File, size int64) (Intactness, string) {
 	defer zr.Close()
 	n, err := io.Copy(io.Discard, io.LimitReader(zr, maxInflate))
 	switch {
+	case errors.Is(err, ErrCancelled):
+		return Unproven, ""
 	case errors.Is(err, gzip.ErrChecksum):
 		return Damaged, "gzip stream fails its own CRC32 — the stored bytes are damaged"
 	case errors.Is(err, io.ErrUnexpectedEOF):
@@ -228,14 +267,11 @@ func verifyGzip(f *os.File, size int64) (Intactness, string) {
 // verifyZip checks every member's CRC32. Covers .zip and everything built on
 // it — .docx, .xlsx, .pptx, .odt, .jar, .apk — which between them are most of
 // the non-media documents on a NAS.
-func verifyZip(f *os.File, size int64) (Intactness, string) {
-	if size > maxVerifyBytes {
-		return Unproven, ""
-	}
+func verifyZip(f *os.File, size int64, cancel <-chan struct{}) (Intactness, string) {
 	// archive/zip materialises one File per central-directory record before
-	// anything is checked, so a directory-only archive near maxVerifyBytes
-	// would cost gigabytes of heap on the scan goroutine. Read the entry
-	// count out of the end-of-central-directory record first.
+	// anything is checked, so an archive holding millions of entries would
+	// cost gigabytes of heap on the scan goroutine. Read the entry count out
+	// of the end-of-central-directory record first.
 	if n, ok := zipEntryCount(f, size); ok && n > maxZipEntries {
 		return Unproven, ""
 	}
@@ -261,10 +297,12 @@ func verifyZip(f *os.File, size int64) (Intactness, string) {
 			}
 			return Damaged, fmt.Sprintf("ZIP entry %q cannot be opened — the archive is damaged", m.Name)
 		}
-		n, err := io.Copy(io.Discard, io.LimitReader(rc, maxInflate-total))
+		n, err := io.Copy(io.Discard, io.LimitReader(&cancelReader{rc, cancel}, maxInflate-total))
 		rc.Close()
 		total += n
 		switch {
+		case errors.Is(err, ErrCancelled):
+			return Unproven, ""
 		case errors.Is(err, zip.ErrChecksum):
 			return Damaged, fmt.Sprintf("ZIP entry %q fails its own CRC32 — the stored bytes are damaged", m.Name)
 		case errors.Is(err, io.ErrUnexpectedEOF):
@@ -330,13 +368,18 @@ func zipEntryCount(f *os.File, size int64) (uint64, bool) {
 	return binary.LittleEndian.Uint64(rec[32:40]), true
 }
 
-// verifyJPEG walks the marker segments to the start of scan, then confirms the
-// end-of-image marker is present. JPEG carries no checksum, so this catches
-// the truncation half of the problem and nothing else — which is why a clean
-// walk returns proven only in the weak sense the caller treats it as.
-func verifyJPEG(f *os.File, size int64) (Intactness, string) {
+// verifyJPEG walks the marker segments to the start of scan, then decodes the
+// image completely. JPEG carries no checksum, but the entropy-coded data
+// either decodes to its end or fails: a complete decode covers every byte of
+// the payload, which is why a clean result here is Proven. The image is
+// materialised by the decode, so very large pictures are left unproven rather
+// than costing a small NAS its memory (maxDecodePixels).
+func verifyJPEG(f io.ReaderAt, size int64, cancel <-chan struct{}) (Intactness, string) {
 	pos := int64(2)
 	for pos < size-1 {
+		if isCancelled(cancel) {
+			return Unproven, ""
+		}
 		var m [4]byte
 		if _, err := f.ReadAt(m[:2], pos); err != nil {
 			return Damaged, "JPEG segment list ends early — the file is truncated"
@@ -352,7 +395,7 @@ func verifyJPEG(f *os.File, size int64) (Intactness, string) {
 			continue
 		}
 		// Start of scan: entropy-coded data follows and is not length-framed,
-		// so the walk stops and the end marker becomes the remaining test.
+		// so the walk stops and the decode below takes over.
 		if mk == 0xDA {
 			break
 		}
@@ -370,60 +413,368 @@ func verifyJPEG(f *os.File, size int64) (Intactness, string) {
 		}
 		pos += 2 + seg
 	}
-	// The end-of-image marker is searched for across the WHOLE file, backwards,
-	// not in a fixed tail window. Phone photos are the reason: a Google/Samsung
-	// Motion Photo or an Apple Live Photo is a complete JPEG with an entire MP4
-	// appended after its EOI, which on a NAS full of phone backups is an
-	// ordinary file and not a rare one. A tail-window check calls every one of
-	// them truncated — and because a damaged verdict here stops the ladder,
-	// that false conviction would also suppress the comparison that finds the
-	// genuinely damaged copy.
-	const back = 1 << 20
-	buf := make([]byte, back+1)
-	for end := size; end > 0; {
-		start := end - back
-		if start < 0 {
-			start = 0
-		}
-		n := int(end - start)
-		if end < size {
-			n++ // one byte of overlap, so a marker split across the seam is seen
-		}
-		if _, err := f.ReadAt(buf[:n], start); err != nil {
-			return Unproven, ""
-		}
-		if bytes.Contains(buf[:n], []byte{0xFF, 0xD9}) {
-			return Proven, "JPEG segment structure is intact and the end-of-image marker is present"
-		}
-		end = start
+	// The decoder reads from the start and stops at the end-of-image marker,
+	// so whatever follows it is ignored. Phone photos are the reason that
+	// matters: a Google/Samsung Motion Photo or an Apple Live Photo is a
+	// complete JPEG with an entire MP4 appended after its EOI, and on a NAS
+	// full of phone backups that is an ordinary file.
+	cfg, err := jpeg.DecodeConfig(&cancelReader{io.NewSectionReader(f, 0, size), cancel})
+	if err != nil {
+		return jpegVerdict(err)
 	}
-	return Damaged, "JPEG has no end-of-image marker — the file is truncated"
+	if int64(cfg.Width)*int64(cfg.Height) > maxDecodePixels {
+		return Unproven, ""
+	}
+	if _, err := jpeg.Decode(&cancelReader{io.NewSectionReader(f, 0, size), cancel}); err != nil {
+		return jpegVerdict(err)
+	}
+	return Proven, "the JPEG decodes completely, so its image data is consistent from start to end"
 }
 
-// verifyPDF checks the header and the trailer. PDFs are routinely appended to
-// (incremental updates), so only the two anchors are safe to insist on.
-func verifyPDF(f *os.File, size int64) (Intactness, string) {
-	tail := int64(2 << 10)
+// jpegVerdict maps a decoder error to a verdict. Only what the decoder is
+// SURE about convicts: a malformed stream or one that ends early. A variant
+// the decoder does not implement (arithmetic coding, 12-bit samples, lossless
+// JPEG) is left unproven — the check could not run, the file is not damaged.
+func jpegVerdict(err error) (Intactness, string) {
+	var unsupported jpeg.UnsupportedError
+	switch {
+	case errors.Is(err, ErrCancelled):
+		return Unproven, ""
+	case errors.As(err, &unsupported):
+		return Unproven, ""
+	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
+		return Damaged, "the JPEG image data ends before the picture is complete — the file is truncated"
+	}
+	var format jpeg.FormatError
+	if errors.As(err, &format) {
+		return Damaged, "the JPEG image data does not decode (" + string(format) + ") — the stored bytes are damaged"
+	}
+	return Unproven, ""
+}
+
+// verifyPDF checks the two anchors every PDF must have, then verifies every
+// compressed stream in the file. A stream compressed with FlateDecode is a
+// zlib stream, and zlib closes each stream with an Adler-32 checksum of the
+// uncompressed data; a stream compressed with DCTDecode is an embedded JPEG
+// and decodes like one. A PDF whose every stream is one of those proves its
+// payload the way an archive does. Uncompressed streams, other filters and
+// encrypted documents cannot be checked, and such a file stays unproven — but
+// a checksum that fails, or a stream that ends early where the file itself
+// says where it ends, still convicts.
+func verifyPDF(f *os.File, size int64, cancel <-chan struct{}) (Intactness, string) {
+	tail := int64(64 << 10)
 	if tail > size {
 		tail = size
 	}
-	buf := make([]byte, tail)
-	if _, err := f.ReadAt(buf, size-tail); err != nil {
+	tbuf := make([]byte, tail)
+	if _, err := f.ReadAt(tbuf, size-tail); err != nil {
 		return Unproven, ""
 	}
-	if !bytes.Contains(buf, []byte("%%EOF")) {
+	if !bytes.Contains(tbuf, []byte("%%EOF")) {
 		return Damaged, "PDF has no end-of-file marker — the file is truncated"
 	}
-	return Proven, "PDF header and end-of-file marker are both present"
+	p := pdfStreams{f: f, size: size, cancel: cancel}
+	return p.verifyAll()
+}
+
+// pdfStreams walks a PDF's stream objects in file order. It is deliberately
+// not a PDF parser: it finds each "stream" keyword, reads the object
+// dictionary just before it for the filter and the declared length, locates
+// the matching "endstream", checks the data, and skips past it — so binary
+// stream data that happens to contain the word "stream" is never mistaken for
+// a keyword.
+type pdfStreams struct {
+	f      *os.File
+	size   int64
+	cancel <-chan struct{}
+}
+
+// pdfScanChunk is how much of the file is searched at a time for the next
+// keyword; the tail of one chunk is re-read at the head of the next so a
+// keyword split across the seam is still seen.
+const pdfScanChunk = 1 << 20
+
+func (p *pdfStreams) verifyAll() (Intactness, string) {
+	var total int64 // inflated bytes so far, against maxInflate
+	streams, verified := 0, 0
+	unverifiable := false
+	buf := make([]byte, pdfScanChunk+16)
+	pos := int64(0)
+	for pos < p.size {
+		if isCancelled(p.cancel) {
+			return Unproven, ""
+		}
+		n := int64(len(buf))
+		if p.size-pos < n {
+			n = p.size - pos
+		}
+		if _, err := p.f.ReadAt(buf[:n], pos); err != nil && err != io.EOF {
+			return Unproven, ""
+		}
+		// An encrypted document's streams are ciphertext, which no check here
+		// can tell from damage. The marker can sit in any trailer or
+		// cross-reference stream dictionary, so every chunk is checked.
+		if bytes.Contains(buf[:n], []byte("/Encrypt")) {
+			return Unproven, ""
+		}
+		i := indexStreamKeyword(buf[:n])
+		if i < 0 {
+			// No keyword in this chunk: step on, keeping the overlap.
+			if pos+n >= p.size {
+				break
+			}
+			pos += n - 16
+			continue
+		}
+		kw := pos + int64(i)
+		dataStart := kw + int64(len("stream"))
+		// The keyword is followed by CRLF or LF; the data starts after it.
+		switch {
+		case bytes.HasPrefix(buf[i+6:n], []byte("\r\n")):
+			dataStart += 2
+		case bytes.HasPrefix(buf[i+6:n], []byte("\n")):
+			dataStart++
+		default:
+			// "stream" not followed by an end of line is not the keyword (an
+			// identifier such as /StreamType). Keep scanning past it.
+			pos = kw + 6
+			continue
+		}
+		dict := p.readBack(kw, 4<<10)
+		length, lengthKnown := pdfDeclaredLength(dict)
+		filter := pdfFilter(dict)
+		end, confident := p.streamEnd(dataStart, length, lengthKnown)
+		if end < 0 {
+			return Unproven, "" // no endstream anywhere after it: not a stream we can bound
+		}
+		streams++
+		switch filter {
+		case "FlateDecode":
+			st, why, inflated := p.verifyFlate(dataStart, end-dataStart, confident, maxInflate-total)
+			total += inflated
+			if st == Damaged {
+				return Damaged, why
+			}
+			if st == Proven {
+				verified++
+			} else {
+				unverifiable = true
+			}
+		case "DCTDecode":
+			st, why := verifyJPEG(io.NewSectionReader(p.f, dataStart, end-dataStart), end-dataStart, p.cancel)
+			if st == Damaged {
+				return Damaged, "an image inside the PDF is damaged: " + why
+			}
+			if st == Proven {
+				verified++
+			} else {
+				unverifiable = true
+			}
+		default:
+			unverifiable = true
+		}
+		// Continue after "endstream".
+		pos = end + int64(len("endstream"))
+	}
+	if streams == 0 || unverifiable || isCancelled(p.cancel) {
+		return Unproven, ""
+	}
+	plural := "s"
+	if verified == 1 {
+		plural = ""
+	}
+	return Proven, fmt.Sprintf("every compressed stream in the PDF (%d stream%s) matches its own checksum", verified, plural)
+}
+
+// indexStreamKeyword finds the first "stream" keyword in b that is not the
+// tail of "endstream". -1 when there is none.
+func indexStreamKeyword(b []byte) int {
+	from := 0
+	for {
+		i := bytes.Index(b[from:], []byte("stream"))
+		if i < 0 {
+			return -1
+		}
+		i += from
+		if i >= 3 && string(b[i-3:i]) == "end" {
+			from = i + 6
+			continue
+		}
+		return i
+	}
+}
+
+// readBack returns up to n bytes ending just before off: the object
+// dictionary that precedes a stream keyword.
+func (p *pdfStreams) readBack(off, n int64) []byte {
+	if n > off {
+		n = off
+	}
+	b := make([]byte, n)
+	if _, err := p.f.ReadAt(b, off-n); err != nil && err != io.EOF {
+		return nil
+	}
+	// Only the dictionary of THIS object: cut at the last "obj" keyword so a
+	// previous object's /Filter is never read as this one's.
+	if i := bytes.LastIndex(b, []byte(" obj")); i >= 0 {
+		b = b[i:]
+	}
+	return b
+}
+
+// pdfDeclaredLength parses a direct "/Length N" from the dictionary. An
+// indirect reference ("/Length 12 0 R") is reported as unknown.
+func pdfDeclaredLength(dict []byte) (int64, bool) {
+	i := bytes.LastIndex(dict, []byte("/Length"))
+	if i < 0 {
+		return 0, false
+	}
+	rest := bytes.TrimLeft(dict[i+len("/Length"):], " \t\r\n")
+	j := 0
+	for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
+		j++
+	}
+	if j == 0 || j > 15 {
+		return 0, false
+	}
+	after := bytes.TrimLeft(rest[j:], " \t\r\n")
+	// "N 0 R" is a reference to another object, not a length.
+	if len(after) > 0 && after[0] >= '0' && after[0] <= '9' {
+		k := 0
+		for k < len(after) && after[k] >= '0' && after[k] <= '9' {
+			k++
+		}
+		if tail := bytes.TrimLeft(after[k:], " \t\r\n"); len(tail) > 0 && tail[0] == 'R' {
+			return 0, false
+		}
+	}
+	n, err := strconv.ParseInt(string(rest[:j]), 10, 64)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// pdfFilter returns the single filter name applied to the stream, or "" when
+// there is none, more than one, or one this file cannot check. A filter array
+// with one element counts as that filter.
+func pdfFilter(dict []byte) string {
+	i := bytes.LastIndex(dict, []byte("/Filter"))
+	if i < 0 {
+		return ""
+	}
+	rest := bytes.TrimLeft(dict[i+len("/Filter"):], " \t\r\n")
+	array := false
+	if len(rest) > 0 && rest[0] == '[' {
+		array = true
+		rest = bytes.TrimLeft(rest[1:], " \t\r\n")
+	}
+	if len(rest) == 0 || rest[0] != '/' {
+		return ""
+	}
+	j := 1
+	for j < len(rest) && (rest[j] >= 'A' && rest[j] <= 'Z' || rest[j] >= 'a' && rest[j] <= 'z' || rest[j] >= '0' && rest[j] <= '9') {
+		j++
+	}
+	name := string(rest[1:j])
+	if array {
+		// More than one filter in the array means a chain this file does not
+		// decode (e.g. ASCII85 then Flate).
+		if after := bytes.TrimLeft(rest[j:], " \t\r\n"); len(after) == 0 || after[0] != ']' {
+			return ""
+		}
+	}
+	return name
+}
+
+// streamEnd locates the end of the stream data. With a direct /Length that
+// agrees with an "endstream" keyword right after it, the bounds are the
+// file's own word (confident, which only sharpens the wording of a verdict);
+// otherwise the next "endstream" is searched for. Compressed data cannot
+// contain that keyword by accident in practice, and zlib stops at its own
+// trailer anyway, so inferred bounds are enough to verify and to convict.
+func (p *pdfStreams) streamEnd(dataStart, length int64, lengthKnown bool) (end int64, confident bool) {
+	if lengthKnown && dataStart+length <= p.size {
+		var tail [11]byte
+		n, _ := p.f.ReadAt(tail[:], dataStart+length)
+		t := bytes.TrimLeft(tail[:n], "\r\n")
+		if bytes.HasPrefix(t, []byte("endstream")) {
+			return dataStart + length + int64(n-len(t)), true
+		}
+	}
+	// Search forward for "endstream", chunk by chunk.
+	buf := make([]byte, pdfScanChunk+16)
+	pos := dataStart
+	for pos < p.size {
+		n := int64(len(buf))
+		if p.size-pos < n {
+			n = p.size - pos
+		}
+		if _, err := p.f.ReadAt(buf[:n], pos); err != nil && err != io.EOF {
+			return -1, false
+		}
+		if i := bytes.Index(buf[:n], []byte("endstream")); i >= 0 {
+			end = pos + int64(i)
+			// The keyword is preceded by an end of line that is not stream data.
+			return end, false
+		}
+		if pos+n >= p.size {
+			break
+		}
+		pos += n - 16
+	}
+	return -1, false
+}
+
+// verifyFlate inflates one stream to nothing, which is what makes zlib check
+// its Adler-32 trailer. budget bounds the inflated bytes (maxInflate across the
+// whole file); the returned count is what this stream consumed of it.
+func (p *pdfStreams) verifyFlate(start, length int64, confident bool, budget int64) (Intactness, string, int64) {
+	if length <= 0 || budget <= 0 {
+		return Unproven, "", 0
+	}
+	// The data may be followed by an end of line before "endstream"; zlib
+	// stops at its own trailer, so trailing whitespace is harmless.
+	src := &cancelReader{io.NewSectionReader(p.f, start, length), p.cancel}
+	zr, err := zlib.NewReader(src)
+	if err != nil {
+		// A header zlib does not recognise: some producers write raw deflate
+		// under this filter name, which is not damage, so it is not convicted.
+		return Unproven, "", 0
+	}
+	defer zr.Close()
+	n, err := io.Copy(io.Discard, io.LimitReader(zr, budget))
+	switch {
+	case errors.Is(err, ErrCancelled):
+		return Unproven, "", n
+	case errors.Is(err, zlib.ErrChecksum):
+		return Damaged, "a compressed stream in the PDF fails its own checksum — the stored bytes are damaged", n
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		if confident {
+			return Damaged, "a compressed stream in the PDF ends before its declared length — the stored bytes are damaged", n
+		}
+		return Damaged, "a compressed stream in the PDF ends early — the stored bytes are damaged", n
+	case err != nil:
+		// The header was valid (zlib.NewReader accepted it), so a failure inside
+		// the stream is the stream's own bytes, not a mislabelled filter.
+		return Damaged, "a compressed stream in the PDF cannot be decompressed — the stored bytes are damaged", n
+	case n >= budget:
+		return Unproven, "", n
+	}
+	return Proven, "", n
 }
 
 // verifyISOBMFF walks the top-level box tree of the ISO base media formats —
 // MP4, MOV, HEIC, AVIF. The boxes must tile the file exactly; anything else
-// means bytes are missing.
-func verifyISOBMFF(f *os.File, size int64) (Intactness, string) {
+// means bytes are missing. These containers carry no checksum and nothing here
+// decodes their samples, so a clean walk proves nothing about the payload and
+// is reported as Unproven: only damage is ever asserted.
+func verifyISOBMFF(f *os.File, size int64, cancel <-chan struct{}) (Intactness, string) {
 	pos := int64(0)
-	boxes := 0
 	for pos < size {
+		if isCancelled(cancel) {
+			return Unproven, ""
+		}
 		if size-pos < 8 {
 			return Damaged, fmt.Sprintf("media box list ends with %d stray bytes — the file is truncated", size-pos)
 		}
@@ -455,13 +806,9 @@ func verifyISOBMFF(f *os.File, size int64) (Intactness, string) {
 		if bs < hlen || bs > size-pos {
 			return Damaged, fmt.Sprintf("media box %q claims %d bytes but only %d remain — the file is truncated", btype, bs, size-pos)
 		}
-		boxes++
 		pos += bs
 	}
-	if boxes == 0 {
-		return Unproven, ""
-	}
-	return Proven, "media box structure tiles the file exactly"
+	return Unproven, ""
 }
 
 // ---------------------------------------------------------- content compare

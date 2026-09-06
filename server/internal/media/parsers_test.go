@@ -10,7 +10,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"compress/zlib"
 	"encoding/binary"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -131,6 +133,30 @@ func seedZip() []byte {
 
 func seedPDF() []byte {
 	return []byte("%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n")
+}
+
+// pdfWithStreams is a PDF whose payload sits in compressed streams, the way
+// every modern producer writes one: each body is a zlib stream closed by its
+// Adler-32 checksum. indirect declares the length by reference, as many
+// producers do, so the reader has to find endstream for itself.
+func pdfWithStreams(bodies [][]byte, indirect bool) []byte {
+	var out bytes.Buffer
+	out.WriteString("%PDF-1.5\n1 0 obj\n<< /Type /Catalog >>\nendobj\n")
+	for i, body := range bodies {
+		var z bytes.Buffer
+		zw := zlib.NewWriter(&z)
+		zw.Write(body)
+		zw.Close()
+		length := fmt.Sprintf("%d", z.Len())
+		if indirect {
+			length = fmt.Sprintf("%d 0 R", 100+i)
+		}
+		fmt.Fprintf(&out, "%d 0 obj\n<< /Length %s /Filter /FlateDecode >>\nstream\n", 2+i, length)
+		out.Write(z.Bytes())
+		out.WriteString("\nendstream\nendobj\n")
+	}
+	out.WriteString("trailer\n<< /Root 1 0 R >>\n%%EOF\n")
+	return out.Bytes()
 }
 
 // mvhdBox is a movie header whose creation time is t; v1 uses the 64-bit
@@ -317,44 +343,113 @@ func TestQtCapturedPrefersAppleCreationDate(t *testing.T) {
 
 // --------------------------------------------------------------- verifiers
 
-func TestVerifyPDFNeedsItsTrailer(t *testing.T) {
+// A PDF with nothing checkable inside stays unproven: its anchors say the
+// file is complete, not that its bytes are right. Only a missing trailer
+// convicts.
+func TestVerifyPDFAnchorsOnlyConvict(t *testing.T) {
 	open, size := openerFor(t, seedPDF())
-	if st, why := VerifyContent(open, size); st != Proven || why == "" {
-		t.Errorf("intact PDF: %v %q", st, why)
+	if st, why := VerifyContent(open, size, nil); st != Unproven || why != "" {
+		t.Errorf("PDF without streams: %v %q, want unproven", st, why)
 	}
 	cut := bytes.Replace(seedPDF(), []byte("%%EOF"), []byte("%%EO"), 1)
 	open, size = openerFor(t, cut)
-	if st, _ := VerifyContent(open, size); st != Damaged {
+	if st, _ := VerifyContent(open, size, nil); st != Damaged {
 		t.Errorf("PDF without %%EOF: %v", st)
 	}
 }
 
+// Compressed streams are the PDF's own checksums: every one verified proves
+// the payload, one that fails convicts, and a stream that cannot be checked
+// leaves the file unproven rather than vouched for.
+func TestVerifyPDFStreams(t *testing.T) {
+	bodies := [][]byte{bytes.Repeat([]byte("BT /F1 12 Tf (hello) Tj ET\n"), 40), bytes.Repeat([]byte{0, 1, 2, 3, 4, 5, 6, 7}, 300)}
+	for _, indirect := range []bool{false, true} {
+		good := pdfWithStreams(bodies, indirect)
+		open, size := openerFor(t, good)
+		if st, why := VerifyContent(open, size, nil); st != Proven || why == "" {
+			t.Errorf("indirect=%v intact: %v %q", indirect, st, why)
+		}
+		// Flip a byte inside the first stream's compressed data (past the two
+		// zlib header bytes): the Adler-32 trailer no longer matches, however
+		// the length was declared.
+		rot := append([]byte(nil), good...)
+		first := bytes.Index(rot, []byte(">>\nstream\n")) + len(">>\nstream\n")
+		rot[first+8] ^= 0x55
+		open, size = openerFor(t, rot)
+		if st, why := VerifyContent(open, size, nil); st != Damaged || why == "" {
+			t.Errorf("indirect=%v corrupted stream: %v %q, want damaged", indirect, st, why)
+		}
+	}
+	// An uncompressed stream cannot be checked, so the file is not vouched for.
+	plain := []byte("%PDF-1.4\n1 0 obj\n<< /Length 5 >>\nstream\nhello\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n")
+	open, size := openerFor(t, plain)
+	if st, _ := VerifyContent(open, size, nil); st != Unproven {
+		t.Errorf("uncompressed stream: %v, want unproven", st)
+	}
+	// An encrypted document is ciphertext throughout.
+	enc := bytes.Replace(pdfWithStreams(bodies, false), []byte("/Root 1 0 R"), []byte("/Root 1 0 R /Encrypt 9 0 R"), 1)
+	open, size = openerFor(t, enc)
+	if st, _ := VerifyContent(open, size, nil); st != Unproven {
+		t.Errorf("encrypted: %v, want unproven", st)
+	}
+}
+
+// A JPEG proves itself by decoding to the end; a truncated or garbled one
+// fails the decode and convicts.
+func TestVerifyJPEGDecodes(t *testing.T) {
+	good := seedJPEG()
+	open, size := openerFor(t, good)
+	if st, why := VerifyContent(open, size, nil); st != Proven || why == "" {
+		t.Errorf("intact JPEG: %v %q", st, why)
+	}
+	open, size = openerFor(t, good[:len(good)-6])
+	if st, _ := VerifyContent(open, size, nil); st != Damaged {
+		t.Errorf("JPEG cut inside its scan: %v, want damaged", st)
+	}
+	// Garble the Huffman table: the entropy-coded data can no longer decode.
+	rot := append([]byte(nil), good...)
+	dht := bytes.Index(rot, []byte{0xFF, 0xC4})
+	if dht < 0 {
+		t.Fatal("seed JPEG has no DHT segment")
+	}
+	for i := dht + 6; i < dht+14; i++ {
+		rot[i] = 0xFF
+	}
+	open, size = openerFor(t, rot)
+	if st, _ := VerifyContent(open, size, nil); st != Damaged {
+		t.Errorf("JPEG with a garbled Huffman table: %v, want damaged", st)
+	}
+}
+
+// The ISO base-media walk catches truncation and nothing else: a tree that
+// tiles the file exactly proves nothing about the samples inside, so it is
+// reported as unproven, never as intact.
 func TestVerifyISOBMFFTilesTheFile(t *testing.T) {
 	when := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
 	good := seedMOV(when, false)
 	open, size := openerFor(t, good)
-	if st, why := VerifyContent(open, size); st != Proven || why == "" {
-		t.Errorf("tiling boxes: %v %q", st, why)
+	if st, why := VerifyContent(open, size, nil); st != Unproven || why != "" {
+		t.Errorf("tiling boxes: %v %q, want unproven", st, why)
 	}
 	open, size = openerFor(t, good[:len(good)-3])
-	if st, _ := VerifyContent(open, size); st != Damaged {
+	if st, _ := VerifyContent(open, size, nil); st != Damaged {
 		t.Errorf("truncated last box: %v", st)
 	}
 	// A 64-bit-sized box and a size-0 (to end of file) box both tile.
 	wide := cat(be32(1), []byte("free"), be64(16+4), []byte("abcd"))
 	last := cat(be32(0), []byte("free"), []byte("tail"))
 	open, size = openerFor(t, cat(good, wide, last))
-	if st, _ := VerifyContent(open, size); st != Proven {
-		t.Errorf("64-bit and open-ended boxes: %v", st)
+	if st, _ := VerifyContent(open, size, nil); st != Unproven {
+		t.Errorf("64-bit and open-ended boxes: %v, want unproven", st)
 	}
 	// A box header claiming less than its own header length is damage.
 	open, size = openerFor(t, cat(good, be32(4), []byte("free")))
-	if st, _ := VerifyContent(open, size); st != Damaged {
+	if st, _ := VerifyContent(open, size, nil); st != Damaged {
 		t.Errorf("undersized box: %v", st)
 	}
 	// Stray bytes that cannot hold a header.
 	open, size = openerFor(t, cat(good, []byte{1, 2, 3}))
-	if st, _ := VerifyContent(open, size); st != Damaged {
+	if st, _ := VerifyContent(open, size, nil); st != Damaged {
 		t.Errorf("stray tail bytes: %v", st)
 	}
 }
@@ -363,18 +458,18 @@ func TestVerifyJPEGWithExifAndTrailingMovie(t *testing.T) {
 	// A phone "motion photo": a complete JPEG with an MP4 appended after EOI.
 	motion := cat(jpegWithExif(tiffWithDates(binary.BigEndian, "", "2020:02:29 08:00:00")), seedMOV(time.Unix(1600000000, 0), false))
 	open, size := openerFor(t, motion)
-	if st, _ := VerifyContent(open, size); st != Proven {
+	if st, _ := VerifyContent(open, size, nil); st != Proven {
 		t.Errorf("JPEG with trailing movie must not read as truncated: %v", st)
 	}
 	j := seedJPEG()
 	open, size = openerFor(t, j[:len(j)-2])
-	if st, _ := VerifyContent(open, size); st != Damaged {
+	if st, _ := VerifyContent(open, size, nil); st != Damaged {
 		t.Errorf("JPEG without EOI: %v", st)
 	}
 	// Fill bytes before a marker are legal.
 	filled := cat(j[:2], []byte{0xFF}, j[2:])
 	open, size = openerFor(t, filled)
-	if st, _ := VerifyContent(open, size); st != Proven {
+	if st, _ := VerifyContent(open, size, nil); st != Proven {
 		t.Errorf("fill byte before a marker: %v", st)
 	}
 }

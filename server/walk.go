@@ -22,14 +22,19 @@ import (
 // receives the handle's index); they stay open so later content reads go
 // through them, and the caller closes them when the scan is done. Roots
 // must already be de-overlapped (runScan) — there is no seen-set here.
+// walkErrCap bounds the unreadable-location list a scan reports, at the same
+// figure as the flat tools' row lists; the overflow is reported as a count.
+const walkErrCap = 20000
+
 func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan struct{}, visit func(rootIdx int, f fEnt), unreadable func(path string)) (errs []string, handles []*dirhandle.Handle, rootOf []string) {
 	count := 0
-	// The error list is capped so a volume full of permission-denied
-	// subtrees cannot grow it without bound — but no cap here is silent, so
-	// the overflow is counted and reported as one closing line.
+	// The error list is bounded — at the same figure as the flat tools' row
+	// lists, so a volume full of permission-denied subtrees cannot grow it
+	// without limit — and the bound is never silent: the overflow is counted
+	// and reported as one closing line.
 	dropped := 0
 	addErr := func(e string) {
-		if len(errs) < 50 {
+		if len(errs) < walkErrCap {
 			errs = append(errs, e)
 		} else {
 			dropped++

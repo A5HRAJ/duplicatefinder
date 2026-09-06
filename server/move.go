@@ -182,7 +182,9 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		s.pruneMoved(movedCanon, movedDirs, v.canon)
 		// Pruned rows and new keep-one survivors must survive a restart too,
 		// or a reboot would resurrect moved rows and forget protections.
-		s.saveState()
+		if err := s.saveState(); err != nil {
+			s.noteSaveError(err)
+		}
 	}
 	out := map[string]any{"moved": moved, "errors": errs}
 	if batch != nil && batch.name != "" {

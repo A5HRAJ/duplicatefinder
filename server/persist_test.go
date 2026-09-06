@@ -127,16 +127,16 @@ func TestHashCacheRoundTrip(t *testing.T) {
 	}
 	// As history it still works both ways: a different prefix under the same
 	// size and mtime is rot evidence via the live bucket…
-	if !c2.priorContentChanged("/v/a.bin", 10, 100, strings.Repeat("ef", 32)) {
+	if moved, _ := c2.priorContentChanged("/v/a.bin", 10, 100, strings.Repeat("ef", 32)); !moved {
 		t.Fatal("prefix moved under unchanged metadata — history must say so")
 	}
 	// …and a different FULL hash behind an identical prefix (rot beyond the
 	// first 64 KiB) is seen by record() as the fresh hash lands.
 	fresh := strings.Repeat("55", 32)
-	if !c2.record("/v/a.bin", 10, 100, pfx, fresh) {
+	if moved, _ := c2.record("/v/a.bin", 10, 100, pfx, fresh); !moved {
 		t.Fatal("full hash moved under unchanged metadata and prefix — record must report it")
 	}
-	if !c2.priorContentChanged("/v/a.bin", 10, 100, pfx) {
+	if moved, _ := c2.priorContentChanged("/v/a.bin", 10, 100, pfx); !moved {
 		t.Fatal("the changed set must remember the rot after the overwrite")
 	}
 	// Once recorded THIS scan, the fresh hash is reused for the rest of it.
@@ -213,7 +213,7 @@ func TestMidScanSaveKeepsHistoryInRAM(t *testing.T) {
 		t.Fatalf("saveMid deleted from RAM: %d entries left of 6", len(c.ents))
 	}
 	// The unconsumed history must still answer for rot detection…
-	if !c.priorContentChanged(oldPaths[0], 10, 20, pfx) {
+	if moved, _ := c.priorContentChanged(oldPaths[0], 10, 20, pfx); !moved {
 		t.Fatal("history stopped answering after a mid-scan save")
 	}
 	// …while the file on disk honors the cap, newest generations first.
@@ -272,7 +272,7 @@ func TestResumeContinuesInterruptedScan(t *testing.T) {
 	}
 	// Rot lands after that run's read, past the prefix, metadata restored.
 	rotted := append([]byte(nil), body...)
-	rotted[70*1024] ^= 0xff
+	rotted[70*1024] ^= 0x01
 	if err := os.WriteFile(b, rotted, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -318,16 +318,16 @@ func TestChangedSetGuardsPathIdentity(t *testing.T) {
 	pfx := strings.Repeat("ab", 32)
 	c.record("/v/p1.bin", 100, 200, pfx, strings.Repeat("11", 32))
 	c.gen++
-	if !c.record("/v/p1.bin", 100, 200, pfx, strings.Repeat("22", 32)) {
+	if moved, _ := c.record("/v/p1.bin", 100, 200, pfx, strings.Repeat("22", 32)); !moved {
 		t.Fatal("genuine displacement must be captured")
 	}
-	if !c.priorContentChanged("/v/p1.bin", 100, 200, pfx) {
+	if moved, _ := c.priorContentChanged("/v/p1.bin", 100, 200, pfx); !moved {
 		t.Fatal("the changed path itself must read as changed")
 	}
 	c.mu.Lock()
 	c.changed[pathKey("/v/other.bin")] = c.changed[pathKey("/v/p1.bin")]
 	c.mu.Unlock()
-	if c.priorContentChanged("/v/other.bin", 100, 200, pfx) {
+	if moved, _ := c.priorContentChanged("/v/other.bin", 100, 200, pfx); moved {
 		t.Fatal("a path-hash collision handed one file another file's rot evidence")
 	}
 	if !c.changedPath("/v/p1.bin") || c.changedPath("/v/other.bin") {
@@ -574,7 +574,7 @@ func TestRescanRereadsEverything(t *testing.T) {
 	// stand, so only a full re-read can tell the pair apart. A scan that
 	// still groups them is lying.
 	rotted := append([]byte(nil), body...)
-	rotted[70*1024] ^= 0xff
+	rotted[70*1024] ^= 0x01
 	if err := os.WriteFile(b, rotted, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -592,10 +592,10 @@ func TestRescanRereadsEverything(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c3.priorContentChanged(b, fi.Size(), fi.ModTime().Unix(), pfx) {
+	if moved, _ := c3.priorContentChanged(b, fi.Size(), fi.ModTime().Unix(), pfx); !moved {
 		t.Fatal("deep rot must be captured as content-changed history")
 	}
-	if c3.priorContentChanged(a, fi.Size(), fi.ModTime().Unix(), pfx) {
+	if moved, _ := c3.priorContentChanged(a, fi.Size(), fi.ModTime().Unix(), pfx); moved {
 		t.Fatal("the unchanged copy must not read as changed")
 	}
 }

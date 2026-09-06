@@ -96,7 +96,15 @@ type hashCache struct {
 	// one-shot by nature (even an uninterrupted conviction is not repeated by
 	// the next scan), and persisting the set for this edge would buy one
 	// verdict at the price of another moving part in the crash path.
-	changed map[uint64][16]byte
+	changed map[uint64]changedRec
+}
+
+// changedRec is one entry of the changed set: the path's tag, checked on every
+// query so a key collision cannot hand one file another's history, and the
+// full hash the displaced entry held — the content the path used to have.
+type changedRec struct {
+	tag   [16]byte
+	prior [32]byte
 }
 
 // changedMax bounds the evidence set. A volume with more than this many files
@@ -238,19 +246,19 @@ func (c *hashCache) lookup(path string, size, mod int64, pfxHex string) (string,
 // moment the fresh full hash lands (its return value says so). Consulting
 // only the live bucket would leave the rung answering "no" for exactly the
 // files the duplicates pass had already read — which is most of them.
-func (c *hashCache) priorContentChanged(path string, size, mod int64, pfxHex string) bool {
+func (c *hashCache) priorContentChanged(path string, size, mod int64, pfxHex string) (bool, string) {
 	if c == nil {
-		return false
+		return false, ""
 	}
 	pfx, err := hex.DecodeString(pfxHex)
 	if err != nil || len(pfx) < 16 {
-		return false
+		return false, ""
 	}
 	key := pathKey(path)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if tag, ok := c.changed[key]; ok && tag == pathTag(path) {
-		return true
+	if rec, ok := c.changed[key]; ok && rec.tag == pathTag(path) {
+		return true, hex.EncodeToString(rec.prior[:])
 	}
 	e, ok := c.ents[key]
 	// e.Gen == c.gen means the entry is this scan's own read coming back, not
@@ -258,30 +266,32 @@ func (c *hashCache) priorContentChanged(path string, size, mod int64, pfxHex str
 	// scan (an ordinary edit landing mid-run), and calling that rot would
 	// convict healthy files — the walk's size and mtime were never re-observed.
 	if !ok || e.Gen == c.gen || e.Size != size || e.Mod != mod || e.Tag != pathTag(path) {
-		return false // no comparable history: not evidence either way
+		return false, "" // no comparable history: not evidence either way
 	}
 	for i := 0; i < 16; i++ {
 		if e.Pfx[i] != pfx[i] {
-			return true
+			return true, hex.EncodeToString(e.Hash[:])
 		}
 	}
-	return false
+	return false, ""
 }
 
 // record stores a freshly-computed full hash and reports whether it displaced
 // an earlier scan's entry for the same path at the same size and mtime with
-// different content — i.e. whether this write is itself evidence of bit rot.
-// The comparison covers the full hash, not just the prefix, because the fresh
-// full read is in hand right here; this is the only place a deep change in a
-// path no other rung has asked about can ever be seen.
-func (c *hashCache) record(path string, size, mod int64, pfxHex, fullHex string) bool {
+// different content — i.e. whether this write is itself evidence of bit rot —
+// and, when it did, the content that entry held: the file's former self,
+// which a sibling in a conflicting set may still hold. The comparison covers
+// the full hash, not just the prefix, because the fresh full read is in hand
+// right here; this is the only place a deep change in a path no other rung
+// has asked about can ever be seen.
+func (c *hashCache) record(path string, size, mod int64, pfxHex, fullHex string) (bool, string) {
 	if c == nil {
-		return false
+		return false, ""
 	}
 	pfx, err1 := hex.DecodeString(pfxHex)
 	full, err2 := hex.DecodeString(fullHex)
 	if err1 != nil || err2 != nil || len(pfx) < 16 || len(full) != 32 {
-		return false
+		return false, ""
 	}
 	e := hcEnt{Size: size, Mod: mod, Gen: c.gen, Tag: pathTag(path)}
 	copy(e.Pfx[:], pfx[:16])
@@ -289,6 +299,7 @@ func (c *hashCache) record(path string, size, mod int64, pfxHex, fullHex string)
 	key := pathKey(path)
 	c.mu.Lock()
 	moved := false
+	prior := ""
 	// Capture the before-value while it still exists: this overwrite is what
 	// destroys the corrupted-files scan's only historical evidence. Only an
 	// OLDER generation's entry is evidence — the two observations then carry
@@ -300,11 +311,12 @@ func (c *hashCache) record(path string, size, mod int64, pfxHex, fullHex string)
 		old.Size == size && old.Mod == mod && old.Tag == e.Tag &&
 		(old.Pfx != e.Pfx || old.Hash != e.Hash) {
 		moved = true
+		prior = hex.EncodeToString(old.Hash[:])
 		if c.changed == nil {
-			c.changed = map[uint64][16]byte{}
+			c.changed = map[uint64]changedRec{}
 		}
 		if len(c.changed) < changedMax {
-			c.changed[key] = e.Tag
+			c.changed[key] = changedRec{tag: e.Tag, prior: old.Hash}
 		}
 	}
 	c.ents[key] = e
@@ -317,7 +329,7 @@ func (c *hashCache) record(path string, size, mod int64, pfxHex, fullHex string)
 		c.trimMidScanLocked(hashCacheMax)
 	}
 	c.mu.Unlock()
-	return moved
+	return moved, prior
 }
 
 // changedPath reports whether record() has captured this path's content
@@ -333,8 +345,8 @@ func (c *hashCache) changedPath(path string) bool {
 	key := pathKey(path)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	tag, ok := c.changed[key]
-	return ok && tag == pathTag(path)
+	rec, ok := c.changed[key]
+	return ok && rec.tag == pathTag(path)
 }
 
 // trimMidScanLocked bounds the map while a scan is still CONSUMING history.

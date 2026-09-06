@@ -149,7 +149,17 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 		// admitted in between must not have ITS fresh marker deleted by
 		// this one's os.Remove.
 		if completed {
-			s.saveState() // a finished scan survives a daemon restart
+			if err := s.saveState(); err != nil {
+				// The results are on screen but not on disk. The marker stays:
+				// a restart then reports the scan as interrupted and offers to
+				// run it again, instead of silently serving the previous state
+				// as if nothing had happened. The app shows the failure too.
+				s.noteSaveError(err)
+				s.mu.Lock()
+				s.job = jobState{}
+				s.mu.Unlock()
+				return
+			}
 		}
 		s.clearMarker()
 		s.mu.Lock()
@@ -535,6 +545,37 @@ func (s *Server) fetchCreatedDates(sess *fsSession, res, corrRes *toolResult, ca
 		s.setProgress(96+4*float64(done)/float64(max(total, 1)),
 			"Fetching creation times… ("+humanCount(done)+" of "+humanCount(total)+")")
 	})
+	// Stop pressed during this phase keeps the results — the scan's real work
+	// is done — but must not pass as a complete scan: the rows left without a
+	// Created Date would otherwise vanish under a created-date filter with no
+	// word about why. The gap is written into the scan's own issue list.
+	if cancelled(cancel) {
+		if n := blankCreated(res) + blankCreated(corrRes); n > 0 {
+			res.Errors = append(res.Errors, "stopped before every Created Date was fetched — "+humanCount(n)+
+				" files show none; scan again to fill them in")
+		}
+	}
+}
+
+// blankCreated counts the rows of a result that carry no Created Date.
+func blankCreated(res *toolResult) int {
+	if res == nil {
+		return 0
+	}
+	n := 0
+	for i := range res.Files {
+		if res.Files[i].Created == "" {
+			n++
+		}
+	}
+	for gi := range res.Groups {
+		for fi := range res.Groups[gi].Files {
+			if res.Groups[gi].Files[fi].Created == "" {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // Stored-result caps. The results live in daemon memory on NAS hardware that

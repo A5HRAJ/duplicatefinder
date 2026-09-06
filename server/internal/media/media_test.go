@@ -41,7 +41,7 @@ func fileWith(t *testing.T, data []byte) *os.File {
 func verifyBytes(t *testing.T, data []byte) (Intactness, string) {
 	t.Helper()
 	open, size := openerFor(t, data)
-	return VerifyContent(open, size)
+	return VerifyContent(open, size, nil)
 }
 
 // -------------------------------------------------------------- validators

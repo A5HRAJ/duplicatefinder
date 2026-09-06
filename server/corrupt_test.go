@@ -257,8 +257,10 @@ func TestThreeCopiesReportVariantCount(t *testing.T) {
 }
 
 // A file whose content changed while its size and modified time did not is
-// convicted from the hash cache alone — no twin, no second read.
-func TestCachedPrefixDisagreementConvicts(t *testing.T) {
+// REPORTED from the hash cache alone — but not convicted: with no sibling
+// holding its former content and no checksum of its own, nothing tells a
+// bit flip from an edit whose timestamp was put back. The verdict says so.
+func TestCachedPrefixDisagreementIsReportedNotConvicted(t *testing.T) {
 	dir := t.TempDir()
 	a := mkAt(t, dir, "a/ledger.bin", bytes.Repeat([]byte("O"), 2048), fixedTime)
 	b := mkAt(t, dir, "b/ledger.bin", bytes.Repeat([]byte("N"), 2048), fixedTime)
@@ -296,8 +298,13 @@ func TestCachedPrefixDisagreementConvicts(t *testing.T) {
 	if len(groups) != 1 {
 		t.Fatalf("want 1 set, got %d", len(groups))
 	}
-	if got := verdictOf(&groups[0], "a"); got != verdictCorrupt {
-		t.Errorf("content changed under an unchanged mtime: want %q, got %q", verdictCorrupt, got)
+	if got := verdictOf(&groups[0], "a"); got != verdictUnknown {
+		t.Errorf("content changed under an unchanged mtime, uncorroborated: want %q, got %q", verdictUnknown, got)
+	}
+	for _, fe := range groups[0].Files {
+		if fe.Dir == filepath.Join(dir, "a") && !strings.Contains(fe.Evidence, "content changed since an earlier scan") {
+			t.Errorf("the history must be reported as evidence, got %q", fe.Evidence)
+		}
 	}
 }
 
@@ -327,9 +334,10 @@ func TestDeepRotBeyondPrefixConvicts(t *testing.T) {
 	}
 	cache.gen++ // the next scan loads the store and advances the generation
 
-	// Copy "a" rots past the prefix; size and mtime are untouched.
+	// Copy "a" rots past the prefix — one flipped bit, the classic signature;
+	// size and mtime are untouched.
 	rotted := append([]byte(nil), body...)
-	rotted[70*1024] ^= 0xff
+	rotted[70*1024] ^= 0x01
 	if err := os.WriteFile(a.path, rotted, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -350,12 +358,56 @@ func TestDeepRotBeyondPrefixConvicts(t *testing.T) {
 	if got := verdictOf(&groups[0], "a"); got != verdictCorrupt {
 		t.Errorf("the copy whose full hash moved under unchanged metadata: want %q, got %q", verdictCorrupt, got)
 	}
-	if got := verdictOf(&groups[0], "b"); got == verdictCorrupt {
-		t.Errorf("the unchanged twin must not be convicted, got %q", got)
+	if got := verdictOf(&groups[0], "b"); got != verdictIntact {
+		t.Errorf("the twin holding the former content is the original: want %q, got %q", verdictIntact, got)
 	}
 	for _, fe := range groups[0].Files {
 		if fe.Verdict == verdictCorrupt && !strings.Contains(fe.Evidence, "content changed since an earlier scan") {
 			t.Errorf("conviction should carry the history evidence, got %q", fe.Evidence)
+		}
+	}
+}
+
+// The same history with a WHOLE byte changed is not the signature of rot:
+// exiftool -P, touch -r or rsync with times preserved leave exactly this
+// trace behind an edit. The verdict stays open and says why, naming the copy
+// that still holds the former content so the user can compare them.
+func TestWholeByteChangeUnderPreservedTimestampIsNotConvicted(t *testing.T) {
+	dir := t.TempDir()
+	body := bytes.Repeat([]byte{0x5a}, 80*1024)
+	a := mkAt(t, dir, "a/vault.dat", body, fixedTime)
+	b := mkAt(t, dir, "b/vault.dat", body, fixedTime)
+	cache := &hashCache{ents: map[uint64]hcEnt{}, gen: 1}
+	for _, f := range []fEnt{a, b} {
+		pfx, _ := hashFile(f.openContent, 64*1024, nil)
+		full, _ := hashFile(f.openContent, -1, nil)
+		cache.record(f.path, f.size, f.mod.Unix(), pfx, full)
+	}
+	cache.gen++
+	edited := append([]byte(nil), body...)
+	edited[70*1024] = 'Q'
+	if err := os.WriteFile(a.path, edited, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(a.path, fixedTime, fixedTime); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{}
+	acc := newCorruptTop(corruptFileCap)
+	cancel := make(chan struct{})
+	if !s.corruptWindow([]fEnt{a, b}, cache, nil, cancel, acc, 0, 1) {
+		t.Fatal("cancelled")
+	}
+	groups, _ := acc.final(s, corruptFileCap, cancel)
+	if len(groups) != 1 {
+		t.Fatalf("want 1 set, got %d", len(groups))
+	}
+	if got := verdictOf(&groups[0], "a"); got != verdictUnknown {
+		t.Errorf("a whole-byte change under a preserved timestamp: want %q, got %q", verdictUnknown, got)
+	}
+	for _, fe := range groups[0].Files {
+		if fe.Dir == filepath.Join(dir, "a") && !strings.Contains(fe.Evidence, "compare the copies") {
+			t.Errorf("the open verdict must tell the user what to do, got %q", fe.Evidence)
 		}
 	}
 }
@@ -399,7 +451,7 @@ func TestMidScanEditIsNotConvicted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cache.priorContentChanged(a.path, a.size, a.mod.Unix(), preFresh) {
+	if moved, _ := cache.priorContentChanged(a.path, a.size, a.mod.Unix(), preFresh); moved {
 		t.Fatal("a same-generation bucket answered as prior-scan history")
 	}
 
@@ -430,7 +482,7 @@ func TestMidScanEditIsNotConvicted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cache.priorContentChanged(a.path, a.size, a.mod.Unix(), freshPfx) {
+	if moved, _ := cache.priorContentChanged(a.path, a.size, a.mod.Unix(), freshPfx); moved {
 		t.Fatal("a same-generation bucket answered as prior-scan history")
 	}
 }
@@ -636,7 +688,7 @@ func TestSkewedCorruptKeyConvictsDeepRotBehindSharedPrefix(t *testing.T) {
 	// Member f05 rots past the prefix; size and mtime untouched. Its prefix
 	// still matches nine intact siblings.
 	rotted := content(5)
-	rotted[70*1024] ^= 0xff
+	rotted[70*1024] ^= 0x01
 	if err := os.WriteFile(ents[5].path, rotted, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -676,16 +728,18 @@ func TestSkewedCorruptKeyConvictsDeepRotBehindSharedPrefix(t *testing.T) {
 
 // Deep rot found by the skew pass while the store's capped `changed` evidence
 // set is already FULL, in a family big enough that the sample quota is spent
-// before the rotted member is reached. record() still returns true — the
-// detection happened — but the set refuses the entry, so changedPath answers
-// false for exactly the file this pass just proved rotted; and the sample has
-// already kept corruptSkewSample rows, so the ordinary quota would drop it
-// too. The finding must not depend on 131072 other files having claimed the
-// evidence slots first: the pass's own rotted map has to carry it past BOTH
-// bounds — into the sample, and on to the verdict (by the time the sample
+// before the rotted member is reached. record() still reports the change —
+// the detection happened — but the set refuses the entry, so changedPath
+// answers false for exactly the file this pass just proved changed; and the
+// sample has already kept corruptSkewSample rows, so the ordinary quota would
+// drop it too. The evidence must not depend on 131072 other files having
+// claimed the slots first: the pass's own rotted map has to carry it past
+// BOTH bounds — into the sample, and on to the row (by the time the sample
 // reaches corruptWindow the store entry is this generation's, so nothing
-// there can re-detect the history).
-func TestSkewedCorruptKeyConvictsDeepRotWhenChangedSetIsFull(t *testing.T) {
+// there can re-detect the history). No sibling holds the member's former
+// content and the format carries no checksum, so the verdict itself stays
+// open — with the history written next to it.
+func TestSkewedCorruptKeyKeepsDeepRotEvidenceWhenChangedSetIsFull(t *testing.T) {
 	oldKey, oldWin, oldMax := dupKeyFileCap, dupWindowFiles, dupWindowMax
 	dupKeyFileCap, dupWindowFiles, dupWindowMax = 5, 4, 64
 	defer func() { dupKeyFileCap, dupWindowFiles, dupWindowMax = oldKey, oldWin, oldMax }()
@@ -761,9 +815,9 @@ func TestSkewedCorruptKeyConvictsDeepRotWhenChangedSetIsFull(t *testing.T) {
 
 	// Earlier windows have filled the evidence set to its cap — every slot
 	// taken, none by this family.
-	cache.changed = make(map[uint64][16]byte, changedMax)
+	cache.changed = make(map[uint64]changedRec, changedMax)
 	for i := uint64(0); len(cache.changed) < changedMax; i++ {
-		cache.changed[i] = [16]byte{}
+		cache.changed[i] = changedRec{}
 	}
 
 	key := candHash(&fEnt{size: rotten.size, mod: mod}, corruptMatch)
@@ -791,8 +845,8 @@ func TestSkewedCorruptKeyConvictsDeepRotWhenChangedSetIsFull(t *testing.T) {
 	if got == nil {
 		t.Fatalf("the rotted member was sampled away — set holds %d rows", len(groups[0].Files))
 	}
-	if got.Verdict != verdictCorrupt || !strings.Contains(got.Evidence, "content changed since an earlier scan") {
-		t.Fatalf("rot found while the evidence set is full must still convict: verdict %q, evidence %q", got.Verdict, got.Evidence)
+	if got.Verdict != verdictUnknown || !strings.Contains(got.Evidence, "content changed since an earlier scan") {
+		t.Fatalf("history found while the evidence set is full must still reach the row: verdict %q, evidence %q", got.Verdict, got.Evidence)
 	}
 	for _, fe := range groups[0].Files {
 		if fe.Name != "rotten.bin" && fe.Verdict == verdictCorrupt {
@@ -860,7 +914,7 @@ func TestAppendedTrailerIsNotMistakenForTruncation(t *testing.T) {
 	good := append(append([]byte(nil), base...), trailer...)
 
 	probe := mkAt(t, dir, "probe/motion.jpg", good, fixedTime)
-	if st, why := media.VerifyContent(probe.openContent, probe.size); st != media.Proven {
+	if st, why := media.VerifyContent(probe.openContent, probe.size, nil); st != media.Proven {
 		t.Fatalf("a JPEG with an appended trailer must not read as truncated: %v (%s)", st, why)
 	}
 
@@ -954,11 +1008,11 @@ func TestPrefixHistorySurvivesTheDuplicatesPassOverwriting(t *testing.T) {
 	// The duplicates pass gets there first and overwrites the bucket.
 	cache.record(f.path, f.size, f.mod.Unix(), newPfx, newPfx)
 
-	if !cache.priorContentChanged(f.path, f.size, f.mod.Unix(), newPfx) {
+	if moved, _ := cache.priorContentChanged(f.path, f.size, f.mod.Unix(), newPfx); !moved {
 		t.Fatal("the overwrite destroyed the only evidence that the content moved under an unchanged mtime")
 	}
 	// A file nothing ever recorded is not evidence either way.
-	if cache.priorContentChanged(filepath.Join(dir, "never-seen.bin"), 10, 20, newPfx) {
+	if moved, _ := cache.priorContentChanged(filepath.Join(dir, "never-seen.bin"), 10, 20, newPfx); moved {
 		t.Error("a path with no history must not read as changed")
 	}
 }
@@ -973,14 +1027,14 @@ func TestDeepRotCaughtByRecordOverwrite(t *testing.T) {
 	cache.record("/v/deep.bin", 4096, 777, pfx, strings.Repeat("11", 32))
 	cache.gen++ // the next scan loads the store and advances the generation
 	// Same size, mtime AND prefix — only the full hash differs.
-	if !cache.record("/v/deep.bin", 4096, 777, pfx, strings.Repeat("22", 32)) {
+	if moved, _ := cache.record("/v/deep.bin", 4096, 777, pfx, strings.Repeat("22", 32)); !moved {
 		t.Fatal("a full hash moving under an unchanged prefix is the deep-rot signature record() exists to catch")
 	}
-	if !cache.priorContentChanged("/v/deep.bin", 4096, 777, pfx) {
+	if moved, _ := cache.priorContentChanged("/v/deep.bin", 4096, 777, pfx); !moved {
 		t.Fatal("the changed set must remember deep rot after the overwrite")
 	}
 	// Re-recording identical content is not evidence of anything.
-	if cache.record("/v/deep.bin", 4096, 777, pfx, strings.Repeat("22", 32)) {
+	if moved, _ := cache.record("/v/deep.bin", 4096, 777, pfx, strings.Repeat("22", 32)); moved {
 		t.Fatal("an unchanged file must not read as changed")
 	}
 }

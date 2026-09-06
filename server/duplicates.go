@@ -99,7 +99,7 @@ func (s *Server) resolveSkewedKey(cs *spill, key uint64, req ScanReq, sess *fsSe
 	acc *groupTop, lo, hi float64, missingCreated *int) error {
 
 	s.setProgress(lo, "Comparing file contents…")
-	sub, n, err := s.hashSubSpill(cs, handles, rootOf, cancel, acc, cache, false, nil,
+	sub, n, err := s.hashSubSpill(cs, handles, rootOf, cancel, acc, cache, false, nil, nil,
 		func(r *spillRec) bool { return r.key(req.Match) == key })
 	if err != nil {
 		return err
@@ -162,7 +162,7 @@ func (s *Server) resolveSkewedPrefix(sub *spill, keep func(*spillRec) bool, req 
 	cache *hashCache, handles []*dirhandle.Handle, rootOf []string, cancel chan struct{},
 	acc *groupTop, lo, hi float64, missingCreated *int) error {
 
-	full, n, err := s.hashSubSpill(sub, handles, rootOf, cancel, acc, cache, true, nil, keep)
+	full, n, err := s.hashSubSpill(sub, handles, rootOf, cancel, acc, cache, true, nil, nil, keep)
 	if err != nil {
 		return err
 	}
@@ -236,13 +236,16 @@ type skipNoter interface{ noteSkipped(int) }
 
 // onRot, when non-nil, is called with each path whose full read here proved
 // deep rot (record() returned true: content moved under an unchanged size and
-// mtime since an earlier scan). The store's own `changed` set carries the same
-// fact, but that set is capped (changedMax) — the callback is the uncapped
-// carrier for the pass that is consuming the evidence right now, so a full
-// set can never cost it the very finding this read just made.
+// mtime since an earlier scan), and with the content the path used to hold.
+// The store's own `changed` set carries the same fact, but that set is capped
+// (changedMax) — the callback is the uncapped carrier for the pass that is
+// consuming the evidence right now, so a full set can never cost it the very
+// finding this read just made. onUnreadable, when non-nil, receives every
+// entry whose content could not be read: such an entry cannot be tagged, but
+// the conflicting-files pass must still list and judge it.
 func (s *Server) hashSubSpill(src *spill, handles []*dirhandle.Handle, rootOf []string,
 	cancel chan struct{}, acc skipNoter, cache *hashCache, full bool,
-	onRot func(path string), keep func(*spillRec) bool) (*spill, int, error) {
+	onRot func(path, prior string), onUnreadable func(f fEnt, err error), keep func(*spillRec) bool) (*spill, int, error) {
 
 	out, err := newSpill(s.stateDir())
 	if err != nil {
@@ -267,6 +270,9 @@ func (s *Server) hashSubSpill(src *spill, handles []*dirhandle.Handle, rootOf []
 		h, herr := hashFile(f.openContent, 64*1024, cancel)
 		if herr != nil {
 			unreadable++ // it cannot group, but the scan should not pretend it never existed
+			if onUnreadable != nil {
+				onUnreadable(f, herr)
+			}
 			return nil
 		}
 		if full {
@@ -276,10 +282,13 @@ func (s *Server) hashSubSpill(src *spill, handles []*dirhandle.Handle, rootOf []
 				whole, ferr := hashFile(f.openContent, -1, cancel)
 				if ferr != nil {
 					unreadable++
+					if onUnreadable != nil {
+						onUnreadable(f, ferr)
+					}
 					return nil
 				}
-				if cache.record(f.path, f.size, f.mod.Unix(), h, whole) && onRot != nil {
-					onRot(f.path)
+				if moved, prior := cache.record(f.path, f.size, f.mod.Unix(), h, whole); moved && onRot != nil {
+					onRot(f.path, prior)
 				}
 				h = whole
 			}

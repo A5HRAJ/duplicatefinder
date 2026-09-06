@@ -58,10 +58,6 @@ var corruptMatch = MatchOpts{Modified: true}
 // cap is itself the finding.
 var corruptFileCap = 20000
 
-// maxDiffBytes bounds the byte-level comparison. Past it the difference shape
-// goes unexamined rather than reading two very large files a second time.
-const maxDiffBytes = 2 << 30
-
 // Verdict values stored on FileEnt.Verdict. Empty means the row belongs to a
 // tool that does not judge files at all.
 const (
@@ -88,8 +84,12 @@ type corruptFile struct {
 	// timestamped before/after saying the content moved while the metadata
 	// did not: the bit-rot signature.
 	contentChanged bool
-	verdict        string
-	evidence       string
+	// priorHash is the full-content hash the earlier scan recorded for this
+	// path, when contentChanged is set and the store still had it: a sibling
+	// holding exactly that content is the copy the changed one used to be.
+	priorHash string
+	verdict   string
+	evidence  string
 }
 
 // corruptSet is one (size, mtime) family whose members do not all agree.
@@ -233,7 +233,7 @@ func (s *Server) scanCorrupted(cs *spill, nCand int, handles []*dirhandle.Handle
 // unchanged size and mtime. By the time the sample reaches this window the
 // store entry is this generation's, so neither priorContentChanged nor a
 // fresh record() can see that history again; the map is the only witness left.
-func (s *Server) corruptWindow(files []fEnt, cache *hashCache, rotted map[string]bool,
+func (s *Server) corruptWindow(files []fEnt, cache *hashCache, rotted map[string]string,
 	cancel chan struct{}, acc *corruptTop, lo, hi float64) bool {
 
 	span := hi - lo
@@ -286,8 +286,11 @@ func (s *Server) corruptWindow(files []fEnt, cache *hashCache, rotted map[string
 		// first read below in phase B is caught by record()'s return value in
 		// hashMembers instead. rotted answers for what the skew pass's tagging
 		// reads proved — evidence the capped `changed` set may have refused.
-		info[i].contentChanged = rotted[files[i].path] ||
-			cache.priorContentChanged(files[i].path, files[i].size, files[i].mod.Unix(), pfx)
+		if prior, ok := rotted[files[i].path]; ok {
+			info[i].contentChanged, info[i].priorHash = true, prior
+		} else if moved, prior := cache.priorContentChanged(files[i].path, files[i].size, files[i].mod.Unix(), pfx); moved {
+			info[i].contentChanged, info[i].priorHash = true, prior
+		}
 	}, func(done, total int) {
 		s.setProgress(lo+span*0.4*float64(done)/float64(max(total, 1)), "Checking for corrupted copies…")
 	})
@@ -341,7 +344,13 @@ func (s *Server) corruptWindow(files []fEnt, cache *hashCache, rotted map[string
 	}
 
 	for _, idx := range confirmed {
-		acc.add(buildSet(idx, info))
+		// The full hashes may have revealed that members whose prefixes
+		// differed... cannot happen; but members rewritten between the two
+		// reads can converge. A set whose members no longer disagree is not a
+		// conflict, and reporting it would show one variant as if it were two.
+		if c := buildSet(idx, info); c.variants >= 2 {
+			acc.add(c)
+		}
 	}
 	s.setProgress(hi, "Checking for corrupted copies…")
 	return true
@@ -377,8 +386,8 @@ func (s *Server) hashMembers(idx []int, info []corruptFile, cache *hashCache, ca
 		// record() compares the fresh full hash against an earlier scan's
 		// entry; a true return is the deep-rot evidence phase A could not see,
 		// because at phase A only the prefix had been read.
-		if cache.record(e.f.path, e.f.size, e.f.mod.Unix(), e.pfx, h) {
-			e.contentChanged = true
+		if moved, prior := cache.record(e.f.path, e.f.size, e.f.mod.Unix(), e.pfx, h); moved {
+			e.contentChanged, e.priorHash = true, prior
 		}
 	}, func(done, total int) {
 		s.setProgress(lo+(hi-lo)*float64(done)/float64(max(total, 1)), "Checking for corrupted copies…")
@@ -453,15 +462,20 @@ func buildSet(idx []int, info []corruptFile) corruptSet {
 			variants["p:"+e.pfx] = true
 		}
 	}
-	sort.Slice(c.files, func(i, j int) bool { return c.files[i].f.path < c.files[j].f.path })
 	c.variants = len(variants)
 	// One set may not exceed the whole stored-results budget, for the same
 	// reason a duplicate group may not: the snapshot, the state file and the
-	// CSV export are all sized by it. Dropped members are reported.
+	// CSV export are all sized by it. Dropped members are reported — and the
+	// members carrying evidence (an unreadable copy, content that moved under
+	// an unchanged mtime) are kept ahead of the cut whatever their path order,
+	// because they are the point of the report.
 	if len(c.files) > corruptFileCap {
+		flagged := func(m *corruptFile) bool { return m.readErr != nil || m.contentChanged }
+		sort.SliceStable(c.files, func(i, j int) bool { return flagged(&c.files[i]) && !flagged(&c.files[j]) })
 		c.extra = len(c.files) - corruptFileCap
 		c.files = c.files[:corruptFileCap]
 	}
+	sort.Slice(c.files, func(i, j int) bool { return c.files[i].f.path < c.files[j].f.path })
 	return c
 }
 
@@ -499,9 +513,9 @@ const corruptSkewSample = 500
 // set is capped, and a finding made right here must not depend on whether
 // 131072 other files already claimed a slot.
 //
-// One honest gap at this scale: hashSubSpill counts a member it cannot read
-// into the truncation report and drops it, so an I/O error inside a key this
-// large is reported as a number rather than as a convicted row.
+// A member hashSubSpill cannot read is not dropped: it joins the sample, so
+// the ordinary window reads it again, keeps its error and judges it — an I/O
+// error inside a key this large is a convicted row, not a number.
 func (s *Server) corruptSkewedKey(cs *spill, key uint64, handles []*dirhandle.Handle, rootOf []string,
 	cache *hashCache, cancel chan struct{}, acc *corruptTop, res *toolResult, lo float64) bool {
 
@@ -517,9 +531,11 @@ func (s *Server) corruptSkewedKey(cs *spill, key uint64, handles []*dirhandle.Ha
 	// the verdict even when the store's capped `changed` set is full and
 	// cannot hold it — rotted is this pass's own uncapped carrier, alive
 	// only for this one family.
-	rotted := map[string]bool{}
+	rotted := map[string]string{}
+	var unreadable []fEnt
 	sub, _, err := s.hashSubSpill(cs, handles, rootOf, cancel, acc, cache, true,
-		func(path string) { rotted[path] = true },
+		func(path, prior string) { rotted[path] = prior },
+		func(f fEnt, _ error) { unreadable = append(unreadable, f) },
 		func(r *spillRec) bool { return r.key(corruptMatch) == key })
 	if err != nil {
 		return stopped(err)
@@ -532,7 +548,7 @@ func (s *Server) corruptSkewedKey(cs *spill, key uint64, handles []*dirhandle.Ha
 	if terr != nil {
 		return stopped(terr)
 	}
-	if !differ {
+	if !differ && len(unreadable) == 0 {
 		return true // every member holds the same bytes: duplicates, not damage
 	}
 	// Confirmed to disagree. Take a sample that SPANS the variants rather than
@@ -548,7 +564,7 @@ func (s *Server) corruptSkewedKey(cs *spill, key uint64, handles []*dirhandle.Ha
 	kept, dropped := 0, 0
 	sample, _, merr := sub.materialize(func(r *spillRec) bool {
 		if r.rootIdx < len(rootOf) {
-			if p := filepath.Join(rootOf[r.rootIdx], r.rel); rotted[p] || cache.changedPath(p) {
+			if p := filepath.Join(rootOf[r.rootIdx], r.rel); rotHere(rotted, p) || cache.changedPath(p) {
 				kept++
 				return true
 			}
@@ -565,12 +581,23 @@ func (s *Server) corruptSkewedKey(cs *spill, key uint64, handles []*dirhandle.Ha
 		return stopped(merr)
 	}
 	acc.noteSkipped(dropped)
+	// Members that could not be read ride along: the window reads them again,
+	// and a read that fails twice is rung 1's conviction.
+	sample = append(sample, unreadable...)
 	// The sample goes through the ordinary window, so its rows get real hashes
 	// and real verdicts rather than a second, parallel code path. rotted rides
 	// along: the window's own reads cannot re-detect what the tagging pass
 	// already overwrote in the store (a same-generation compare is mute), so
 	// the evidence must arrive with the sample.
 	return s.corruptWindow(sample, cache, rotted, cancel, acc, lo, lo)
+}
+
+// rotHere reports whether the skew pass's own tagging reads proved p moved
+// under an unchanged size and mtime (the map's value, the prior content, may
+// legitimately be unknown).
+func rotHere(rotted map[string]string, p string) bool {
+	_, ok := rotted[p]
+	return ok
 }
 
 // ------------------------------------------------------------ the verdicts
@@ -624,13 +651,21 @@ func (t *corruptTop) final(s *Server, budget int, cancel chan struct{}) ([]Group
 }
 
 // judgeSet decides, for one confirmed set, which members are damaged and which
-// are intact. The ladder runs cheapest-and-strongest first and stops as soon as
-// a member has a verdict; nothing here ever guesses, and a set that survives
-// every rung is left honestly Unknown with both copies shown.
+// are intact. Only positive evidence convicts: a read that fails twice, a
+// container whose own checksums or decode fail, a run of zeros where the other
+// copy holds data, or a one-or-two-bit difference on the side whose content
+// moved under a preserved size and modified time. History alone — content that
+// changed while size and mtime stood still — is evidence but not a verdict:
+// tools that rewrite a file and put its timestamp back (exiftool -P, touch -r,
+// rsync carrying an edit with times preserved) produce exactly that signature,
+// and convicting them would send the user to delete a copy they edited. A
+// member the ladder cannot decide is left honestly Undetermined, with what was
+// seen written next to it.
 func judgeSet(c *corruptSet, cancel chan struct{}) {
-	// Rung 1 — the read itself failed. On a checksumming filesystem this is
-	// not evidence of corruption, it is the corruption: the drive returned an
-	// error because the stored bytes no longer match their checksum.
+	// Rung 1 — the read itself failed, on two attempts (hashFile retries an
+	// I/O error once). Whatever the filesystem — a checksum mismatch on btrfs,
+	// a bad sector elsewhere — the stored bytes cannot be read back, and a copy
+	// that cannot be read is not one to keep.
 	for i := range c.files {
 		m := &c.files[i]
 		if m.readErr == nil {
@@ -638,31 +673,31 @@ func judgeSet(c *corruptSet, cancel chan struct{}) {
 		}
 		if errors.Is(m.readErr, syscall.EIO) {
 			m.verdict, m.evidence = verdictCorrupt,
-				"could not be read — the drive reported an I/O error, which on a checksummed volume means the stored bytes are damaged"
+				"could not be read — the drive reported an I/O error on two attempts, so the stored bytes cannot be read back"
 			continue
 		}
 		m.verdict, m.evidence = verdictUnknown, "could not be read: "+cleanReadErr(m.readErr)
 	}
 
-	// Rung 2 — the content moved while the modified time did not. An earlier
-	// scan recorded this path's content at this same size and mtime, and it
-	// no longer matches — anywhere in the file, since every scan reads its
-	// candidates in full. Before convicting, re-observe the metadata the
-	// evidence cites: the walk's size and mtime must STILL be on disk now.
-	// If they moved, what changed the bytes was an ordinary edit landing
-	// mid-scan — the one interleaving that produces this flag without rot —
-	// and saying "nothing edited this file" about it convicts a healthy copy.
+	// Rung 2 — history. An earlier scan recorded this path's content at this
+	// same size and mtime, and it no longer matches — anywhere in the file,
+	// since every scan reads its candidates in full. Before it counts, the
+	// metadata the evidence cites must STILL be on disk now: if they moved,
+	// what changed the bytes was an ordinary edit landing mid-scan. Even then
+	// it is evidence, not a verdict — the rungs below decide what kind of
+	// change it was.
+	changed := make([]bool, len(c.files))
 	for i := range c.files {
 		m := &c.files[i]
-		if m.verdict == "" && m.contentChanged && unchangedOnDisk(m.f) {
-			m.verdict, m.evidence = verdictCorrupt,
-				"content changed since an earlier scan although its size and modified time did not — nothing edited this file"
-		}
+		changed[i] = m.verdict == "" && m.contentChanged && unchangedOnDisk(m.f)
 	}
+	const historyNote = "its content changed since an earlier scan although its size and modified time did not"
 
 	// Rung 3 — the file's own container. PNG, gzip and ZIP-family members
-	// carry checksums that convict a single copy with no comparison at all;
-	// the rest carry framing that must reach the end of the file.
+	// carry checksums, a JPEG decodes or does not, a PDF's compressed streams
+	// carry checksums: each convicts a single copy with no comparison at all,
+	// and each proves a copy's payload when it passes. The rest carry framing
+	// that must reach the end of the file and can only convict.
 	checked := make([]media.Intactness, len(c.files))
 	proof := make([]string, len(c.files))
 	for i := range c.files {
@@ -676,41 +711,87 @@ func judgeSet(c *corruptSet, cancel chan struct{}) {
 		if m.readErr != nil {
 			continue
 		}
-		st, why := media.VerifyContent(m.f.openContent, m.f.size)
+		st, why := media.VerifyContent(m.f.openContent, m.f.size, cancel)
+		if cancelled(cancel) {
+			return
+		}
 		checked[i], proof[i] = st, why
-		if st == media.Damaged && m.verdict == "" {
-			m.verdict, m.evidence = verdictCorrupt, why
+		if st != media.Damaged || m.verdict != "" {
+			continue
+		}
+		// A file being saved while the validator reads it fails its own
+		// framing for a moment. The walk's size and mtime must still stand,
+		// exactly as rung 2 demands, or the conviction is of a half-written
+		// file, not a damaged one.
+		if !unchangedOnDisk(m.f) {
+			m.verdict, m.evidence = verdictUnknown, "changed on disk while the scan was reading it — scan again"
+			continue
+		}
+		m.verdict, m.evidence = verdictCorrupt, why
+		if changed[i] {
+			m.evidence += "; " + historyNote
 		}
 	}
 
-	// Rung 4 — the shape of the difference. Only worth reading two files again
-	// when the cheaper rungs found nothing, and only when the set holds
-	// exactly two contents to compare.
-	if !anyVerdict(c, verdictCorrupt) && c.variants == 2 && c.size <= maxDiffBytes {
-		a, b := representatives(c)
-		if a >= 0 && b >= 0 {
-			if d, err := media.CompareContent(c.files[a].f.openContent, c.files[b].f.openContent, c.size, cancel); err == nil && d != nil {
-				switch d.Kind {
-				case "zeros", "tail":
-					lost, kept := a, b
-					if d.ZeroSide == 1 {
-						lost, kept = b, a
-					}
-					judgeWithTwins(c, lost, verdictCorrupt, d.Describe(d.ZeroSide))
-					judgeWithTwins(c, kept, verdictIntact, d.Describe(1-d.ZeroSide))
-				default:
-					// A single flipped bit proves the set is damaged but is
-					// perfectly symmetric — saying which side rotted would be
-					// a guess, so it stays a note rather than a verdict.
-					for _, i := range []int{a, b} {
-						judgeWithTwins(c, i, "", d.Describe(i))
-					}
+	// Rung 4 — the shape of a difference. First against the past: a member
+	// whose content moved under a preserved timestamp, beside a sibling that
+	// holds exactly the content it used to have, is compared with its own
+	// former self, so the difference between them IS the change — whatever
+	// else the set holds. Then, when the set holds exactly two contents and
+	// nothing has been decided, the two contents against each other.
+	if !anyVerdict(c, verdictCorrupt) {
+		for i := range c.files {
+			m := &c.files[i]
+			if !changed[i] || m.verdict != "" || m.priorHash == "" {
+				continue
+			}
+			for j := range c.files {
+				t := &c.files[j]
+				if j == i || t.readErr != nil || t.hash != m.priorHash {
+					continue
 				}
+				if cancelled(cancel) {
+					return
+				}
+				if d, err := media.CompareContent(m.f.openContent, t.f.openContent, c.size, cancel); err == nil && d != nil {
+					judgePast(c, d, i, j, historyNote)
+				}
+				break
+			}
+		}
+	}
+	if !anyVerdict(c, verdictCorrupt) && c.variants == 2 {
+		// Skipped when the comparison with the past already described the
+		// difference: it saw the change itself, and this comparison would only
+		// overwrite that with a weaker reading of the same bytes.
+		if a, b := representatives(c); a >= 0 && b >= 0 && c.files[a].evidence == "" && c.files[b].evidence == "" {
+			if d, err := media.CompareContent(c.files[a].f.openContent, c.files[b].f.openContent, c.size, cancel); err == nil && d != nil {
+				judgeShape(c, d, a, b, changed, historyNote)
 			}
 		}
 	}
 
-	// A copy that verifies its own structure, in a set where another copy is
+	// History that nothing corroborated. Say exactly what was seen: for a copy
+	// whose own payload checks out, the change was an edit that kept its
+	// timestamp; for the rest the file carries nothing to tell an edit from
+	// damage. The honest verdict is Undetermined either way.
+	for i := range c.files {
+		m := &c.files[i]
+		if m.verdict != "" || !changed[i] {
+			continue
+		}
+		m.verdict = verdictUnknown
+		if m.evidence != "" {
+			continue // rung 4 already described the difference
+		}
+		if checked[i] == media.Proven {
+			m.evidence = historyNote + ", but " + proof[i] + " — an edit that preserved the timestamp, not damage"
+		} else {
+			m.evidence = historyNote + " — this file carries no checksum to tell an edit that kept its timestamp from damage; compare the copies before deleting either"
+		}
+	}
+
+	// A copy whose own payload verifies, in a set where another copy is
 	// positively damaged, is the one to keep.
 	if anyVerdict(c, verdictCorrupt) {
 		for i := range c.files {
@@ -718,9 +799,6 @@ func judgeSet(c *corruptSet, cancel chan struct{}) {
 			if m.verdict == "" && checked[i] == media.Proven {
 				m.verdict = verdictIntact
 				if m.evidence == "" {
-					// The validator's own words: only some formats carry a
-					// checksum, and claiming one for the rest would overstate
-					// exactly the evidence this column exists to report.
 					m.evidence = proof[i] + ", and another copy in this set is damaged"
 				}
 			}
@@ -730,6 +808,77 @@ func judgeSet(c *corruptSet, cancel chan struct{}) {
 		if c.files[i].verdict == "" {
 			c.files[i].verdict = verdictUnknown
 		}
+	}
+}
+
+// judgeShape turns the byte-level difference between representatives a and b
+// into verdicts. A run of zeros on one side is an interrupted copy or lost
+// blocks, and that side is the damaged one. A one-or-two-bit difference is the
+// signature of bit rot but on its own is symmetric; history breaks the tie —
+// the side whose content moved under a preserved timestamp is the one that
+// rotted, and when the other side holds exactly the content the rotted one
+// used to have, it is the original. Anything larger and non-zero is not the
+// shape of damage: two files that merely share a size and a timestamp, or an
+// edit that kept its timestamp — described, convicting nobody.
+func judgeShape(c *corruptSet, d *media.DiffShape, a, b int, changed []bool, historyNote string) {
+	switch d.Kind {
+	case "zeros", "tail":
+		lost, kept := a, b
+		if d.ZeroSide == 1 {
+			lost, kept = b, a
+		}
+		judgeWithTwins(c, lost, verdictCorrupt, d.Describe(d.ZeroSide))
+		judgeWithTwins(c, kept, verdictIntact, d.Describe(1-d.ZeroSide))
+	case "bitflip":
+		if changed[a] == changed[b] {
+			// Neither or both moved: saying which side rotted would be a guess,
+			// so it stays a note rather than a verdict.
+			for _, i := range []int{a, b} {
+				judgeWithTwins(c, i, "", d.Describe(i))
+			}
+			return
+		}
+		rotted, other := a, b
+		if changed[b] {
+			rotted, other = b, a
+		}
+		judgeWithTwins(c, rotted, verdictCorrupt, d.Describe(rotted)+", and "+historyNote+" — bit rot")
+		if c.files[rotted].priorHash != "" && c.files[other].hash == c.files[rotted].priorHash {
+			judgeWithTwins(c, other, verdictIntact, "holds exactly the content the damaged copy had before it changed")
+		} else {
+			judgeWithTwins(c, other, "", d.Describe(other))
+		}
+	default:
+		for _, i := range []int{a, b} {
+			note := d.Describe(i)
+			if changed[i] {
+				note += "; " + historyNote + " — a spread of changed bytes is an edit that kept its timestamp rather than damage; check the file"
+			}
+			judgeWithTwins(c, i, "", note)
+		}
+	}
+}
+
+// judgePast judges member i, whose content moved under a preserved size and
+// mtime, against sibling j, which holds exactly the content i used to have —
+// so the difference between them is the change itself. A run of zeros on i's
+// side or a one-or-two-bit flip is damage and convicts i, and j is then the
+// original. Anything else could as well be an edit that kept its timestamp,
+// and is described rather than judged: a handful of bytes leaves the question
+// open, a spread of them is an edit.
+func judgePast(c *corruptSet, d *media.DiffShape, i, j int, historyNote string) {
+	const former = "the other copy holds exactly what this file used to contain"
+	switch {
+	case (d.Kind == "zeros" || d.Kind == "tail") && d.ZeroSide == 0:
+		judgeWithTwins(c, i, verdictCorrupt, d.Describe(0)+"; "+historyNote)
+		judgeWithTwins(c, j, verdictIntact, former)
+	case d.Kind == "bitflip":
+		judgeWithTwins(c, i, verdictCorrupt, d.Describe(0)+", and "+historyNote+" — bit rot")
+		judgeWithTwins(c, j, verdictIntact, former)
+	case d.Bytes <= 64:
+		judgeWithTwins(c, i, "", d.Describe(0)+"; "+historyNote+", and "+former+" — a small edit that kept its timestamp, or damage; compare the copies before deleting either")
+	default:
+		judgeWithTwins(c, i, "", d.Describe(0)+"; "+historyNote+", and "+former+" — a spread of changed bytes is an edit that kept its timestamp rather than damage")
 	}
 }
 

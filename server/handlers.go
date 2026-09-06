@@ -104,6 +104,11 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	if s.interrupted != nil {
 		out["interrupted"] = s.interrupted
 	}
+	// A state save that failed: the results on screen are real but will not
+	// survive a restart, and the app says so.
+	if s.saveErr != "" {
+		out["saveError"] = s.saveErr
+	}
 	writeJSON(w, 200, out)
 }
 

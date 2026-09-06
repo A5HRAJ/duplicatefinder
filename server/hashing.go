@@ -4,11 +4,14 @@ package main
 
 import (
 	"encoding/hex"
+	"errors"
 	"io"
 	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
+	"time"
 
 	"lukechampine.com/blake3"
 )
@@ -79,6 +82,19 @@ var hashBufPool = sync.Pool{New: func() any { b := make([]byte, 1024*1024); retu
 // are read from inside the vetted tree — never through a symlink swapped
 // in after enumeration.
 func hashFile(open func() (*os.File, error), limit int64, cancel chan struct{}) (string, error) {
+	h, err := hashOnce(open, limit, cancel)
+	if err != nil && errors.Is(err, syscall.EIO) {
+		// One retry, after a pause. A transient error from a controller or a
+		// cable is not the same thing as bytes the drive can no longer return,
+		// and the conviction that rests on this error must not rest on a single
+		// attempt.
+		time.Sleep(200 * time.Millisecond)
+		h, err = hashOnce(open, limit, cancel)
+	}
+	return h, err
+}
+
+func hashOnce(open func() (*os.File, error), limit int64, cancel chan struct{}) (string, error) {
 	f, err := open()
 	if err != nil {
 		return "", err

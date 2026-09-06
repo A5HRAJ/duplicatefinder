@@ -14,10 +14,12 @@ package main
 import (
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
+	"syscall"
 	"time"
 )
 
@@ -143,22 +145,28 @@ func writeAtomic(path string, mode os.FileMode, noReplace bool, body func(*os.Fi
 		return err
 	}
 	// The rename lives in the directory: sync that too, so the new name
-	// survives the same power loss the data now does.
+	// survives the same power loss the data now does. A filesystem that does
+	// not support syncing a directory says so with EINVAL or ENOTSUP, which is
+	// not a failed write; anything else is.
 	if d, derr := os.Open(dir); derr == nil {
-		d.Sync()
+		serr := d.Sync()
 		d.Close()
+		if serr != nil && !errors.Is(serr, syscall.EINVAL) && !errors.Is(serr, syscall.ENOTSUP) {
+			return serr
+		}
 	}
 	return nil
 }
 
 // saveState snapshots the cached results under s.mu and writes them
-// atomically (writeAtomic: temp + fsync + rename, 0600). Failures are
-// logged, never fatal — a NAS with a full system partition keeps scanning,
-// it just loses restart persistence.
-func (s *Server) saveState() {
+// atomically (writeAtomic: temp + fsync + rename, 0600). A failure is
+// returned so the caller can say so — a NAS with a full system partition
+// keeps scanning, but the user must learn that the results will not survive a
+// restart — and cleared from the state when a later save succeeds.
+func (s *Server) saveState() error {
 	dir := s.stateDir()
 	if dir == "" {
-		return
+		return nil
 	}
 	s.mu.Lock()
 	ps := persistedState{
@@ -194,7 +202,21 @@ func (s *Server) saveState() {
 	})
 	if err != nil {
 		log.Printf("state save failed: %v", err)
+		return err
 	}
+	s.mu.Lock()
+	s.saveErr = ""
+	s.mu.Unlock()
+	return nil
+}
+
+// noteSaveError records a failed state save for /api/state, where the app
+// turns it into a warning that the results on screen will not survive a
+// restart. The next successful save clears it.
+func (s *Server) noteSaveError(err error) {
+	s.mu.Lock()
+	s.saveErr = "results could not be saved to disk (" + err.Error() + ") — they will be lost when the package restarts"
+	s.mu.Unlock()
 }
 
 // lacksFingerprints reports whether any row of a duplicates result carries no

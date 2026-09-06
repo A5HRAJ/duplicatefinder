@@ -31,6 +31,7 @@ type Server struct {
 	refDirs   []string               // reference dirs from the most recent scan
 	lastTool  string                 // tool whose scan finished (and stored) last
 	lastEnd   scanEnd                // how the most recent scan run ended, completed or not
+	saveErr   string                 // the last failed state save, for /api/state; cleared by a successful save
 	nextID    int
 	authToken string // shared secret required on /api/*; "" disables (dev/tests)
 

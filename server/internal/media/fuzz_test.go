@@ -65,7 +65,7 @@ func FuzzVerifyContent(f *testing.F) {
 		open, size := openerFor(t, data)
 		var st Intactness
 		var why string
-		bounded(t, func() { st, why = VerifyContent(open, size) })
+		bounded(t, func() { st, why = VerifyContent(open, size, nil) })
 		if st != Unproven && st != Proven && st != Damaged {
 			t.Fatalf("verdict %d", st)
 		}
