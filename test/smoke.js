@@ -356,6 +356,41 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   check('menu offers FS option set',
     f.type.store.getCount() === 12 && f.sizeOp.store.getCount() === 4 &&
     f.dateBy.store.getCount() === 3);
+  // The Location list is fed from folder paths — user-created data — and
+  // Ext's default list template renders the display field as raw HTML, so
+  // the combo has to carry an escaping template of its own (stored XSS).
+  {
+    const tpl = typeof f.loc.tpl === 'string' ? new window.Ext.XTemplate(f.loc.tpl) : f.loc.tpl;
+    const html = tpl ? tpl.apply({ v: '/x', t: '<img src=x onerror=1>' }) : '';
+    check('Location dropdown escapes folder names', html.indexOf('&lt;img') >= 0 && html.indexOf('<img') < 0);
+  }
+  // Every scan issue is reachable, escaped — not only the first one the toast
+  // quotes: the summary bar links to a dialog listing them all.
+  {
+    const t0 = win.state.tool;
+    const saved = win.state.results[t0];
+    win.state.results[t0] = Object.assign({}, saved, { errors: ['/v/<img src=x onerror=1>: permission denied', '/v/b: permission denied', '… and 3 more locations could not be read'] });
+    win.refreshView();
+    const link = doc.querySelector('.df-summary a.df-issues');
+    check('summary links to the full issue list', !!link && /3 issues/.test(link.textContent));
+    const dlg = win.openIssuesDialog(t0);
+    await sleep(60);
+    const dom = dlg && dlg.getEl() ? dlg.getEl().dom : null;
+    check('issue dialog lists every line, escaped',
+      !!dom && dom.querySelectorAll('.df-issue').length === 3 &&
+      dom.innerHTML.indexOf('&lt;img') >= 0 && !dom.querySelector('img'));
+    if (dlg) dlg.close();
+    // A failed state save rides on the completion toast.
+    win.state.saveError = 'results could not be saved to disk (no space) — they will be lost when the package restarts';
+    win.announceScanIssues(t0);
+    await sleep(20);
+    check('a failed save is announced with the scan issues',
+      /could not be saved to disk/.test(window.__lastToastText || '') && /3 issues/.test(window.__lastToastText || ''));
+    win.state.saveError = '';
+    win.dismissToast();
+    win.state.results[t0] = saved;
+    win.refreshView();
+  }
 
   // Picking any option must not close the whole menu and wipe the rest. Two
   // independent causes can do that, both guarded here because jsdom does no
@@ -1678,14 +1713,14 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   for (let i = 0; i < 80; i++) { st = await api('/state'); if (!st.running) break; await sleep(250); }
   check('raw duplicates scan finished', !!st && !st.running);
   check('daemon stores reference dirs cleaned', JSON.stringify(st.refDirs) === JSON.stringify([vol + '/photo']));
-  const refMove = await api('/move', { files: [vol + '/photo/random.bin'], dest: movedDir, preserve: false });
+  const refMove = await api('/move', { files: [vol + '/photo/random.bin'], dest: movedDir, preserve: false, tool: 'duplicates' });
   check('raw move of a file under "ref/." refused as read-only',
     refMove.moved.length === 0 && refMove.errors.length === 1 && /read-only reference/.test(refMove.errors[0].error));
   check('refused reference file still on disk', fs.existsSync(vol + '/photo/random.bin'));
 
   // 2.2 — requesting every file of a duplicate group moves all but one
   const pairA = vol + '/Backups/A/IMG_0001.JPG', pairB = vol + '/Backups/B/IMG_0001.JPG';
-  const keepOne = await api('/move', { files: [pairA, pairB], dest: movedDir, preserve: false });
+  const keepOne = await api('/move', { files: [pairA, pairB], dest: movedDir, preserve: false, tool: 'duplicates' });
   check('raw move of a whole duplicate group moves exactly one file',
     keepOne.moved.length === 1 && keepOne.errors.length === 1 && /keeping one copy/.test(keepOne.errors[0].error));
   check('one copy of the group survives on disk', fs.existsSync(pairA) !== fs.existsSync(pairB));
@@ -1694,7 +1729,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   // follow-up request for the remaining copy (the two-request drain) must be
   // refused until the next duplicates scan.
   const survivor = fs.existsSync(pairA) ? pairA : pairB;
-  const takeSurvivor = await api('/move', { files: [survivor], dest: movedDir, preserve: false });
+  const takeSurvivor = await api('/move', { files: [survivor], dest: movedDir, preserve: false, tool: 'duplicates' });
   check('survivor of a drained group refused in a follow-up move',
     takeSurvivor.moved.length === 0 && /keeping one copy/.test((takeSurvivor.errors[0] || {}).error || ''));
   check('survivor still on disk', fs.existsSync(survivor));
@@ -1710,19 +1745,19 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   // 3.2 — destinations and sources behind a symlink that resolves outside
   // the volumes are rejected
   const sneaky = vol + '/photo/sneaky';
-  const linkMove = await api('/move', { files: [vol + '/Backups/A/clip.mov'], dest: sneaky, preserve: false });
+  const linkMove = await api('/move', { files: [vol + '/Backups/A/clip.mov'], dest: sneaky, preserve: false, tool: 'duplicates' });
   check('move into symlinked-out-of-volume dest rejected', /outside allowed volumes/.test(linkMove.error || ''));
   check('file not moved through the symlink', fs.existsSync(vol + '/Backups/A/clip.mov'));
   const linkExp = await api('/export', { tool: 'duplicates', dest: sneaky });
   check('export into symlinked-out-of-volume dest rejected', /outside allowed volumes/.test(linkExp.error || ''));
-  const escMove = await api('/move', { files: [sneaky + '/escapee.bin'], dest: movedDir, preserve: false });
+  const escMove = await api('/move', { files: [sneaky + '/escapee.bin'], dest: movedDir, preserve: false, tool: 'duplicates' });
   check('move of a file behind a symlinked parent rejected',
     escMove.moved.length === 0 && /outside allowed volumes/.test((escMove.errors[0] || {}).error || ''));
 
   // ---- Symlink-alias and preserve-mode hardening ---------------------------
   // R2.2a — a reference file requested through a directory alias is refused
   // (the string-prefix guard alone would not match /photoalias/ to /photo)
-  const aliasRef = await api('/move', { files: [vol + '/photoalias/random.bin'], dest: movedDir, preserve: false });
+  const aliasRef = await api('/move', { files: [vol + '/photoalias/random.bin'], dest: movedDir, preserve: false, tool: 'duplicates' });
   check('move of a reference file via a symlink alias refused',
     aliasRef.moved.length === 0 && /read-only reference/.test((aliasRef.errors[0] || {}).error || ''));
   check('aliased reference file still on disk', fs.existsSync(vol + '/photo/random.bin'));
@@ -1730,7 +1765,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   // R2.2b — keep-one cannot be bypassed by naming one group member through
   // an alias: requesting A directly and B via Balias must still hold one back
   const kpA = vol + '/Backups/A/clip.mov', kpB = vol + '/Backups/B/clip.mov';
-  const aliasKeep = await api('/move', { files: [kpA, vol + '/Balias/clip.mov'], dest: movedDir, preserve: false });
+  const aliasKeep = await api('/move', { files: [kpA, vol + '/Balias/clip.mov'], dest: movedDir, preserve: false, tool: 'duplicates' });
   check('keep-one holds when a duplicate group is drained via an alias',
     aliasKeep.moved.length === 1 && aliasKeep.errors.length === 1 && /keeping one copy/.test(aliasKeep.errors[0].error));
   check('one copy of the aliased group survives on disk', fs.existsSync(kpA) !== fs.existsSync(kpB));
@@ -1756,7 +1791,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
 
   // R4 — the daemon moves only what a scan surfaced: an arbitrary in-volume
   // file (present on disk, never part of any cached result) is refused
-  const unscanned = await api('/move', { files: [vol + '/spare/pres.bin'], dest: movedDir, preserve: false });
+  const unscanned = await api('/move', { files: [vol + '/spare/pres.bin'], dest: movedDir, preserve: false, tool: 'duplicates' });
   check('move of a file no scan surfaced is refused',
     unscanned.moved.length === 0 && /not part of the current scan results/.test((unscanned.errors[0] || {}).error || ''));
   check('unscanned file still on disk', fs.existsSync(vol + '/spare/pres.bin'));
@@ -1831,7 +1866,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   const inplaceSrc = vol + '/spare/inplace.bin';
   const selfDest = vol + '/spare';
   const inplaceFlat = await api('/move', {
-    files: [inplaceSrc], dest: selfDest, preserve: false,
+    files: [inplaceSrc], dest: selfDest, preserve: false, tool: 'empty_files',
   });
   check('a plain move into the folder the file already sits in is refused',
     inplaceFlat.moved.length === 0 &&
@@ -1868,7 +1903,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     if (info.additional && info.additional.size > 0) break;
     await sleep(250);
   }
-  const changed = await api('/move', { files: [vol + '/spare/ident.bin'], dest: pres3, preserve: false });
+  const changed = await api('/move', { files: [vol + '/spare/ident.bin'], dest: pres3, preserve: false, tool: 'empty_files' });
   check('move of a file changed since its scan is refused',
     changed.moved.length === 0 && /changed since the scan/.test((changed.errors[0] || {}).error || ''));
   check('changed file still on disk', fs.existsSync(vol + '/spare/ident.bin'));

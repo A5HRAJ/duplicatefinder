@@ -187,6 +187,13 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out := map[string]any{"moved": moved, "errors": errs}
+	s.mu.Lock()
+	if s.saveErr != "" {
+		// The prune above could not be saved: the moved rows would be back
+		// after a restart, and the app tells the user so.
+		out["saveError"] = s.saveErr
+	}
+	s.mu.Unlock()
 	if batch != nil && batch.name != "" {
 		// Name the folder the files actually landed in: under preserve they
 		// are NOT at the path the caller picked, and only the daemon knows

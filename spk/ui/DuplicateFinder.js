@@ -320,6 +320,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		   as a tooltip. Ellipsis needs a block formatting context, hence
 		   inline-block + middle alignment to keep the toolbar's rhythm. */
 		'.df-summary{display:inline-block;max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;}',
+		'.df-issue{white-space:pre-wrap;word-break:break-all;padding:1px 0;}',
 		/* scope-dialog folder lists: rows are selectable (for Remove); the
 		   transparent border absorbs ext-all's 1px hover/selected border so
 		   the text never shifts on hover */
@@ -589,9 +590,13 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				// flight. Two responses then race into the one shared store,
 				// last write wins, and the loser's rows render under the
 				// winner's header, summary and pager. Drop a page whose tool
-				// is no longer the one on screen.
+				// is no longer the one on screen — and when this reply is the
+				// newest one (the tool switched to has no page load of its
+				// own to end the mask, because it has no results), end the
+				// mask here, or "Loading…" sits over the grid until the next
+				// load.
 				if (win.state.tool !== tool) {
-					drop();
+					if (seq === win._pageSeq) fail(); else drop();
 					return;
 				}
 				var page;
@@ -1130,6 +1135,15 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					this.searchField
 				]
 			});
+			// The summary's issues link opens the full list (openIssuesDialog).
+			// The summary is re-rendered on every refresh, so the handler is
+			// delegated from the toolbar rather than bound to the link itself.
+			this.topToolbar.on('afterrender', function (tb) {
+				tb.getEl().on('click', function (ev) {
+					ev.preventDefault();
+					me.openIssuesDialog(me.state.tool);
+				}, me, { delegate: 'a.df-issues' });
+			}, this, { single: true });
 		},
 
 		// The results grid: the checkbox selection model with its padlock
@@ -1579,6 +1593,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					// with: it decides the padlocks and the move's refusals. The
 					// Scope dialog edits a separate list for the NEXT scan.
 					me.state.scanRefDirs = st.refDirs || [];
+					me.noteSaveError(st);
 					if (st.refDirs && st.refDirs.length && !me.state.refDirs.length) {
 						me.state.refDirs = st.refDirs;
 					}
@@ -2020,6 +2035,12 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				var c = new UxCombo(Ext.apply({
 					editable: false, triggerAction: 'all', mode: 'local',
 					store: new Ext.data.ArrayStore({ fields: ['v', 't'], data: pairs }), valueField: 'v', displayField: 't',
+					// Ext's default list template renders the display field as
+					// raw HTML. The Location list is fed from folder PATHS, which
+					// are user-created data (a stored-XSS hazard: a folder named
+					// with markup would run in the administrator's session the
+					// moment the list opened), so every option is escaped here.
+					tpl: '<tpl for="."><div class="x-combo-list-item">{t:htmlEncode}</div></tpl>',
 					value: value, anchor: '100%'
 				}, extra));
 				/* A combo's dropdown renders to document.body by default, which
@@ -2455,7 +2476,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			var txt = '<b>' + fmtCount(total.files || 0) + ' duplicate files</b> in ' + fmtCount(total.groups || 0) +
 				((total.groups || 0) === 1 ? ' group' : ' groups') + ' · ' + fmtBytes(total.reclaimable || 0) + ' reclaimable';
 			if (res.truncated) txt += ' · capped';
-			this.setSummary(txt);
+			this.setSummary(txt + this.issuesLink(res));
 		},
 		// Leads with what the scan could actually convict. A bare file count
 		// would read as "48 corrupted files" when most of those rows are the
@@ -2467,7 +2488,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			var txt = '<b>' + fmtCount(total.files || 0) + ' files</b> in ' + fmtCount(sets) +
 				(sets === 1 ? ' set' : ' sets') + ' · ' + fmtCount(total.corrupt || 0) + ' identified as damaged';
 			if (res.truncated) txt += ' · capped';
-			this.setSummary(txt);
+			this.setSummary(txt + this.issuesLink(res));
 		},
 		summaryTextForFlat: function (t) {
 			var res = this.state.results[t] || {};
@@ -2476,7 +2497,54 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			var rest = t === 'temp_files' ? ' · ' + fmtBytes(total.bytes || 0) + ' total' : '';
 			var txt = '<b>' + fmtCount(total.files || 0) + ' ' + lbl + '</b>' + rest;
 			if (res.truncated) txt += ' · capped';
-			this.setSummary(txt);
+			this.setSummary(txt + this.issuesLink(res));
+		},
+
+		// The summary's pointer to the scan's issue list — every unreadable
+		// location, not only the first one the toast has room to quote. The
+		// count is the only thing rendered, so nothing here needs escaping.
+		issuesLink: function (res) {
+			var n = res && res.errors ? res.errors.length : 0;
+			if (!n) return '';
+			return ' · <a href="#" class="df-issues">\u26a0 ' + fmtCount(n) + (n === 1 ? ' issue' : ' issues') + '</a>';
+		},
+
+		// Every issue the last scan of a tool recorded, in a scrollable list:
+		// the locations the package user could not read (each one is a folder
+		// to grant access to), the daemon's closing "… and N more" line when
+		// its own list ran out, and anything else the scan had to say. Every
+		// line is escaped — they carry folder names.
+		openIssuesDialog: function (tool) {
+			var res = this.state.results[tool];
+			if (!res || !res.errors || !res.errors.length) return null;
+			var n = res.errors.length;
+			var who = this.state.serviceUser ? 'the "' + esc(this.state.serviceUser) + '" user' : "the package's user";
+			var rows = [];
+			Ext.each(res.errors, function (e) { rows.push('<div class="df-issue">' + esc(String(e)) + '</div>'); });
+			var win = new UxModal({
+				owner: this,
+				title: 'Scan Issues — ' + (TOOL_NAME[tool] || tool),
+				width: 640, height: 420, modal: false,
+				cls: 'df-app',
+				layout: 'vbox', layoutConfig: { align: 'stretch' },
+				items: [
+					{ xtype: 'panel', border: false, height: 48, bodyStyle: 'padding:10px 12px 0;font-size:' + FSMALL + ';color:' + FONT2 + ';line-height:1.4;',
+						html: fmtCount(n) + (n === 1 ? ' issue' : ' issues') + ' from the last scan. A location that could not be read needs ' + who +
+							' granted access under Control Panel → Shared Folder → Edit → Permissions → System internal user, then a new scan.' },
+					{ xtype: 'panel', border: false, flex: 1, autoScroll: true, bodyStyle: 'padding:6px 12px;', cls: 'df-mono', html: rows.join('') }
+				],
+				buttons: [new UxButton({ btnStyle: 'blue', text: 'Close', handler: function () { win.close(); } })]
+			});
+			win.show();
+			return win;
+		},
+
+		// A failed state save, as /api/state and the move response report it:
+		// the results on screen are real but will not survive a restart, and
+		// the user has to hear that. Kept on state so the completion toast can
+		// carry it; cleared when the daemon reports a later save succeeded.
+		noteSaveError: function (st) {
+			this.state.saveError = st && st.saveError ? String(st.saveError) : '';
 		},
 
 		// The flat tools sort server-side, so the store's local sortInfo stays
@@ -3130,6 +3198,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					return; // transient until proven otherwise
 				}
 				me._pollErrors = 0;
+				me.noteSaveError(st);
 				// The daemon died mid-scan and came back: a poll then sees
 				// running:false WITH the interruption notice (a healthy scan
 				// always has the notice nil — any admission clears it). The
@@ -3219,12 +3288,14 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			var res = this.state.results[tool];
 			if (!res) return;
 			var parts = [];
+			if (this.state.saveError) parts.push(this.state.saveError);
 			if (res.errors && res.errors.length) {
 				var first = String(res.errors[0]);
 				if (first.length > 90) first = first.substring(0, 90) + '…';
 				var who = this.state.serviceUser ? 'the "' + this.state.serviceUser + '" user' : "the package's user";
-				parts.push(res.errors.length + (res.errors.length === 1 ? ' location' : ' locations') +
-					' could not be read: ' + first + ' — grant ' + who + ' access under Control Panel → Shared Folder → Edit → Permissions → System internal user');
+				parts.push(res.errors.length + (res.errors.length === 1 ? ' issue' : ' issues') +
+					': ' + first + ' — a location that could not be read needs ' + who + ' granted access under Control Panel → Shared Folder → Edit → Permissions → System internal user' +
+					(res.errors.length > 1 ? '; the summary bar links to the full list' : ''));
 			}
 			if (res.truncated) {
 				var tr = res.truncated;
@@ -3446,6 +3517,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			me._movePoll = setInterval(function () {
 				api('/state', 'GET', null, function (err, st) {
 					if (err || !st) return;
+					me.noteSaveError(st);
 					if (st.move && st.move.total) {
 						busy.setProgress(st.move.done, st.move.total,
 							st.move.done + ' of ' + st.move.total +
@@ -3504,12 +3576,16 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					// listing (plus the daemon log) is the only place the
 					// user can still learn WHICH file needs their attention.
 					me.showMoveIssues(paths.length, n, j.errors);
+					if (j.saveError) me.notify(j.saveError);
 				} else {
 					// Under preserve the files are NOT at `dest` — the daemon
 					// created a folder inside it and may have had to number
 					// it, and only the daemon knows which name it got. Report
-					// what it says, never a name derived here.
-					me.notify('Moved ' + n + ' ' + itemNoun(tool, n).toLowerCase() + ' to ' + (j.folder || dest));
+					// what it says, never a name derived here. A save that
+					// failed after the prune rides on the same toast: the
+					// pruned rows would be back after a restart.
+					me.notify('Moved ' + n + ' ' + itemNoun(tool, n).toLowerCase() + ' to ' + (j.folder || dest) +
+						(j.saveError ? ' — ' + j.saveError : ''));
 				}
 			}, { timeout: LONG_OP_TIMEOUT });
 		},
