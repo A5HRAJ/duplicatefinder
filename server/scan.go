@@ -85,13 +85,41 @@ func (s *Server) setProgress(p float64, label string) {
 	s.mu.Lock()
 	if s.job.Running {
 		if p >= 0 {
-			s.job.Progress = p
+			s.job.Progress = s.mapBand(p)
 		}
 		if label != "" {
 			s.job.Label = label
 		}
 	}
 	s.mu.Unlock()
+}
+
+// setBand maps the progress a pass reports into one slice of the bar. Every
+// pass after the walk reports in the 15→96 frame of a scan that runs alone;
+// when several run in one scan, each gets a band of that frame, so the bar
+// climbs once from start to finish instead of falling back at every pass
+// boundary. Zero clears the band (identity). Called on the scan goroutine
+// only; read under mu by setProgress.
+func (s *Server) setBand(lo, hi float64) {
+	s.mu.Lock()
+	s.bandLo, s.bandHi = lo, hi
+	s.mu.Unlock()
+}
+
+// mapBand applies the current band to a pass-frame percentage. Called with
+// mu held.
+func (s *Server) mapBand(p float64) float64 {
+	if s.bandHi <= s.bandLo {
+		return p
+	}
+	const frameLo, frameHi = 15.0, 96.0
+	if p <= frameLo {
+		return s.bandLo
+	}
+	if p >= frameHi {
+		return s.bandHi
+	}
+	return s.bandLo + (p-frameLo)/(frameHi-frameLo)*(s.bandHi-s.bandLo)
 }
 
 func cancelled(cancel chan struct{}) bool {
@@ -119,66 +147,95 @@ const (
 // advancing, so files the dead run already read in full are not read again.
 // 0 means a normal scan (including a resume of a run that died before it
 // opened the store — there is nothing of its reading to continue).
+//
+// One scan runs every requested tool over ONE walk of the scope. The walk is
+// the whole cost of the metadata tools and a large part of the duplicates
+// scan, and five tools walking the volume in turn would pay it five times.
+// Each tool's result is published the moment its pass finishes, so a scan
+// stopped part-way keeps what it had already found.
 func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel chan struct{}, resumeGen uint32) {
-	res := &toolResult{Tool: req.Tool}
-	// completed means the scan ran its work to the end. Results are stored
-	// only then — but judged by THIS scan's own progress, not by whether
-	// the cancel channel was closed: a cancel that arrives after the work
-	// finished can no longer save anything and must not discard results.
+	tools, err := req.toolList()
+	if err != nil {
+		// handleScan validated the request; this is the belt to that brace.
+		log.Printf("scan refused: %v", err)
+		s.mu.Lock()
+		s.job = jobState{}
+		s.mu.Unlock()
+		return
+	}
+	want := map[string]bool{}
+	for _, t := range tools {
+		want[t] = true
+	}
+	// base collects what every result shares: the resolved roots and the
+	// errors of the walk. Results are created from it after the walk.
+	base := &toolResult{}
+	newResult := func(tool string) *toolResult {
+		return &toolResult{Tool: tool, Roots: base.Roots, Errors: append([]string{}, base.Errors...)}
+	}
+	// A result is published the moment its pass finishes — under mu, so the
+	// app's next poll sees it — and remembered here for the bookkeeping at
+	// the end. Moves are refused while a scan runs, so a duplicates result
+	// landing mid-scan changes nothing a move could act on yet.
+	published := map[string]*toolResult{}
+	publish := func(res *toolResult) {
+		res.Scanned = time.Now().Format(time.RFC3339)
+		s.mu.Lock()
+		s.results[res.Tool] = res
+		s.invalidateDerivedLocked() // views and date spans describe the result just replaced
+		if res.Tool == "duplicates" {
+			s.keepers = nil // fresh groups supersede recorded survivors
+		}
+		s.mu.Unlock()
+		published[res.Tool] = res
+	}
+	// current names the pass in flight, so a panic can be written into the
+	// result of the tool that was running and nothing else.
+	current := ""
+	// completed means every requested pass ran to its end. Judged by THIS
+	// scan's own progress, not by whether the cancel channel was closed: a
+	// cancel that arrives after the work finished can no longer save anything
+	// and must not discard results.
 	completed := false
-	// corrRes is the duplicates scan's second result: the corrupted-files
-	// category. It is stored under the same completed gate and inside the same
-	// lock section as res, so the two always describe the same scan — a cancel
-	// or a panic that drops one must never leave the other on screen claiming
-	// to be current. Nil for every other tool, and nilled out if the pass could
-	// not run, in which case the previous one is left alone rather than
-	// replaced by a blank.
-	var corrRes *toolResult
 	// The marker records this scan in flight; every controlled ending clears
 	// it, so a marker found at the next daemon start means an interruption.
-	// Gen 0 for now: the duplicates pass rewrites the marker once it has
-	// opened the hash store and knows the generation a resume would need.
+	// Gen 0 for now: the content pass rewrites the marker once it has opened
+	// the hash store and knows the generation a resume would need.
 	s.writeMarker(&req, 0)
 	defer func() {
 		if r := recover(); r != nil {
-			res.Errors = append(res.Errors, fmt.Sprintf("internal error: %v", r))
-			completed = true // surface the failure to the UI rather than vanishing
-			// A panic mid-pass leaves the corrupted-files result half-built;
-			// storing it would show the user a set list from a scan that did
-			// not finish.
-			corrRes = nil
+			// The results already published were complete when they were
+			// published and stand. The pass that panicked surfaces its
+			// failure as its tool's result rather than vanishing.
+			if current != "" {
+				res := newResult(current)
+				res.Errors = append(res.Errors, fmt.Sprintf("internal error: %v", r))
+				publish(res)
+			}
+			completed = true
 		}
-		res.Scanned = time.Now().Format(time.RFC3339)
 		s.mu.Lock()
-		if completed {
-			s.results[req.Tool] = res
-			if corrRes != nil {
-				corrRes.Scanned = res.Scanned
-				s.results["corrupted_files"] = corrRes
-			}
-			s.invalidateDerivedLocked() // views and date spans describe the results just replaced
-			// Deliberately the REQUESTED tool, not the side-effect one: the
-			// UI's completion poll opens whatever lastTool names.
-			s.lastTool = req.Tool
+		if len(published) > 0 {
+			// The view the app opens when the scan ends: the tool it was
+			// looking at if that tool was scanned, else the first one.
+			s.lastTool = req.openTool(tools)
 			// The reference folders a move must respect are the ones the
-			// STORED results were scanned with — published here, at
-			// completion, never at admission: a cancelled scan leaves the
-			// old results on screen, so it must leave their protection too.
+			// STORED results were scanned with — published here, at the
+			// end, never at admission: a cancelled scan that published
+			// nothing leaves the old results on screen, so it must leave
+			// their protection too.
 			s.refDirs = uniquePaths(req.RefDirs)
-			if req.Tool == "duplicates" {
-				s.keepers = nil // fresh groups supersede recorded survivors
-			}
 		}
 		// How this run ended, for /api/state: the UI's poller has to tell a
 		// stop from a finish, and lastTool alone cannot.
-		s.lastEnd = scanEnd{Tool: req.Tool, Completed: completed}
+		s.lastEnd = scanEnd{Tool: s.lastTool, Tools: tools, Completed: completed}
 		s.mu.Unlock()
 		// Results reach the disk BEFORE the marker goes and BEFORE the job
 		// slot is released: a crash inside saveState must still find the
 		// marker, so the loss is reported rather than silent — and a scan
 		// admitted in between must not have ITS fresh marker deleted by
 		// this one's os.Remove.
-		if completed {
+		if len(published) > 0 {
 			if err := s.saveState(); err != nil {
 				// The results are on screen but not on disk. The marker stays:
 				// a restart then reports the scan as interrupted and offers to
@@ -198,12 +255,12 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 	}()
 
 	s.setProgress(2, "Enumerating directories…")
-	safeRoots := scanRoots(req, roots, res)
+	safeRoots := scanRoots(req, roots, base)
 
 	// The pinned root handles must outlive every content read below —
-	// hashing and EXIF open entries through them, never by raw path. Each
-	// pass stores its handles here the moment its walk returns, so this
-	// close covers a panic anywhere after that point.
+	// hashing and EXIF open entries through them, never by raw path. They are
+	// stored the moment the walk returns, so this close covers a panic
+	// anywhere after that point.
 	var handles []*dirhandle.Handle
 	defer func() {
 		for _, h := range handles {
@@ -211,38 +268,184 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 		}
 	}()
 
-	var outcome scanOutcome
-	switch req.Tool {
-	case "duplicates":
-		corrRes = &toolResult{Tool: "corrupted_files", Roots: res.Roots}
-		outcome = s.scanDuplicatesTool(req, safeRoots, sess, cancel, resumeGen, res, corrRes, &handles)
-	case "empty_files", "temp_files":
-		outcome = s.scanFlatTool(req, safeRoots, cancel, res, &handles)
-	case "empty_folders":
-		outcome = s.scanEmptyFoldersTool(req, safeRoots, sess, cancel, res, &handles)
-	default:
-		// This switch is the only thing that decides what a scan DOES, and it
-		// is reached with any id validTools accepts. Without this arm, adding a
-		// tool id and forgetting its case would run nothing, fall through to
-		// completed = true below, and store an EMPTY result over whatever the
-		// tool had — silent data loss caused by registration alone. Refusing
-		// leaves the existing result untouched (completed stays false).
-		log.Printf("scan requested for tool %q, which has no scan implementation", req.Tool)
-		return
+	// The consumers of the one walk: the empty-folder frames (which also need
+	// the directories emitted), the flat tools' bounded lists, and the
+	// content tools' spill log with its two candidate-key counters.
+	var ef *emptyFolderScan
+	if want["empty_folders"] {
+		ef = newEmptyFolderScan()
 	}
-	switch outcome {
-	case scanCancelled:
-		return // partial results are dropped
-	case scanAborted:
-		completed = true // the pass recorded why; that error is the result
-		return
+	flatKeep := map[string]func(*fEnt) bool{
+		"empty_files": func(f *fEnt) bool { return f.size == 0 },
+		"temp_files":  func(f *fEnt) bool { return isTempName(f.name) },
 	}
+	tops := map[string]*boundedTop{}
+	for t := range flatKeep {
+		if want[t] {
+			tops[t] = newBoundedTop(flatFileCap, func(a, b *fEnt) bool { return a.path < b.path })
+		}
+	}
+	contentTools := []string{}
+	for _, t := range []string{"duplicates", "corrupted_files"} {
+		if want[t] {
+			contentTools = append(contentTools, t)
+		}
+	}
+	var sp *spill
+	var counter, corrCounter *keyCounter
+	var spillErr error
+	if len(contentTools) > 0 {
+		if sp, err = newSpill(s.stateDir()); err != nil {
+			for _, t := range contentTools {
+				res := newResult(t)
+				res.Errors = append(res.Errors, "scan aborted — cannot create the scan spill file: "+err.Error())
+				publish(res)
+			}
+			completed = true
+			return
+		}
+		defer sp.close()
+		// Two candidate keys are counted over the one walk: the duplicates
+		// key, which folds in whatever match criteria were requested, and the
+		// conflicting-files key, which is size + modified time and nothing
+		// else. They share the counter's fixed memory budget.
+		counter = newKeyCounterShare(1)
+		corrCounter = newKeyCounterShare(1)
+	}
+	var unreadable func(string)
+	if ef != nil {
+		unreadable = ef.noteUnreadable
+	}
+	walkErrs, hs, rootOf := s.walkStream(safeRoots, req.Recurse, ef != nil, cancel, func(idx int, f fEnt) {
+		if ef != nil {
+			ef.visit(idx, f)
+		}
+		if f.isDir {
+			return
+		}
+		for t, top := range tops {
+			if flatKeep[t](&f) {
+				top.add(f)
+			}
+		}
+		if sp != nil && f.size > 0 {
+			counter.add(candHash(&f, req.Match))
+			corrCounter.add(candHash(&f, corruptMatch))
+			if spillErr == nil {
+				spillErr = sp.add(idx, &f)
+			}
+		}
+	}, unreadable)
+	handles = hs
+	base.Errors = append(base.Errors, walkErrs...)
 	if cancelled(cancel) {
-		return // cancelled mid-scan: partial results are dropped
+		return // the walk is shared: a stop here has nothing complete to keep
 	}
+
+	// The flat tools are finished the moment the walk is: their lists are
+	// already bounded and ordered.
+	for _, t := range []string{"empty_files", "temp_files"} {
+		top := tops[t]
+		if top == nil {
+			continue
+		}
+		current = t
+		res := newResult(t)
+		ents, trunc := top.final()
+		res.Files = s.fileEnts(ents)
+		res.Truncated = trunc
+		publish(res)
+	}
+
+	// The passes that still have work to do share the 15→96 band of the
+	// progress bar in proportion to what they cost: confirming empty folders
+	// is one round trip per candidate, the content pass reads every candidate
+	// in full.
+	bands := progressBands(ef != nil, len(contentTools) > 0)
+
+	if ef != nil {
+		current = "empty_folders"
+		s.setBand(bands["empty_folders"][0], bands["empty_folders"][1])
+		res := newResult("empty_folders")
+		var confirmErrs []string
+		res.Files, res.Truncated, confirmErrs = ef.finish(s, cancel, func(p string) (bool, error) {
+			return confirmEmpty(p, sess)
+		})
+		if cancelled(cancel) {
+			return // finish stopped part-way: the list is not the answer
+		}
+		res.Errors = append(res.Errors, confirmErrs...)
+		publish(res)
+	}
+
+	if len(contentTools) > 0 {
+		current = contentTools[0]
+		s.setBand(bands["content"][0], bands["content"][1])
+		if spillErr != nil {
+			for _, t := range contentTools {
+				res := newResult(t)
+				res.Errors = append(res.Errors, "scan aborted — cannot write the scan spill file (disk full?): "+spillErr.Error())
+				publish(res)
+			}
+			completed = true
+			return
+		}
+		// The duplicates result is always built — the conflicting-files pass
+		// rides on its hashing — but stored only when it was asked for.
+		res := newResult("duplicates")
+		var corrRes *toolResult
+		if want["corrupted_files"] {
+			corrRes = newResult("corrupted_files")
+		}
+		outcome := s.scanContent(req, sess, cancel, resumeGen, sp, counter, corrCounter, hs, rootOf, res, corrRes)
+		if outcome == scanCancelled || cancelled(cancel) {
+			return
+		}
+		if outcome == scanFinished {
+			s.setBand(0, 0)
+			s.fetchCreatedDates(sess, res, corrRes, cancel)
+		}
+		// scanAborted: the pass recorded why, and that error is the result.
+		if want["duplicates"] {
+			publish(res)
+		}
+		if corrRes != nil {
+			publish(corrRes)
+		}
+	}
+	s.setBand(0, 0)
 	completed = true
-	s.fetchCreatedDates(sess, res, corrRes, cancel)
 	s.setProgress(100, "Finalizing results…")
+}
+
+// progressBands splits the 15→96 span of the bar between the passes that run
+// after the walk, weighting the content pass four to one over the empty-folder
+// confirmation. A pass that is not requested gets no band.
+func progressBands(emptyFolders, content bool) map[string][2]float64 {
+	const lo, hi = 15.0, 96.0
+	weights := map[string]float64{}
+	if emptyFolders {
+		weights["empty_folders"] = 1
+	}
+	if content {
+		weights["content"] = 4
+	}
+	total := 0.0
+	for _, w := range weights {
+		total += w
+	}
+	out := map[string][2]float64{}
+	at := lo
+	for _, name := range []string{"empty_folders", "content"} {
+		w, ok := weights[name]
+		if !ok {
+			continue
+		}
+		next := at + (hi-lo)*w/total
+		out[name] = [2]float64{at, next}
+		at = next
+	}
+	return out
 }
 
 // scanRoots re-resolves the requested roots and de-overlaps them by canonical
@@ -284,90 +487,11 @@ func scanRoots(req ScanReq, roots []string, res *toolResult) []string {
 	return safeRoots
 }
 
-// scanFlatTool is the empty-files or temporary-files scan: a filter over the
-// walk into a bounded, path-ordered list.
-func (s *Server) scanFlatTool(req ScanReq, roots []string, cancel chan struct{}, res *toolResult, handles *[]*dirhandle.Handle) scanOutcome {
-	keep := func(f *fEnt) bool { return f.size == 0 }
-	if req.Tool == "temp_files" {
-		keep = func(f *fEnt) bool { return isTempName(f.name) }
-	}
-	top := newBoundedTop(flatFileCap, func(a, b *fEnt) bool { return a.path < b.path })
-	walkErrs, hs, _ := s.walkStream(roots, req.Recurse, false, cancel, func(_ int, f fEnt) {
-		if !f.isDir && keep(&f) {
-			top.add(f)
-		}
-	}, nil)
-	*handles = hs
-	res.Errors = append(res.Errors, walkErrs...)
-	if cancelled(cancel) {
-		return scanCancelled
-	}
-	ents, trunc := top.final()
-	res.Files = s.fileEnts(ents)
-	res.Truncated = trunc
-	return scanFinished
-}
-
-// scanEmptyFoldersTool is the empty-folders scan. The walk is consumed as it
-// arrives: a stack of open directories, one frame per level, decides
-// topmost-emptiness on the way back up, and nothing proportional to the
-// directory count is ever held. Candidates are then confirmed through File
-// Station's own listing.
-func (s *Server) scanEmptyFoldersTool(req ScanReq, roots []string, sess *fsSession, cancel chan struct{}, res *toolResult, handles *[]*dirhandle.Handle) scanOutcome {
-	ef := newEmptyFolderScan()
-	walkErrs, hs, _ := s.walkStream(roots, req.Recurse, true, cancel, ef.visit, ef.noteUnreadable)
-	*handles = hs
-	res.Errors = append(res.Errors, walkErrs...)
-	if cancelled(cancel) {
-		return scanCancelled
-	}
-	var confirmErrs []string
-	res.Files, res.Truncated, confirmErrs = ef.finish(s, cancel, func(p string) (bool, error) {
-		return confirmEmpty(p, sess)
-	})
-	res.Errors = append(res.Errors, confirmErrs...)
-	return scanFinished
-}
-
-// scanDuplicatesTool is the duplicates scan, and the conflicting-files pass
-// that rides on its walk. It fills res and corrRes; the pinned root handles go
-// to handles the moment the walk returns, so the caller's deferred close
-// covers every later step.
-func (s *Server) scanDuplicatesTool(req ScanReq, roots []string, sess *fsSession, cancel chan struct{}, resumeGen uint32, res, corrRes *toolResult, handles *[]*dirhandle.Handle) scanOutcome {
-	// Pass 1: stream the walk into a compact spill file plus a bounded
-	// candidate-key counter — nothing per-file stays in RAM.
-	sp, err := newSpill(s.stateDir())
-	if err != nil {
-		res.Errors = append(res.Errors, "scan aborted — cannot create the scan spill file: "+err.Error())
-		return scanAborted
-	}
-	defer sp.close()
-	// Two candidate keys are counted over the one walk: the duplicates key,
-	// which folds in whatever match criteria were requested, and the
-	// corrupted-files key, which is size + modified time and nothing else.
-	// They share the counter's fixed memory budget rather than doubling it.
-	counter := newKeyCounterShare(1)
-	corrCounter := newKeyCounterShare(1)
-	var spillErr error
-	walkErrs, hs, rootOf := s.walkStream(roots, req.Recurse, false, cancel, func(idx int, f fEnt) {
-		if f.isDir || f.size == 0 {
-			return
-		}
-		counter.add(candHash(&f, req.Match))
-		corrCounter.add(candHash(&f, corruptMatch))
-		if spillErr == nil {
-			spillErr = sp.add(idx, &f)
-		}
-	}, nil)
-	*handles = hs
-	res.Errors = append(res.Errors, walkErrs...)
-	if cancelled(cancel) {
-		return scanCancelled
-	}
-	if spillErr != nil {
-		res.Errors = append(res.Errors, "scan aborted — cannot write the scan spill file (disk full?): "+spillErr.Error())
-		return scanAborted
-	}
+// scanContent is the content pass over the walk's spill log: the duplicates
+// scan, and the conflicting-files pass that rides on its hashing. It fills res
+// and, when non-nil, corrRes. The spill, the counters and the pinned handles
+// come from the shared walk.
+func (s *Server) scanContent(req ScanReq, sess *fsSession, cancel chan struct{}, resumeGen uint32, sp *spill, counter, corrCounter *keyCounter, hs []*dirhandle.Handle, rootOf []string, res, corrRes *toolResult) scanOutcome {
 	// Pass 2: distil the collision candidates into a second, much smaller
 	// spill — still one record at a time, so the candidate population never
 	// has to fit in RAM to be identified.
@@ -404,7 +528,7 @@ func (s *Server) scanDuplicatesTool(req ScanReq, roots []string, sess *fsSession
 	res.Groups, res.Truncated = acc.final(s, dupFileCap, cancel)
 	m := req.Match
 	res.Match = &m
-	// The corrupted-files pass, over its own candidates. It runs after the
+	// The conflicting-files pass, over its own candidates. It runs after the
 	// duplicates result is complete so a failure here can never cost that
 	// result, and it shares the hash cache — most of the content it needs
 	// has just been read.
@@ -414,9 +538,9 @@ func (s *Server) scanDuplicatesTool(req ScanReq, roots []string, sess *fsSession
 			return scanCancelled
 		}
 		corrRes.Groups, corrRes.Truncated = cacc.final(s, corruptFileCap, cancel)
-		if err := cache.save(); err != nil {
-			log.Printf("hash cache save failed: %v", err)
-		}
+	}
+	if err := cache.save(); err != nil {
+		log.Printf("hash cache save failed: %v", err)
 	}
 	return scanFinished
 }
@@ -447,6 +571,13 @@ func (s *Server) distilCandidates(req ScanReq, sp *spill, counter, corrCounter *
 		cs.close()
 		res.Errors = append(res.Errors, "scan aborted — cannot read the scan spill file: "+err.Error())
 		return nil, 0, nil, 0, false
+	}
+	if corrRes == nil {
+		// Conflicting Files was not asked for: no second sweep, no second spill.
+		sp.onEach = nil
+		corrCounter.release()
+		sp.close()
+		return cs, nCand, nil, 0, true
 	}
 	// The label follows the work: without this the second sweep replays the
 	// first one's progress band saying "Indexing duplicate candidates…",

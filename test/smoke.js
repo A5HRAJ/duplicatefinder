@@ -77,6 +77,24 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   check('each rail item has an SVG icon (not escaped text)', doc.querySelectorAll('.df-rail-item svg.df-rail-ico').length === 5);
   check('selected rail row uses DSM-themed class (inherits highlight)', doc.querySelectorAll('.df-rail-item.x-grid3-row-selected').length === 1);
   check('rail item labels present alongside icons', /Duplicate Files/.test((doc.querySelector('.df-rail-label') || {}).textContent || ''));
+  // Each rail row carries a checkbox saying whether Scan runs the tool — every
+  // tool by default — and clicking the box toggles it without changing the view.
+  check('each rail row has a tool checkbox, all ticked by default',
+    doc.querySelectorAll('.df-rail-item .df-tool-check').length === 5 &&
+    doc.querySelectorAll('.df-rail-item .df-tool-check.df-on').length === 5 &&
+    win.checkedTools().length === 5);
+  {
+    const toolBefore = win.state.tool;
+    const box = doc.querySelectorAll('.df-rail-item .df-tool-check')[1];
+    box.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    await sleep(30);
+    check('clicking a tool checkbox unticks the tool and keeps the view',
+      win.state.tools.empty_folders === false && win.checkedTools().length === 4 && win.state.tool === toolBefore &&
+      doc.querySelectorAll('.df-rail-item .df-tool-check.df-on').length === 4);
+    win.toggleTool('empty_folders');
+    check('toggling it back restores the full set', win.checkedTools().length === 5);
+  }
+  check('the scope section lists the folders to scan', doc.querySelectorAll('.df-scope-hdr').length === 1 && win.scopeList.getStore().getCount() === win.state.dirs.length + win.state.refDirs.length);
   // The read-only category is "Conflicting Files": "Corrupted" would assert of
   // every row what the scan can only prove of a few, so it survives as the
   // per-row verdict only, which is why the labels are checked separately
@@ -162,7 +180,10 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   win.stopPolling();
   check('teardown clears progress refs', win.progressWin === null && win.progressBar === null);
 
-  // drive a duplicates scan through the real backend
+  // drive a scan through the real backend — every ticked tool over one walk.
+  // Temporary Files stays unticked until its own section, so a tool is still
+  // unscanned for the idle-card check further down.
+  win.state.tools.temp_files = false;
   const dupSeq = win.__loads;
   win.startScan();
   for (let i = 0; i < 40 && !win.state.scanned.duplicates; i++) await sleep(300);
@@ -906,13 +927,21 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   // unlocking rows on the spot would only have the move refuse every one of
   // them as read-only.
   const someDir = win.store.getAt(0).get('path');
-  win.state.refDirs.push(someDir);
-  win.reloadPage();
-  await sleep(600);
   {
+    // The reference list is the daemon's: an edit in the sidebar reaches it
+    // at once, and the padlocks follow without a rescan.
+    const prev = win.state.refDirs.slice();
+    win.state.refDirs.push(someDir);
+    win.applyRefDirs(prev, '');
+    for (let i = 0; i < 40 && (win.state.scanRefDirs || []).indexOf(someDir) < 0; i++) await sleep(100);
+    await sleep(600);
     let n = 0;
     win.store.each((r) => { if (r.get('prot')) n++; });
-    check('editing the Scope list alone protects nothing until a rescan', n === 0);
+    check('a folder marked read-only in the sidebar protects its rows at once', n >= 1 &&
+      (win.state.scanRefDirs || []).indexOf(someDir) >= 0);
+    check('the scope list shows the read-only folder with its padlock',
+      win.scopeList.getStore().getCount() === win.state.dirs.length + win.state.refDirs.length &&
+      /\ud83d\udd12/.test(win.scopeList.getEl().dom.textContent));
   }
   {
     const seq = win.__loads;
@@ -1014,6 +1043,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   {
     const tfSeq = win.__loads;
     win.setTool('temp_files');
+    win.state.tools.temp_files = true;
     win.startScan();
     for (let i = 0; i < 40 && !win.state.scanned.temp_files; i++) await sleep(300);
     await waitForLoadAfter(win, tfSeq, 1);
@@ -1561,7 +1591,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     // Resume is only live when it matches the current settings — so the
     // planted notices mirror the harness state exactly, and the drift leg
     // below varies one field.
-    const noticeFor = () => ({ tool: 'duplicates', gen: 3,
+    const noticeFor = () => ({ tool: 'duplicates', tools: win.checkedTools(), gen: 3,
       dirs: win.state.dirs.slice(), refDirs: (win.state.refDirs || []).slice(),
       recurse: true,
       match: { name: !!win.state.match.name, modified: !!win.state.match.modified,
@@ -1660,17 +1690,19 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
       !!win._interrupted && win._interrupted.gen === 5);
     check('and is announced as an interruption, not a completion',
       /interrupted by a restart/.test(toastMsg || ''));
-    // A Scan on a DIFFERENT tool clears the daemon's notice — and the dead
-    // run's generation with it — so it must ask first, never discard
+    // A Scan that leaves Duplicate Files out clears the daemon's notice — and
+    // the dead run's generation with it — so it must ask first, never discard
     // silently behind the toast's promise of a resume offer.
     stateNotice = noticeFor();
     win._interrupted = noticeFor();
     scanBody = null;
     const toolBefore = win.state.tool;
+    const dupBefore = win.state.tools.duplicates;
     win.state.tool = 'empty_folders';
+    win.state.tools.duplicates = false;
     win.startScan();
     await sleep(100);
-    check('a Scan on another tool asks before discarding the interrupted run',
+    check('a Scan without Duplicate Files asks before discarding the interrupted run',
       scanBody === null && /Discard the interrupted scan\?/.test(doc.body.textContent));
     clickBtn(/^Cancel$/);
     await sleep(100);
@@ -1680,8 +1712,11 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     await sleep(100);
     clickBtn(/^Scan Anyway$/);
     await sleep(100);
-    check("Scan Anyway runs the other tool's scan", !!scanBody && scanBody.tool === 'empty_folders');
+    check('Scan Anyway runs the ticked tools without Duplicate Files',
+      !!scanBody && scanBody.tools.indexOf('empty_folders') >= 0 && scanBody.tools.indexOf('duplicates') < 0 &&
+      scanBody.tool === 'empty_folders');
     win.state.tool = toolBefore;
+    win.state.tools.duplicates = dupBefore;
     win._interrupted = null;
     window.Ext.Ajax.request = oaScan;
   }
@@ -1701,9 +1736,11 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   // The read-only rule belongs to the daemon, not the UI: hiding the Move
   // button is presentation. A raw caller must be refused both ways, or
   // "Conflicting Files never moves anything" is only true of the buttons.
-  const roScan = await api('/scan', { tool: 'corrupted_files', dirs: [volRoot], recurse: true });
-  check('daemon refuses a direct scan of the read-only tool (' + JSON.stringify(roScan) + ')',
-    /Duplicate Files scan/.test(JSON.stringify(roScan)));
+  // Conflicting Files can be scanned for on its own: the request runs the
+  // content pass and stores only that result.
+  const roScan = await api('/scan', { tools: ['corrupted_files'], dirs: [volRoot + '/Backups'], recurse: true });
+  check('a scan may name Conflicting Files alone (' + JSON.stringify(roScan) + ')', roScan.started === true);
+  for (let i = 0; i < 200; i++) { const st = await api('/state'); if (st && st.running === false) break; await sleep(100); }
   const roMove = await api('/move', {
     files: [volRoot + '/Backups/damaged/copy/archive.dat'], dest: volRoot + '/moved', preserve: false, tool: 'corrupted_files',
   });

@@ -281,6 +281,17 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		'.df-rail-ico{flex:none;width:20px;height:20px;}',
 		'.df-rail-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
 		'.df-rail-item .df-badge{flex:none;margin-left:6px;color:' + FONT3 + ';font-size:' + FSMALL + ';font-variant-numeric:tabular-nums;}',
+		/* The tool checkbox in the rail: DSM's own checkbox art, the same sprite
+		   and rows the grid's checker uses (0 unchecked, -20 hover, -60 checked).
+		   Without the sprite (no layout engine) a plain bordered box stands in. */
+		'.df-rail-item .df-tool-check{flex:none;width:20px;height:20px;margin-right:-2px;cursor:pointer;' +
+			'background-repeat:no-repeat;background-color:transparent;background-position:0 0;' +
+			(CB_SPRITE ? 'background-image:' + CB_SPRITE + ';' : 'border:1px solid ' + BORDER3 + ';border-radius:2px;box-sizing:border-box;') + '}',
+		'.df-rail-item .df-tool-check.df-on{background-position:0 -60px;' + (CB_SPRITE ? '' : 'background-color:' + ACTION + ';') + '}',
+		'.df-rail-item:hover .df-tool-check:not(.df-on){background-position:0 -20px;}',
+		/* The scope section under the tools: a header in DSM's secondary text,
+		   the folder list, and its Add/Remove bar. */
+		'.df-scope-hdr{padding:10px 12px 2px;border-top:1px solid ' + BORDER3 + ';font-size:' + FSMALL + ';color:' + FONT2 + ';font-weight:bold;}',
 		/* toolbars: a little taller with contents vertically centred; the
 		   right padding keeps trailing items (search box, Export) off the
 		   window edge, like File Station */
@@ -678,6 +689,13 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 	// it falls out of the duplicates scan, which is the only one that reads
 	// file contents — so its Scan button runs that.
 	function scanToolFor(tool) { return isReadOnly(tool) ? 'duplicates' : tool; }
+	// The tools an interruption notice says its run was scanning. A notice
+	// from a build that scanned one tool per run names only that tool.
+	function interTools(m) {
+		if (!m) return [];
+		if (m.tools && m.tools.length) return m.tools;
+		return m.tool ? [m.tool] : [];
+	}
 
 	// The Status column's words. KEEP IN SYNC with verdictLabel() in
 	// server/corrupt.go, which writes the same three verdicts into the CSV
@@ -797,6 +815,12 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				tool: 'duplicates',
 				dirs: [],
 				refDirs: [],
+				// which tools a Scan runs — every one by default; the rail's
+				// checkboxes edit it, and a scan runs all of them over one walk
+				tools: { duplicates: true, empty_folders: true, empty_files: true, temp_files: true, corrupted_files: true },
+				// tool -> the daemon's scannedAt for the results last fetched, so
+				// a result that lands while a scan runs is noticed and fetched
+				scannedAt: {},
 				match: { name: false, modified: false, created: false },
 				// tool -> whole-set metadata for the summary and the rail
 				// badges: {errors, scanMatch, total, grand, truncated}. The
@@ -861,6 +885,12 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				if (Ext.isArray(p.dirs)) this.state.dirs = p.dirs;
 				if (Ext.isArray(p.refDirs)) this.state.refDirs = p.refDirs;
 				if (p.match) this.state.match = p.match;
+				if (p.tools) {
+					var me = this;
+					Ext.each(TOOLS, function (t) {
+						if (typeof p.tools[t.id] === 'boolean') me.state.tools[t.id] = p.tools[t.id];
+					});
+				}
 			} catch (e) { /* ignore */ }
 		},
 		savePrefs: function () {
@@ -868,7 +898,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				window.localStorage.setItem(PREFS_KEY, Ext.util.JSON.encode({
 					dirs: this.state.dirs,
 					refDirs: this.state.refDirs,
-					match: this.state.match
+					match: this.state.match,
+					tools: this.state.tools
 				}));
 			} catch (e) { /* ignore */ }
 		},
@@ -1016,8 +1047,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			this.buildCenterPanel();
 		},
 
-		// The left rail: the five tools with their badges, and the volume card
-		// beneath them.
+		// The left rail: the five tools, each with a checkbox saying whether the
+		// next Scan runs it and a badge with its count; the scan scope beneath
+		// them, always on screen; and the volume card at the bottom.
 		buildRail: function () {
 			var me = this;
 			this.toolsStore = new Ext.data.JsonStore({
@@ -1026,7 +1058,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			});
 			this.toolsView = new Ext.DataView({
 				store: this.toolsStore,
-				flex: 1,
+				// five rows of the rail's 42px rhythm plus the top padding; not
+				// flexed, so the scope list below gets the height that is left
+				height: 222,
 				autoScroll: true,
 				overClass: 'x-grid3-row-over',   // DSM-themed hover
 				tpl: new Ext.XTemplate(
@@ -1034,19 +1068,31 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					'<tpl for=".">',
 					// x-grid3-row-selected → DSM-themed selection highlight
 					'<div class="df-rail-item {[values.id === this.sel() ? \'x-grid3-row-selected\' : \'\']}">',
+					// the checkbox: ticked tools are what Scan runs
+					'<div class="df-tool-check {[this.on(values.id) ? \'df-on\' : \'\']}" ext:qtip="{[this.on(values.id) ? \'Scan runs this tool — click to leave it out\' : \'Scan skips this tool — click to include it\']}"></div>',
 					'{ico}<span class="df-rail-label">{label}</span>',
 					'<span class="df-badge">{badge}</span></div>',
 					'</tpl></div>',
-					{ sel: function () { return me.state.tool; } }
+					{
+						sel: function () { return me.state.tool; },
+						on: function (id) { return !!me.state.tools[id]; }
+					}
 				),
 				itemSelector: 'div.df-rail-item',
 				listeners: {
 					scope: this,
-					click: function (view, index) {
+					// The checkbox toggles whether Scan runs the tool; the rest
+					// of the row opens its view.
+					click: function (view, index, node, e) {
+						if (e && e.getTarget && e.getTarget('.df-tool-check')) {
+							this.toggleTool(TOOLS[index].id);
+							return;
+						}
 						this.setTool(TOOLS[index].id);
 					}
 				}
 			});
+			this.buildScopePanel();
 			this.volPanel = new Ext.Panel({ border: false, height: 76, html: '' });
 			this.westPanel = new Ext.Panel({
 				region: 'west',
@@ -1054,12 +1100,138 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				border: true,
 				layout: 'vbox',
 				layoutConfig: { align: 'stretch' },
-				items: [this.toolsView, this.volPanel]
+				items: [this.toolsView, this.scopePanel, this.volPanel]
 			});
 		},
 
-		// The top toolbar: Scan, Scope, the Match menu, the summary and DSM's
-		// own search box.
+		// The scan scope, always on screen: the folders to scan and, marked
+		// with a padlock, the read-only reference folders. One list rather than
+		// two because the rail is narrow and the difference is one flag; the
+		// padlock and the tooltip say which is which. Reference folders are a
+		// live, shared setting: an edit reaches the daemon at once
+		// (applyRefDirs), and the padlocks and totals follow in every view.
+		buildScopePanel: function () {
+			this.scopeList = new Ext.list.ListView({
+				store: new Ext.data.ArrayStore({ fields: ['path', 'ro'], data: [] }),
+				// {path:htmlEncode}: folder names are user-created data and
+				// XTemplate does not escape by default (stored-XSS hazard)
+				columns: [{ header: 'Folder', dataIndex: 'path', tpl:
+					'<span class="df-mono" ext:qtip="{path:htmlEncode}{[values.ro ? \' — read-only reference folder: its files are scanned but never selected or moved\' : \'\']}">' +
+					'{[values.ro ? \'\\ud83d\\udd12 \' : \'\']}{path:htmlEncode}</span>' }],
+				hideHeaders: true,
+				singleSelect: true,
+				// DSM's themed hover/selection classes (same trick as the rail):
+				// the default x-list-over/-selected classes are not styled by the
+				// DSM skin, leaving the clicked row with no visible highlight.
+				overClass: 'x-grid3-row-over',
+				selectedClass: 'x-grid3-row-selected',
+				flex: 1
+			});
+			this.scopePanel = new Ext.Panel({
+				border: false, flex: 1,
+				layout: 'vbox', layoutConfig: { align: 'stretch' },
+				items: [
+					{ xtype: 'panel', border: false, height: 28, cls: 'df-scope-hdr', html: 'Scan Scope' },
+					this.scopeList,
+					{ xtype: 'panel', border: false, height: 40, bodyStyle: 'padding:4px 8px;', items: new UxToolbar({ items: [
+						new UxButton({ text: 'Add', menu: new UxMenu({ items: [
+							{ text: 'Folder to Scan…', scope: this, handler: function () { this.pickScopeFolder(false); } },
+							{ text: 'Read-only Reference Folder…', scope: this, handler: function () { this.pickScopeFolder(true); } }
+						] }) }),
+						new UxButton({ text: 'Remove', scope: this, handler: this.removeScopeEntry })
+					] }) }
+				]
+			});
+			this.syncScopeList();
+		},
+
+		syncScopeList: function () {
+			var rows = [];
+			Ext.each(this.state.dirs, function (p) { rows.push([p, false]); });
+			Ext.each(this.state.refDirs, function (p) { rows.push([p, true]); });
+			this.scopeList.getStore().loadData(rows);
+		},
+
+		pickScopeFolder: function (ro) {
+			var me = this;
+			pickFolder({
+				owner: me,
+				onError: function (msg) { me.notify(msg); },
+				title: ro ? 'Add Read-only Reference Folder' : 'Add Folder to Scan',
+				onPick: function (p) {
+					if (!p) return;
+					if (ro) {
+						if (me.state.refDirs.indexOf(p) >= 0) return;
+						var prev = me.state.refDirs.slice();
+						me.state.refDirs.push(p);
+						me.applyRefDirs(prev, p + ' marked read-only');
+						return;
+					}
+					if (me.state.dirs.indexOf(p) < 0) me.state.dirs.push(p);
+					me.savePrefs();
+					me.syncScopeList();
+					me.refreshView();
+				}
+			});
+		},
+
+		removeScopeEntry: function () {
+			var r = this.scopeList.getSelectedRecords()[0];
+			if (!r) return;
+			if (r.get('ro')) {
+				var prev = this.state.refDirs.slice();
+				this.state.refDirs.remove(r.get('path'));
+				this.applyRefDirs(prev, r.get('path') + ' is no longer read-only');
+				return;
+			}
+			this.state.dirs.remove(r.get('path'));
+			this.savePrefs();
+			this.syncScopeList();
+			this.refreshView();
+		},
+
+		// Sends the reference list to the daemon, which owns it: the padlocks,
+		// the reclaimable totals and the move's refusals all read the daemon's
+		// list, so the change is live in every view the moment it is accepted.
+		// A refusal (a scan running, a folder that is not one) restores the
+		// previous list and says why.
+		applyRefDirs: function (prev, doneMsg) {
+			var me = this;
+			this.syncScopeList();
+			api('/refs', 'POST', { refDirs: this.state.refDirs }, function (err, j) {
+				if (err) {
+					me.state.refDirs = prev;
+					me.syncScopeList();
+					me.notify(err);
+					return;
+				}
+				me.state.refDirs = (j && j.refDirs) || me.state.refDirs;
+				me.state.scanRefDirs = me.state.refDirs.slice();
+				me.savePrefs();
+				me.syncScopeList();
+				me.sm.clearSelections();
+				if (me.state.scanned[me.state.tool]) me.reloadPage();
+				me.refreshView();
+				if (doneMsg) me.notify(doneMsg);
+			});
+		},
+
+		toggleTool: function (id) {
+			this.state.tools[id] = !this.state.tools[id];
+			this.savePrefs();
+			this.toolsView.refresh();
+			this.refreshView();
+		},
+
+		// The tools a Scan runs, in rail order.
+		checkedTools: function () {
+			var out = [], me = this;
+			Ext.each(TOOLS, function (t) { if (me.state.tools[t.id]) out.push(t.id); });
+			return out;
+		},
+
+		// The top toolbar: Scan, the Match menu, the summary and DSM's own
+		// search box. The scope lives in the rail.
 		buildTopToolbar: function () {
 			var me = this;
 			this.scanBtn = new UxButton({
@@ -1127,8 +1299,6 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			this.topToolbar = new UxToolbar({
 				items: [
 					this.scanBtn, '-',
-					{ text: 'Scope…', scope: this, handler: this.openScopeDialog },
-					'-',
 					this.matchBtn,
 					'->',
 					this.summaryText, ' ',
@@ -1591,19 +1761,24 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					});
 				}
 				me.renderVolumes();
+				me.syncScopeList(); // the default scope was filled in just above
 				api('/state', 'GET', null, function (err2, st) {
 					if (err2) {
 						me.notify(err2);
 						me.refreshView();
 						return;
 					}
-					// The daemon's list is the one the STORED results were scanned
-					// with: it decides the padlocks and the move's refusals. The
-					// Scope dialog edits a separate list for the NEXT scan.
+					// The daemon owns the reference list: the padlocks, the totals
+					// and the move's refusals all read it, and the sidebar edits it
+					// in place. Adopt it. A list this app saved before the daemon
+					// kept one is pushed up once, so nothing the user set is lost.
 					me.state.scanRefDirs = st.refDirs || [];
 					me.noteSaveError(st);
-					if (st.refDirs && st.refDirs.length && !me.state.refDirs.length) {
-						me.state.refDirs = st.refDirs;
+					if (me.state.scanRefDirs.length || !me.state.refDirs.length) {
+						me.state.refDirs = me.state.scanRefDirs.slice();
+						me.syncScopeList();
+					} else {
+						me.applyRefDirs([], '');
 					}
 					// A scan the previous daemon run never finished (restart,
 					// reboot, crash). Held rather than acted on: the next
@@ -1619,28 +1794,11 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 							(st.interrupted.tool === 'duplicates'
 								? ' — the next Scan will offer to resume it' : ' — run Scan again') + '.');
 					}
-					var tools = [];
-					var k;
-					for (k in (st.scanned || {})) {
-						if (st.scanned.hasOwnProperty(k)) tools.push(k);
-					}
-					var pending = tools.length;
 					if (st.running) me.attachProgress();
-					if (!pending) {
-						me.refreshView();
-						return;
-					}
 					// Every scanned tool's totals feed its rail badge; only the
 					// visible one loads an actual page of rows.
-					Ext.each(tools, function (tool) {
-						me.fetchMeta(tool, function () {
-							pending--;
-							if (!pending) {
-								me.refreshView();
-								if (me.state.scanned[me.state.tool]) me.loadPage(0);
-							}
-						});
-					});
+					me.refreshView();
+					me.syncScanned(st);
 				});
 			});
 		},
@@ -1801,7 +1959,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			var ro = isReadOnly(t);
 			this.selectMenuBtn.setVisible(!ro);
 			this.moveBtn.setVisible(!ro);
-			this.scanBtn.setText(this.state.scanned[scanToolFor(t)] ? 'Rescan' : 'Scan');
+			this.scanBtn.setText('Scan');
 
 			if (this.state.scanned[t]) {
 				this.configurePager(t);
@@ -1812,8 +1970,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					'<div class="df-idle"><h2>Scan for ' + esc(TOOL_NAME[t].toLowerCase()) + '</h2>' +
 					'<p>' + esc(IDLE_DESC[t]) + '</p>' +
 					'<p style="color:' + FONT3 + ';">Scope: ' + esc(this.state.dirs.length +
-						(this.state.dirs.length === 1 ? ' folder' : ' folders')) + ' — use the toolbar to scan' +
-					(isReadOnly(t) ? ', which runs the ' + esc(TOOL_NAME[scanToolFor(t)]) + ' scan' : '') + '.</p></div>'
+						(this.state.dirs.length === 1 ? ' folder' : ' folders')) + ' — ' +
+					(this.state.tools[t] ? 'click Scan' : 'tick this tool in the sidebar and click Scan') + '.</p></div>'
 				);
 				this.summaryText.setText('');
 				this.centerPanel.getLayout().setActiveItem(0);
@@ -2826,107 +2984,16 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			win.show();
 		},
 
-		/* ------------------------------------------------------- scoping */
-		openScopeDialog: function () {
-			var me = this;
-			var mkList = function (data) {
-				return new Ext.list.ListView({
-					store: new Ext.data.ArrayStore({ fields: ['path'], data: data }),
-					// {path:htmlEncode}: folder names are user-created data and
-					// XTemplate does not escape by default (stored-XSS hazard)
-					columns: [{ header: 'Folder', dataIndex: 'path', tpl: '<span class="df-mono">{path:htmlEncode}</span>' }],
-					hideHeaders: true,
-					singleSelect: true,
-					// DSM's themed hover/selection classes (same trick as the
-					// sidebar rail) — the default x-list-over/-selected classes
-					// are not styled by the DSM skin, leaving the clicked row
-					// with no visible highlight.
-					overClass: 'x-grid3-row-over',
-					selectedClass: 'x-grid3-row-selected',
-					flex: 1
-				});
-			};
-			var toData = function (arr) {
-				var out = [];
-				Ext.each(arr, function (p) { out.push([p]); });
-				return out;
-			};
-			var scopeList = mkList(toData(this.state.dirs));
-			var refList = mkList(toData(this.state.refDirs));
-			var sync = function () {
-				scopeList.getStore().loadData(toData(me.state.dirs));
-				refList.getStore().loadData(toData(me.state.refDirs));
-				me.savePrefs();
-			};
-			var win = new UxModal({
-				owner: me,
-				title: 'Scan Scope',
-				cls: 'df-app',
-				width: 520, height: 552, modal: false,
-				layout: 'vbox', layoutConfig: { align: 'stretch' },
-				bodyStyle: 'padding:10px;',
-				items: [
-					{ xtype: 'panel', border: false, height: 22, html: '<b>Folders to scan</b>' },
-					scopeList,
-					{ xtype: 'panel', border: false, height: 46, bodyStyle: 'padding-top:4px;', items: new UxToolbar({ items: [
-						{ text: 'Add Folder…', handler: function () {
-							pickFolder({
-								owner: win,
-								onError: function (msg) { me.notify(msg); },
-								title: 'Add Folder to Scope',
-								onPick: function (p) {
-									if (p && me.state.dirs.indexOf(p) < 0) me.state.dirs.push(p);
-									sync();
-								}
-							});
-						} },
-						{ text: 'Remove', handler: function () {
-							var r = scopeList.getSelectedRecords()[0];
-							if (r) { me.state.dirs.remove(r.get('path')); sync(); }
-						} }
-					] }) },
-					{ xtype: 'panel', border: false, height: 52, bodyStyle: 'padding-top:10px;line-height:1.4;', html: '<b>Read-only reference folders</b> <span style="color:' + FONT3 + ';">— files inside are protected masters: they are never selected or moved.</span>' },
-					refList,
-					{ xtype: 'panel', border: false, height: 46, bodyStyle: 'padding-top:4px;', items: new UxToolbar({ items: [
-						{ text: 'Add Reference Folder…', handler: function () {
-							pickFolder({
-								owner: win,
-								onError: function (msg) { me.notify(msg); },
-								title: 'Add Reference Folder',
-								onPick: function (p) {
-									if (p && me.state.refDirs.indexOf(p) < 0) me.state.refDirs.push(p);
-									me.sm.clearSelections();
-									sync();
-									if (p) me.notify(p + ' marked read-only');
-								}
-							});
-						} },
-						{ text: 'Remove', handler: function () {
-							var r = refList.getSelectedRecords()[0];
-							if (r) { me.state.refDirs.remove(r.get('path')); me.sm.clearSelections(); sync(); }
-						} }
-					] }) }
-				],
-				buttons: [new UxButton({ btnStyle: 'blue', text: 'Close', handler: function () {
-					win.close();
-					// The padlocks and the reclaimable totals follow the folders
-					// the stored results were SCANNED with (the daemon's list),
-					// not this dialog's: unlocking rows here would only have the
-					// move refuse them as read-only. Say when the lists differ.
-					var norm = function (a) { return (a || []).slice().sort().join('\n'); };
-					if (norm(me.state.refDirs) !== norm(me.state.scanRefDirs || [])) {
-						me.notify('Reference folder changes take effect at the next scan.');
-					}
-				} })]
-			});
-			win.show();
-		},
-
 		/* ------------------------------------------------------ scanning */
 		startScan: function () {
 			var me = this;
 			if (!this.state.dirs.length) {
-				this.notify('Add at least one folder to the scope first (Scope… button)');
+				this.notify('Add at least one folder to scan first (the Add button in the sidebar)');
+				return;
+			}
+			var tools = this.checkedTools();
+			if (!tools.length) {
+				this.notify('Tick at least one tool in the sidebar to scan for');
 				return;
 			}
 			// The choice dialog is already on screen: a second Scan click must
@@ -2934,28 +3001,29 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// daemon's notice and destroy the very resume the dialog is
 			// offering.
 			if (liveWin(this._resumeWin)) return;
-			// An interrupted duplicates scan gets a real choice at the moment
-			// the user initiates the next one — not an unsolicited dialog at
-			// app open. Resume continues the dead run: the files it already
-			// read in full are not read again, which is what resuming MEANS;
-			// Start Over re-reads everything. Only duplicates is offered the
-			// choice — the other tools read no content, so re-running them IS
-			// their resume. Any started scan clears the notice on the daemon,
-			// so the offer cannot outlive what it describes.
+			// An interrupted run that included Duplicate Files gets a real
+			// choice at the moment the user initiates the next scan — not an
+			// unsolicited dialog at app open. Resume continues the dead run:
+			// the files it already read in full are not read again, which is
+			// what resuming MEANS; Start Over re-reads everything. Only the
+			// duplicates pass is worth the choice — the other tools read no
+			// content, so re-running them IS their resume. Any started scan
+			// clears the notice on the daemon, so the offer cannot outlive what
+			// it describes.
 			var inter = this._interrupted;
+			var interDup = interTools(inter).indexOf('duplicates') >= 0;
+			var nowDup = tools.indexOf('duplicates') >= 0;
 			// Any admitted scan clears the daemon's notice — and the marker,
 			// and with it the dead run's generation for good. The toast at
 			// startup promised the next Scan would offer to resume it, so a
-			// Scan on some OTHER tool must ask before it makes that promise
-			// false; "resume" is never something the app decides silently, and
-			// neither is "discard".
-			if (inter && inter.tool === 'duplicates' &&
-					scanToolFor(this.state.tool) !== 'duplicates') {
+			// Scan that leaves Duplicate Files out must ask before it makes
+			// that promise false; "resume" is never something the app decides
+			// silently, and neither is "discard".
+			if (interDup && !nowDup) {
 				this.confirmDiscardResume();
 				return;
 			}
-			if (inter && inter.tool === 'duplicates' &&
-					scanToolFor(this.state.tool) === 'duplicates') {
+			if (interDup && nowDup) {
 				// Revalidate before promising anything: another session may
 				// have started a scan since this stash was taken, which clears
 				// the daemon's notice and makes the resume flag inert — the
@@ -2964,7 +3032,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				// silently discard a resumable run, and the scan POST will
 				// surface any real problem itself.
 				api('/state', 'GET', null, function (err, st) {
-					if (!err && st && (!st.interrupted || st.interrupted.tool !== 'duplicates')) {
+					if (!err && st && interTools(st.interrupted).indexOf('duplicates') < 0) {
 						me._interrupted = null;
 						me.doScan(false);
 						return;
@@ -3002,6 +3070,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			};
 			var mm = m.match || {};
 			return m.recurse === true &&
+				norm(interTools(m)) === norm(this.checkedTools()) &&
 				norm(m.dirs) === norm(this.state.dirs) &&
 				norm(m.refDirs) === norm(this.state.refDirs) &&
 				!!mm.name === !!this.state.match.name &&
@@ -3025,7 +3094,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				bodyStyle: 'padding:14px;font-size:' + FSMALL + ';',
 				items: [{ xtype: 'panel', border: false,
 					html: 'The last duplicate files scan was interrupted by a restart and can still be resumed.<br/><br/>' +
-						'Scanning ' + esc(TOOL_NAME[scanToolFor(this.state.tool)] || '') + ' now discards that progress: ' +
+						'Scanning without Duplicate Files now discards that progress: ' +
 						'the next Duplicate Files scan will re-read everything.' }],
 				buttons: [
 					new UxButton({ btnStyle: 'blue', text: 'Scan Anyway', handler: function () {
@@ -3069,7 +3138,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 							: '') + '.<br/><br/>' +
 						'<b>Resume</b> continues where it left off — files it already compared are not read again.<br/>' +
 						'<b>Start Over</b> discards that progress and re-reads everything.' +
-						(same ? '' : '<br/><br/>Resume is unavailable: the scan settings (scope, reference folders ' +
+						(same ? '' : '<br/><br/>Resume is unavailable: the scan settings (tools, scope, reference folders ' +
 							'or match criteria) have changed since that run. Restore them to resume, ' +
 							'or Start Over with the current settings.') }],
 				buttons: [
@@ -3091,11 +3160,11 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		doScan: function (resume) {
 			var me = this;
 			api('/scan', 'POST', {
-				// Conflicting Files has no scan of its own — it is produced by the
-				// duplicates pass, the only one that reads file contents — so
-				// its Scan button runs that. The daemon refuses the read-only id
-				// outright, so this mapping is not optional.
-				tool: scanToolFor(this.state.tool),
+				// tools is what the scan runs — every ticked tool, over one walk;
+				// tool is the view on screen, which the daemon names as the one
+				// to open when the scan ends.
+				tool: this.state.tool,
+				tools: this.checkedTools(),
 				dirs: this.state.dirs,
 				refDirs: this.state.refDirs,
 				recurse: true, // subfolders are always scanned (no user option)
@@ -3137,7 +3206,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// of the desktop stays usable while scanning.
 			this.progressWin = new UxModal({
 				owner: this,
-				title: 'Scanning ' + TOOL_NAME[scanToolFor(this.state.tool)] + '…',
+				title: 'Scanning…',
 				width: 420, autoHeight: true, modal: false, closable: false, resizable: false,
 				cls: 'df-app',
 				bodyStyle: 'padding:16px;',
@@ -3238,46 +3307,60 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 							me.progressLabel.body.update(esc(st.label || '') + '  (' + Math.round(st.progress || 0) + '%)');
 						}
 					}
+					// Each tool's result lands as its pass finishes: pick it up
+					// so the badges, and the view on screen, follow the scan.
+					me.syncScanned(st);
 					return;
 				}
+				// The reference folders the stored results are protected by.
+				me.state.scanRefDirs = st.refDirs || [];
 				// A run that ENDED without completing — Stop, or a failure the
 				// daemon reported — is no completion: replaying the previous
 				// finished scan's announcements here (its unreadable-locations
-				// toast, a jump back to page 1) would be exactly wrong.
+				// toast, a jump back to page 1) would be exactly wrong. What the
+				// run had already published before it stopped is still fetched.
 				if (st.lastEnd && st.lastEnd.completed === false) {
 					me.stopPolling();
-					me.notify('Scan stopped.');
+					me.syncScanned(st, function () { me.notify('Scan stopped.'); });
 					return;
 				}
-				// The reference folders the new results were scanned with.
-				me.state.scanRefDirs = st.refDirs || [];
-				// lastTool is the scan that actually finished — the running
-				// job is already cleared here, and the user may have switched
-				// tools mid-scan, so the current selection can be wrong
-				var tool = st.lastTool || st.tool || me.state.tool;
 				me.stopPolling();
-				// A duplicates scan also fills in Conflicting Files, and this is
-				// the only place a finished scan refreshes anything: without the
-				// second fetch that rail badge — and the view, if it is the one
-				// on screen — would stay stale until the app was reopened.
-				var refreshed = [tool], id;
-				for (id in READ_ONLY) {
-					if (READ_ONLY.hasOwnProperty(id) && scanToolFor(id) === tool) refreshed.push(id);
+				// Fetch whatever the run published that this app has not seen
+				// yet (the polls above usually already have), then one toast for
+				// the tool the user is looking at — its wording and its counts
+				// differ per tool, and notify() replaces rather than stacks.
+				me.syncScanned(st, function () {
+					me.announceScanIssues(me.state.tool);
+				});
+			});
+		},
+
+		// Results land tool by tool while a scan runs (the daemon publishes
+		// each pass as it finishes) and all at once at startup. Whatever the
+		// daemon reports as scanned at a time this app has not fetched is
+		// fetched: the badges follow, the view on screen reloads its first
+		// page, and done runs once everything has arrived.
+		syncScanned: function (st, done) {
+			var me = this, changed = [], k;
+			var sc = (st && st.scanned) || {};
+			for (k in sc) {
+				if (sc.hasOwnProperty(k) && TOOL_NAME[k] && sc[k].scannedAt !== me.state.scannedAt[k]) {
+					me.state.scannedAt[k] = sc[k].scannedAt;
+					changed.push(k);
 				}
-				var pending = refreshed.length;
-				var settle = function () {
+			}
+			var pending = changed.length;
+			if (!pending) {
+				if (done) done([]);
+				return;
+			}
+			Ext.each(changed, function (t) {
+				me.fetchMeta(t, function () {
 					if (--pending > 0) return;
-					// One toast, for whichever of the refreshed tools the user
-					// is actually looking at — its wording and its counts differ
-					// per tool, and notify() replaces rather than stacks.
-					var onScreen = false;
-					Ext.each(refreshed, function (r) { if (r === me.state.tool) onScreen = true; });
-					me.announceScanIssues(onScreen ? me.state.tool : tool);
 					me.refreshView();
-					// show the finished scan's first page when it is on screen
-					if (onScreen) me.loadPage(0);
-				};
-				Ext.each(refreshed, function (r) { me.fetchMeta(r, settle); });
+					if (changed.indexOf(me.state.tool) >= 0) me.loadPage(0);
+					if (done) done(changed);
+				});
 			});
 		},
 

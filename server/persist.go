@@ -44,7 +44,10 @@ type persistedState struct {
 // scanMarker marks a scan in flight; found at startup it means that scan
 // never finished.
 type scanMarker struct {
-	Tool string `json:"tool"`
+	// Tool is the view the run opens when it ends; Tools is every tool it
+	// was scanning, which is what a resume has to match.
+	Tool  string   `json:"tool"`
+	Tools []string `json:"tools,omitempty"`
 	// Gen is the hash-store generation the interrupted run was recording
 	// under; a resume continues it. 0 = the run died before opening the
 	// store.
@@ -69,7 +72,17 @@ type scanMarker struct {
 // reads is exactly the cross-scan reuse the generation gate exists to
 // prevent.
 func (m *scanMarker) matches(req *ScanReq) bool {
-	return m.Tool == req.Tool && m.Recurse == req.Recurse &&
+	tools, err := req.toolList()
+	if err != nil {
+		return false
+	}
+	// A marker from a build that scanned one tool per run names only Tool;
+	// that is the whole tool set of such a run.
+	mt := m.Tools
+	if len(mt) == 0 && m.Tool != "" {
+		mt = []string{m.Tool}
+	}
+	return eqStrings(mt, tools) && m.Recurse == req.Recurse &&
 		m.Match == req.Match &&
 		eqStrings(m.Dirs, normPaths(req.Dirs)) &&
 		eqStrings(m.RefDirs, normPaths(req.RefDirs))
@@ -337,7 +350,8 @@ func (s *Server) writeMarker(req *ScanReq, gen uint32) {
 	if dir == "" {
 		return
 	}
-	b, _ := json.Marshal(scanMarker{Tool: req.Tool, Gen: gen,
+	tools, _ := req.toolList()
+	b, _ := json.Marshal(scanMarker{Tool: req.openTool(tools), Tools: tools, Gen: gen,
 		Dirs: normPaths(req.Dirs), RefDirs: normPaths(req.RefDirs),
 		Recurse: req.Recurse, Match: req.Match,
 		StartedAt: time.Now().Format(time.RFC3339)})

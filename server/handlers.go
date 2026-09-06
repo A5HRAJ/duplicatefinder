@@ -8,6 +8,7 @@ import (
 	"dupfinder/internal/dirhandle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 )
 
@@ -79,7 +80,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		scanned[tool] = map[string]any{"files": n, "groups": g, "scannedAt": res.Scanned}
 	}
 	out := map[string]any{
-		"running": s.job.Running, "tool": s.job.Tool,
+		"running": s.job.Running, "tool": s.job.Tool, "tools": s.job.Tools,
 		"progress": s.job.Progress, "label": s.job.Label,
 		// lastTool names the scan that finished (and stored results) most
 		// recently — s.job is cleared on completion, so without it the UI's
@@ -91,8 +92,8 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	// running flip to false needs this to tell Stop from a finish — lastTool
 	// alone names the last scan that completed, which after a Stop is the
 	// previous one, and replaying its completion is exactly wrong.
-	if s.lastEnd.Tool != "" {
-		out["lastEnd"] = map[string]any{"tool": s.lastEnd.Tool, "completed": s.lastEnd.Completed}
+	if s.lastEnd.Tool != "" || len(s.lastEnd.Tools) > 0 {
+		out["lastEnd"] = map[string]any{"tool": s.lastEnd.Tool, "tools": s.lastEnd.Tools, "completed": s.lastEnd.Completed}
 	}
 	// Only while a move is actually in flight: its absence is what tells the
 	// UI's poller to stop.
@@ -114,7 +115,11 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 
 // ScanReq is the body of POST /api/scan.
 type ScanReq struct {
+	// Tool is the view the app is looking at, which the scan opens when it
+	// ends; Tools names every tool the scan runs. A request naming only Tool
+	// (an older client, the raw API) asks for that one tool.
 	Tool    string    `json:"tool"`
+	Tools   []string  `json:"tools"`
 	Dirs    []string  `json:"dirs"`
 	RefDirs []string  `json:"refDirs"`
 	Recurse bool      `json:"recurse"`
@@ -128,6 +133,51 @@ type ScanReq struct {
 	// no caller can talk a completed scan's hashes — or a DIFFERENT scan's
 	// — back into service.
 	Resume bool `json:"resume"`
+}
+
+// scanOrder is the order the passes run in when several tools are requested:
+// the walk-only tools first, the content pass last, so the quick answers land
+// while the slow one is still reading.
+var scanOrder = []string{"empty_folders", "empty_files", "temp_files", "duplicates", "corrupted_files"}
+
+// toolList returns the tools a request asks for, in scan order, validated and
+// de-duplicated. A request naming only Tool asks for that one tool.
+func (r *ScanReq) toolList() ([]string, error) {
+	asked := r.Tools
+	if len(asked) == 0 && r.Tool != "" {
+		asked = []string{r.Tool}
+	}
+	want := map[string]bool{}
+	for _, t := range asked {
+		if !validTools[t] {
+			return nil, fmt.Errorf("unknown tool %q", t)
+		}
+		want[t] = true
+	}
+	var out []string
+	for _, t := range scanOrder {
+		if want[t] {
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("choose at least one tool to scan for")
+	}
+	return out, nil
+}
+
+// openTool is the view the app opens when the scan ends: the tool it was
+// looking at when that tool was scanned, else the first tool scanned.
+func (r *ScanReq) openTool(tools []string) string {
+	for _, t := range tools {
+		if t == r.Tool {
+			return t
+		}
+	}
+	if len(tools) == 0 {
+		return r.Tool
+	}
+	return tools[0]
 }
 
 // moveFolderNames maps a tool id to the folder a preserve-mode move creates
@@ -186,15 +236,9 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad request body")
 		return
 	}
-	if !validTools[req.Tool] {
-		writeErr(w, 400, "unknown tool")
-		return
-	}
-	// Conflicting Files has no scan of its own — it is filled in by the
-	// duplicates scan, which is the only pass that reads file contents.
-	// Refused here so a request never starts a job that would do nothing.
-	if readOnlyTools[req.Tool] {
-		writeErr(w, 400, "Conflicting Files is filled in by the Duplicate Files scan — run that instead")
+	tools, err := req.toolList()
+	if err != nil {
+		writeErr(w, 400, err.Error())
 		return
 	}
 	roots := uniquePaths(append(append([]string{}, req.Dirs...), req.RefDirs...))
@@ -237,7 +281,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cancel := make(chan struct{})
-	s.job = jobState{Running: true, Tool: req.Tool, Label: "Initializing scan…", cancel: cancel}
+	s.job = jobState{Running: true, Tool: req.openTool(tools), Tools: tools, Label: "Initializing scan…", cancel: cancel}
 	// s.refDirs is NOT updated here. It describes the stored results, so it
 	// changes when results do — at completion, in runScan's defer. Published
 	// at admission, a cancelled scan (of any tool) would silently change
@@ -291,6 +335,62 @@ func validateRoots(roots, canonRoots []string, sess *fsSession) error {
 		}
 	}
 	return nil
+}
+
+// handleRefs replaces the read-only reference folders: POST {"refDirs":
+// [...]}. The list is one shared setting for every tool and view — the
+// padlocks, the reclaimable totals and the move's refusals all read
+// s.refDirs — so a change takes effect at once, not at the next scan. Each
+// folder is vetted like a scan root (containment, then File Station's word
+// that it is a folder), a running scan refuses the change (its completion
+// would publish the list it was started with), and the new list is persisted
+// with the results.
+func (s *Server) handleRefs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "POST required")
+		return
+	}
+	var req struct {
+		RefDirs []string `json:"refDirs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "bad request body")
+		return
+	}
+	dirs := uniquePaths(req.RefDirs)
+	canon := make([]string, len(dirs))
+	for i, d := range dirs {
+		rp, err := resolveAllowedRoot(d)
+		if err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		canon[i] = rp
+	}
+	sess, err := fsSessionFrom(r)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if len(dirs) > 0 {
+		if err := validateRoots(dirs, canon, sess); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+	}
+	s.mu.Lock()
+	if s.job.Running {
+		s.mu.Unlock()
+		writeErr(w, 409, "a scan is running — change the reference folders when it finishes")
+		return
+	}
+	s.refDirs = dirs
+	s.invalidateDerivedLocked() // the padlocks and totals of every cached view follow the list
+	s.mu.Unlock()
+	if err := s.saveState(); err != nil {
+		s.noteSaveError(err)
+	}
+	writeJSON(w, 200, map[string]any{"refDirs": dirs})
 }
 
 func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {

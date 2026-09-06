@@ -32,6 +32,8 @@ type Server struct {
 	lastTool  string                 // tool whose scan finished (and stored) last
 	lastEnd   scanEnd                // how the most recent scan run ended, completed or not
 	saveErr   string                 // the last failed state save, for /api/state; cleared by a successful save
+	bandLo    float64                // the progress band the running pass reports into (setBand)
+	bandHi    float64
 	nextID    int
 	authToken string // shared secret required on /api/*; "" disables (dev/tests)
 
@@ -103,10 +105,11 @@ func (s *Server) endMove() {
 }
 
 type jobState struct {
-	Running  bool    `json:"running"`
-	Tool     string  `json:"tool"`
-	Progress float64 `json:"progress"`
-	Label    string  `json:"label"`
+	Running  bool     `json:"running"`
+	Tool     string   `json:"tool"`
+	Tools    []string `json:"tools,omitempty"` // every tool this scan runs
+	Progress float64  `json:"progress"`
+	Label    string   `json:"label"`
 	cancel   chan struct{}
 }
 
@@ -129,6 +132,7 @@ type moveState struct {
 // the previous finish's announcements after a Stop.
 type scanEnd struct {
 	Tool      string
+	Tools     []string // every tool the run scanned
 	Completed bool
 }
 
@@ -213,6 +217,7 @@ func runDaemon(port int, varDir string) {
 	mux.HandleFunc("/api/info", s.handleInfo)
 	mux.HandleFunc("/api/state", s.handleState)
 	mux.HandleFunc("/api/scan", s.handleScan)
+	mux.HandleFunc("/api/refs", s.handleRefs)
 	mux.HandleFunc("/api/cancel", s.handleCancel)
 	mux.HandleFunc("/api/results", s.handleResults)
 	mux.HandleFunc("/api/move", s.handleMove)
