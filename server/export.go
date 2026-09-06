@@ -113,11 +113,15 @@ func exportCSV(tool string, res *toolResult) (string, []byte, error) {
 			}
 		}
 	} else if tool == "duplicates" {
-		w.Write([]string{"Group", "Hash", "Name", "Location", "Size (bytes)", "Modified", "Created", "Captured"})
+		w.Write([]string{"Group", "Hash", "Name", "Location", "Size (bytes)", "Modified", "Created", "Captured", "Hard Links"})
 		for gi, g := range res.Groups {
 			for _, fe := range g.Files {
+				links := ""
+				if fe.Links > 1 {
+					links = strconv.Itoa(fe.Links)
+				}
 				w.Write([]string{strconv.Itoa(gi + 1), g.Hash, csvCell(fe.Name), csvCell(fe.Dir),
-					strconv.FormatInt(fe.Size, 10), fe.Mod, fe.Created, csvCell(fe.Captured)})
+					strconv.FormatInt(fe.Size, 10), fe.Mod, fe.Created, csvCell(fe.Captured), links})
 			}
 		}
 	} else {

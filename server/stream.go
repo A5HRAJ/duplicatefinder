@@ -216,18 +216,22 @@ func newSpill(dir string) (*spill, error) {
 }
 
 func (s *spill) add(rootIdx int, f *fEnt) error {
-	return s.addRaw(rootIdx, f.size, f.mod.Unix(), f.rel, 0)
+	return s.addRaw(rootIdx, f.size, f.mod.Unix(), f.rel, 0, f.link)
 }
 
 // addRaw appends one record. tag is 0 on the walk and candidate spills; on a
 // skew sub-spill it carries the file's content-prefix fingerprint, which is
-// what that spill is partitioned by.
-func (s *spill) addRaw(rootIdx int, size, mod int64, rel string, tag uint64) error {
-	var buf [4 * binary.MaxVarintLen64]byte
+// what that spill is partitioned by. link travels with the record so the
+// groups built from it can tell hard links from copies.
+func (s *spill) addRaw(rootIdx int, size, mod int64, rel string, tag uint64, link fileLink) error {
+	var buf [7 * binary.MaxVarintLen64]byte
 	n := binary.PutUvarint(buf[:], uint64(rootIdx))
 	n += binary.PutUvarint(buf[n:], uint64(size))
 	n += binary.PutVarint(buf[n:], mod)
 	n += binary.PutUvarint(buf[n:], tag)
+	n += binary.PutUvarint(buf[n:], uint64(link.n))
+	n += binary.PutUvarint(buf[n:], link.dev)
+	n += binary.PutUvarint(buf[n:], link.ino)
 	if _, err := s.w.Write(buf[:n]); err != nil {
 		return err
 	}
@@ -257,6 +261,7 @@ type spillRec struct {
 	mod     int64
 	tag     uint64
 	rel     string
+	link    fileLink
 }
 
 // spillRelMax bounds one record's relative path; PATH_MAX is 4096.
@@ -293,6 +298,21 @@ func (s *spill) each(fn func(*spillRec) error) error {
 		if err != nil {
 			return err
 		}
+		var link fileLink
+		nlink, err := binary.ReadUvarint(r)
+		if err != nil {
+			return err
+		}
+		if link.dev, err = binary.ReadUvarint(r); err != nil {
+			return err
+		}
+		if link.ino, err = binary.ReadUvarint(r); err != nil {
+			return err
+		}
+		if nlink > math.MaxUint32 {
+			return errors.New("scan spill file is corrupt")
+		}
+		link.n = uint32(nlink)
 		relLen, err := binary.ReadUvarint(r)
 		if err != nil {
 			return err
@@ -309,7 +329,7 @@ func (s *spill) each(fn func(*spillRec) error) error {
 		if _, err := io.ReadFull(r, relB); err != nil {
 			return err
 		}
-		rec = spillRec{rootIdx: int(rootIdx), size: int64(size), mod: mod, tag: tag, rel: string(relB)}
+		rec = spillRec{rootIdx: int(rootIdx), size: int64(size), mod: mod, tag: tag, rel: string(relB), link: link}
 		if err := fn(&rec); err != nil {
 			return err
 		}
@@ -337,7 +357,7 @@ func (s *spill) distil(counter *keyCounter, m MatchOpts, out *spill) (int, error
 			return nil
 		}
 		n++
-		return out.addRaw(r.rootIdx, r.size, r.mod, r.rel, 0)
+		return out.addRaw(r.rootIdx, r.size, r.mod, r.rel, 0, r.link)
 	})
 	return n, err
 }
@@ -365,7 +385,7 @@ func (s *spill) materialize(keep func(r *spillRec) bool, handles []*dirhandle.Ha
 		out = append(out, fEnt{
 			path: path, name: filepath.Base(r.rel), dir: filepath.Dir(path),
 			size: r.size, mod: time.Unix(r.mod, 0),
-			rel: r.rel, rh: handles[r.rootIdx],
+			rel: r.rel, rh: handles[r.rootIdx], link: r.link,
 		})
 		return nil
 	})
@@ -581,11 +601,13 @@ type rawGroup struct {
 	extra int    // members the per-group cap dropped, for the truncation report
 }
 
-// weight is the reclaimable space the group represents. It counts the members
-// the per-group cap already dropped (extra) as well: a group cut down to the
-// cap is still the biggest thing on the volume, and ranking it by its
-// truncated length would let smaller groups displace it from the results.
-func (g *rawGroup) weight() int64 { return g.size * int64(len(g.files)+g.extra-1) }
+// weight is the reclaimable space the group represents, measured in physical
+// copies: hard links to one file are one copy, and removing all but one name
+// of it frees nothing. It counts the members the per-group cap already
+// dropped (extra) as well: a group cut down to the cap is still the biggest
+// thing on the volume, and ranking it by its truncated length would let
+// smaller groups displace it from the results.
+func (g *rawGroup) weight() int64 { return g.size * int64(physicalCopies(g.files)+g.extra-1) }
 
 // betterGroup is the listing order: largest reclaimable space first. The
 // tiebreaks (hash, then first path) make the order total, so a result set

@@ -68,6 +68,7 @@ func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan 
 			path: path, name: d.Name(), dir: filepath.Dir(path),
 			size: info.Size(), mod: info.ModTime(),
 			isDir: d.IsDir(), rel: rel, rh: rh,
+			link: linkOf(info),
 		})
 		count++
 		if count%2000 == 0 {

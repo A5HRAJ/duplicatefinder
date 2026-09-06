@@ -77,6 +77,12 @@ type FileEnt struct {
 	// before anyone clicks it; the daemon refuses these independently, so the
 	// disabled box is presentation, not the enforcement.
 	NoMove bool `json:"nomove,omitempty"`
+	// Links is how many names the file's data has when there is more than one
+	// (a hard link), and Ino identifies that data (device and inode, hex) so
+	// rows sharing it can be recognised as one copy. Both are absent for an
+	// ordinary file.
+	Links int    `json:"links,omitempty"`
+	Ino   string `json:"ino,omitempty"`
 	// Prot marks a read-only reference copy. Decided by the daemon per page
 	// (results.go) on CANONICAL paths — the same comparison the move refuses
 	// with — so the padlock the grid draws and the refusal the move issues
@@ -103,6 +109,10 @@ type Group struct {
 	// fewer than that — a page trims very large groups so one of them cannot
 	// bury a browser. Zero means Files is the whole group.
 	Count int `json:"count,omitempty"`
+	// Copies is the number of distinct pieces of data the group's members refer
+	// to, sent only when hard links make it smaller than the member count: the
+	// reclaimable figure is measured in copies, not names.
+	Copies int `json:"copies,omitempty"`
 	// Prot is how many of the group's members are protected reference copies,
 	// counted over the WHOLE group before any trimming. The client draws the
 	// group header's reclaimable figure from it: recounting protection over a

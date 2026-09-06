@@ -27,6 +27,36 @@ type fEnt struct {
 	isDir           bool
 	rel             string            // path relative to the pinned root
 	rh              *dirhandle.Handle // pinned root; nil only for hand-built test entries
+	link            fileLink          // the data behind the name, for hard-link detection
+}
+
+// fileLink identifies the data a name refers to. Names sharing a device and
+// inode are hard links to one copy; n is how many names the inode has. The
+// zero value means "unknown", which counts as a copy of its own.
+type fileLink struct {
+	dev, ino uint64
+	n        uint32
+}
+
+// physicalCopies counts the distinct pieces of data a group's members refer
+// to: names that share an inode are one copy, every other name is its own.
+// It is what "reclaimable" has to be measured in — removing one of three
+// hard links to a file frees nothing.
+func physicalCopies(files []fEnt) int {
+	n := 0
+	seen := map[fileLink]bool{}
+	for i := range files {
+		l := files[i].link
+		if l.n <= 1 || l.ino == 0 {
+			n++
+			continue
+		}
+		if !seen[l] {
+			seen[l] = true
+			n++
+		}
+	}
+	return n
 }
 
 // dirEnt is a directory as the empty-folder scan keeps it: the fields the
@@ -608,7 +638,7 @@ func (s *Server) fileEnt(f fEnt) FileEnt {
 	if !f.mod.IsZero() {
 		modUnix = f.mod.Unix()
 	}
-	return FileEnt{
+	fe := FileEnt{
 		ID: "f" + strconv.Itoa(id), Name: f.name, Dir: f.dir,
 		Size: f.size, Mod: fmtTime(f.mod), ModUnix: modUnix, Created: fmtTime(f.created),
 		Ext: extOf(f.name),
@@ -617,6 +647,11 @@ func (s *Server) fileEnt(f fEnt) FileEnt {
 		// without each scan case having to remember.
 		NoMove: fsCannotAddress(f.name),
 	}
+	if f.link.n > 1 {
+		fe.Links = int(f.link.n)
+		fe.Ino = strconv.FormatUint(f.link.dev, 16) + ":" + strconv.FormatUint(f.link.ino, 16)
+	}
+	return fe
 }
 
 func (s *Server) fileEnts(in []fEnt) []FileEnt {

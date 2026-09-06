@@ -1173,8 +1173,16 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					{ id: 'name', header: 'Name', dataIndex: 'name', width: 240, sortable: true, renderer: function (v, m, r) {
 						// Second explanation for the same fact, and deliberately
 						// so: the padlock carries the full sentence on hover,
+						var links = r.get('links') || 0;
 						// but the eye lands on the name, not on a 20px glyph.
 						if (r.get('prot')) m.attr = 'ext:qtip="Read-only reference"';
+						// A hard link is one of several names for the same data:
+						// moving or removing this name frees nothing while another
+						// remains, which the user deciding what to move has to know.
+						if (links > 1) {
+							return esc(v) + ' <span class="df-dim" ext:qtip="Hard link: this is one of ' + links +
+								' names for the same data on the volume. Moving or removing it frees no space while another name remains.">· hard link</span>';
+						}
 						return esc(v);
 					} },
 					// Conflicting Files only, hidden everywhere else (setToolColumns).
@@ -1340,7 +1348,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					// which reads exactly like a backend bug.
 					'id', 'name', 'path', 'size', 'date', 'created', 'captured',
 					'hash', 'ext', 'prot', 'isDir', 'gidx', 'grpLabel', 'ord',
-					'verdict', 'evidence', 'nomove'
+					'verdict', 'evidence', 'nomove', 'links'
 				]),
 				paramNames: { start: 'offset', limit: 'limit', sort: 'sort', dir: 'dir' },
 				groupField: 'gidx',
@@ -1850,10 +1858,15 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// a trimmed group the rows on the page are a subset, so counting
 			// from them and pairing it with `whole` would overstate the
 			// reclaimable figure — five protected copies off the page would
-			// read as one kept.
+			// read as one kept. g.copies is the number of distinct pieces of
+			// data when hard links make it smaller than the number of names;
+			// reclaimable space is measured in copies, never in names.
 			var keep = Math.max(g.prot || 0, 1);
-			var recl = g.size * Math.max(0, whole - keep);
-			return fmtNum(whole) + ' identical files &nbsp;·&nbsp; ' + fmtBytes(g.size) + ' each &nbsp;·&nbsp; ' + esc(g.ext) +
+			var copies = g.copies || whole;
+			var recl = g.size * Math.max(0, copies - keep);
+			return fmtNum(whole) + ' identical files' +
+				(copies < whole ? ' <span class="df-group-more">(' + fmtNum(copies) + ' copies; the rest are hard links)</span>' : '') +
+				' &nbsp;·&nbsp; ' + fmtBytes(g.size) + ' each &nbsp;·&nbsp; ' + esc(g.ext) +
 				' &nbsp;—&nbsp; <span class="df-group-waste">' + fmtBytes(recl) + ' reclaimable</span>' +
 				(whole > shown ? ' &nbsp;·&nbsp; <span class="df-group-more">showing the first ' +
 					fmtNum(shown) + '</span>' : '');

@@ -551,7 +551,7 @@ func TestTagWindowPartitionsWithoutLoss(t *testing.T) {
 	}
 	defer sub.close()
 	for i := 0; i < 60; i++ { // 60 records over 6 distinct content tags
-		if err := sub.addRaw(0, 6148, 100, fmt.Sprintf("d/f%03d", i), prefixTag(fmt.Sprintf("pfx%d", i%6))); err != nil {
+		if err := sub.addRaw(0, 6148, 100, fmt.Sprintf("d/f%03d", i), prefixTag(fmt.Sprintf("pfx%d", i%6)), fileLink{}); err != nil {
 			t.Fatal(err)
 		}
 	}

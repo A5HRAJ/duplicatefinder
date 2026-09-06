@@ -694,23 +694,44 @@ func dupTotals(groups []Group, refs *refMatcher) pageTotals {
 	for _, g := range groups {
 		t.Files += len(g.Files)
 		t.Bytes += g.Size * int64(len(g.Files))
-		prot := 0
+		// Measured in physical copies: hard links to one file are one copy,
+		// and a protected name protects the copy behind it.
+		copies := physicalRows(g.Files, nil)
+		keep := 0
 		if !refs.empty() {
-			for _, f := range g.Files {
-				if refs.protects(f.Dir, f.Name) {
-					prot++
-				}
-			}
+			keep = physicalRows(g.Files, func(f *FileEnt) bool { return refs.protects(f.Dir, f.Name) })
 		}
-		keep := prot
 		if keep < 1 {
 			keep = 1
 		}
-		if n := len(g.Files) - keep; n > 0 {
+		if n := copies - keep; n > 0 {
 			t.Reclaimable += g.Size * int64(n)
 		}
 	}
 	return t
+}
+
+// physicalRows counts the distinct pieces of data among the rows only
+// accepts (all rows when only is nil): rows sharing an inode are one copy,
+// rows without link information are one copy each.
+func physicalRows(files []FileEnt, only func(*FileEnt) bool) int {
+	n := 0
+	seen := map[string]bool{}
+	for i := range files {
+		f := &files[i]
+		if only != nil && !only(f) {
+			continue
+		}
+		if f.Ino == "" {
+			n++
+			continue
+		}
+		if !seen[f.Ino] {
+			seen[f.Ino] = true
+			n++
+		}
+	}
+	return n
 }
 
 // corruptedTotals aggregates corrupted sets. Reclaimable stays zero: nothing

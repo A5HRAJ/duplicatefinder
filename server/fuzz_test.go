@@ -47,7 +47,7 @@ func spillSeed(f *testing.F) []byte {
 	}
 	defer sp.close()
 	sp.add(0, &fEnt{size: 10, mod: time.Unix(1700000000, 0), rel: "a/b.txt"})
-	sp.addRaw(1, 20, 1700000001, "c.bin", 42)
+	sp.addRaw(1, 20, 1700000001, "c.bin", 42, fileLink{})
 	sp.w.Flush()
 	sp.f.Seek(0, io.SeekStart)
 	b, _ := io.ReadAll(sp.f)

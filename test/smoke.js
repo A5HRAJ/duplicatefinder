@@ -364,6 +364,20 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     const html = tpl ? tpl.apply({ v: '/x', t: '<img src=x onerror=1>' }) : '';
     check('Location dropdown escapes folder names', html.indexOf('&lt;img') >= 0 && html.indexOf('<img') < 0);
   }
+  // A hard link is one of several names for one piece of data: the row says
+  // so, and the group header counts copies rather than names.
+  {
+    const cm = win.grid.getColumnModel();
+    const nameIdx = cm.findColumnIndex('name');
+    const rec = new window.Ext.data.Record({ name: 'clip.mov', links: 3, prot: false });
+    const html = cm.getRenderer(nameIdx)('clip.mov', {}, rec);
+    check('a hard-linked row is labelled as such', /hard link/.test(html) && /one of 3 names/.test(html));
+    const plain = cm.getRenderer(nameIdx)('clip.mov', {}, new window.Ext.data.Record({ name: 'clip.mov', prot: false }));
+    check('an ordinary row carries no hard-link label', !/hard link/.test(plain));
+    const label = win.dupGroupLabel({ size: 1000, ext: 'MOV', copies: 2, prot: 0 }, 3, 3);
+    check('a group with hard links reports copies and reclaims by copies',
+      /3 identical files/.test(label) && /2 copies/.test(label) && /1000 B reclaimable|1\.00 KB reclaimable|1000 B/.test(label));
+  }
   // Every scan issue is reachable, escaped — not only the first one the toast
   // quotes: the summary bar links to a dialog listing them all.
   {

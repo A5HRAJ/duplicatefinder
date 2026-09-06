@@ -69,6 +69,9 @@ func TestSpillRejectsCorruptRecordLengths(t *testing.T) {
 	n := binary.PutVarint(buf[:], 0)
 	sp.w.Write(buf[:n]) // mod
 	put(0)              // tag
+	put(1)              // link count
+	put(0)              // device
+	put(0)              // inode
 	put(1 << 40)        // relLen: a terabyte
 	sp.n = 1
 	err = sp.each(func(*spillRec) error { return nil })

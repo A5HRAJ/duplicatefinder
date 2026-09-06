@@ -266,7 +266,7 @@ func (s *Server) hashSubSpill(src *spill, handles []*dirhandle.Handle, rootOf []
 		}
 		f := fEnt{rel: r.rel, rh: handles[r.rootIdx],
 			path: filepath.Join(rootOf[r.rootIdx], r.rel),
-			size: r.size, mod: time.Unix(r.mod, 0)}
+			size: r.size, mod: time.Unix(r.mod, 0), link: r.link}
 		h, herr := hashFile(f.openContent, 64*1024, cancel)
 		if herr != nil {
 			unreadable++ // it cannot group, but the scan should not pretend it never existed
@@ -294,7 +294,7 @@ func (s *Server) hashSubSpill(src *spill, handles []*dirhandle.Handle, rootOf []
 			}
 		}
 		n++
-		return out.addRaw(r.rootIdx, r.size, r.mod, r.rel, prefixTag(h))
+		return out.addRaw(r.rootIdx, r.size, r.mod, r.rel, prefixTag(h), r.link)
 	})
 	acc.noteSkipped(unreadable)
 	if cached > 0 {
@@ -552,6 +552,11 @@ func (t *groupTop) final(s *Server, budget int, cancel chan struct{}) ([]Group, 
 			g.files = g.files[:budget]
 		}
 		grp := Group{ID: "g" + strconv.Itoa(i), Ext: extOf(g.files[0].name), Size: g.size, Hash: g.hash}
+		// Copies is sent only when hard links make it smaller than the number
+		// of names, so a result without any says nothing new.
+		if copies := physicalCopies(g.files); copies < len(g.files) {
+			grp.Copies = copies
+		}
 		for fi, f := range g.files {
 			fe := s.fileEnt(f)
 			fe.Hash = g.hash
