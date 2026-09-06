@@ -41,10 +41,11 @@ surprised you, even if it is not a failure.
 1. **Install.** Follow the README's install steps. Note whether the
    folder-permission step was clear, and what a scan says when a folder has
    not been granted yet.
-2. **Scan each tool** over the same scope: Duplicate Files, Conflicting
-   Files (filled in by the duplicates scan), Empty Folders, Empty Files,
-   Temporary Files. Check that the counts in the left rail match what you
-   would expect, and spot-check a few rows in File Station.
+2. **Scan every tool.** Add your folders under Scan Scope in the sidebar,
+   leave all five tools ticked, and click Scan once: the scope is walked once
+   and results appear tool by tool. Check that the counts in the left rail
+   match what you would expect, and spot-check a few rows in File Station.
+   Then untick some tools and scan again; only the ticked ones should change.
 3. **Search and paging.** Use the search box, the magnifier menu (location,
    type, date range, size) and the column sort on a list longer than one
    page.
@@ -60,8 +61,9 @@ surprised you, even if it is not a failure.
    ext4 and USB.
 7. **Keep-one.** Try to select every copy in a duplicate group; the last one
    must refuse. Move all but one, then confirm a rescan shows the group gone.
-8. **Reference folders.** Mark a folder read-only in Scope, rescan, and
-   confirm its files show a padlock and cannot be selected or moved.
+8. **Reference folders.** Add a read-only reference folder in the sidebar
+   and confirm, without rescanning, that its files show a padlock and cannot
+   be selected or moved, and that moving into that folder is refused.
 9. **Interrupt a scan.** Start a long duplicates scan, then stop the package
    in Package Center and start it again. Reopen the app: it should say the
    scan was interrupted, and the next Scan click should offer Resume and
@@ -72,6 +74,9 @@ surprised you, even if it is not a failure.
 11. **Upgrade in place.** When a newer package version is available,
     install it over the old one and confirm the results and settings
     survived.
+12. **Hard links.** If a share holds hard links (backups made with
+    `rsync --link-dest` do), confirm the rows are labelled "hard link" and
+    that the group header and the reclaimable total count the file once.
 
 ## Reporting
 

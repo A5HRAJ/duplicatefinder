@@ -179,9 +179,18 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 	// landing mid-scan changes nothing a move could act on yet.
 	published := map[string]*toolResult{}
 	publish := func(res *toolResult) {
-		res.Scanned = time.Now().Format(time.RFC3339)
+		// Nanosecond precision because the app tells a fresh result from the
+		// one it already fetched by comparing this string: at whole seconds a
+		// rescan that finishes within the second its predecessor did looks
+		// unchanged, and the app keeps showing the previous result's page.
+		res.Scanned = time.Now().Format(time.RFC3339Nano)
 		s.mu.Lock()
 		s.results[res.Tool] = res
+		// The reference folders the result is protected by travel with it, in
+		// the same lock section: a page the app loads the moment the result
+		// lands must already see the list this scan was started with, or its
+		// padlocks describe the previous scan's list until something reloads.
+		s.refDirs = uniquePaths(req.RefDirs)
 		s.invalidateDerivedLocked() // views and date spans describe the result just replaced
 		if res.Tool == "duplicates" {
 			s.keepers = nil // fresh groups supersede recorded survivors
@@ -220,10 +229,10 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 			// looking at if that tool was scanned, else the first one.
 			s.lastTool = req.openTool(tools)
 			// The reference folders a move must respect are the ones the
-			// STORED results were scanned with — published here, at the
-			// end, never at admission: a cancelled scan that published
-			// nothing leaves the old results on screen, so it must leave
-			// their protection too.
+			// STORED results were scanned with — published with each result
+			// and restated here, never at admission: a cancelled scan that
+			// published nothing leaves the old results on screen, so it must
+			// leave their protection too.
 			s.refDirs = uniquePaths(req.RefDirs)
 		}
 		// How this run ended, for /api/state: the UI's poller has to tell a

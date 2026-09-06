@@ -700,6 +700,24 @@ func fsCannotAddress(name string) bool {
 
 // --------------------------------------------------------- share listing
 
+// folderIsEmpty reports whether a share-space folder holds no entry at all,
+// per File Station's listing. Used to tidy a batch folder that received
+// nothing; unlike folderHoldsOnlyJunk it accepts no entry of any kind.
+func (s *fsSession) folderIsEmpty(folderShare string) (bool, error) {
+	var data struct {
+		Total int `json:"total"`
+	}
+	fp, _ := json.Marshal(folderShare)
+	if err := s.call("SYNO.FileStation.List", "list", url.Values{
+		"folder_path": {string(fp)},
+		"offset":      {"0"},
+		"limit":       {"1"},
+	}, &data); err != nil {
+		return false, err
+	}
+	return data.Total == 0, nil
+}
+
 // folderHoldsOnlyJunk reports whether a share-space folder holds nothing but
 // disposable junk, per File Station's own listing. This is the empty-folders
 // tool's definition of "empty": zero entries, or entries that are all either

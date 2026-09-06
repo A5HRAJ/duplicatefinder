@@ -6,8 +6,9 @@
 server/        Go module: the daemon (daemon.go), the CGI proxy (cgi.go), the
                HTTP handlers, the scanner passes (scan.go, walk.go,
                duplicates.go, emptyfolders.go, tempfiles.go, corrupt.go), the
-               results service, persistence, the move flow (move.go) and the
-               File Station client (fsapi.go); dev.go is compiled only with -tags dev
+               results service, persistence, the move flow (move.go), the
+               File Station client (fsapi.go) and the per-platform inode
+               reader (inode_unix.go); dev.go is compiled only with -tags dev
 server/internal/media      the EXIF, HEIF and QuickTime readers and the container validators
 server/internal/dirhandle  the pinned directory handle and the O_NOFOLLOW relative open
 spk/ui/        The DSM desktop app (DuplicateFinder.js), its ui/config and api.cgi
@@ -114,6 +115,19 @@ something to investigate, not to rerun until green.
 ```bash
 cd server && go test -race ./...
 ```
+
+### Real files
+
+```bash
+DUPFINDER_CORPUS=~/Pictures go test -run TestCorpusNeverConvictsARealFile -v ./internal/media
+```
+
+The container validators' one unforgivable outcome is convicting a healthy
+file. This test walks a directory of real files, verifies every one and fails
+on any Damaged verdict; it is skipped without the variable. Run it over a
+large collection of photos, documents, archives and videos before changing a
+validator, and read the per-format counts it prints: a format that never
+reaches Proven is one the check does not cover.
 
 ### Fuzzing
 

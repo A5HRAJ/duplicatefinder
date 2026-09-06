@@ -178,6 +178,24 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	// jump straight to "no move running".
 	s.setMoveProgress(true, len(req.Files), len(req.Files), "")
 
+	// A batch folder that received nothing — every file refused or failed
+	// after it was allocated — is removed again, so an all-failed request
+	// leaves no empty "Duplicates" behind. Only when File Station lists it as
+	// empty: a folder holding anything at all, even a stray subfolder, is left
+	// visible rather than judged. (A folder-creation reply lost in transit is
+	// the one case this cannot tidy: the daemon cannot prove it created the
+	// folder it would be deleting, so that folder stays, visible and empty.)
+	if batch != nil && batch.name != "" && len(movedCanon) == 0 {
+		share := batch.destShare + "/" + batch.name
+		if empty, err := sess.folderIsEmpty(share); err == nil && empty {
+			if derr := sess.deletePath(share); derr == nil {
+				batch.name = "" // nothing was created that the response should name
+			} else {
+				log.Printf("empty batch folder %s could not be removed: %v", share, derr)
+			}
+		}
+	}
+
 	if len(movedCanon) > 0 {
 		s.pruneMoved(movedCanon, movedDirs, v.canon)
 		// Pruned rows and new keep-one survivors must survive a restart too,

@@ -13,19 +13,32 @@ Files you select are **moved, never deleted**, into a folder you choose, and
 
 ## What it does
 
+- **One Scan, every tool.** The sidebar holds the scan scope and a checkbox
+  for each of the five tools, all ticked by default. Scan walks the scope once
+  and runs every ticked tool over that one walk; each tool's results appear
+  as its pass finishes.
 - **Duplicate Files.** Files are grouped by size, then by a hash of their first
   64 KiB, then confirmed with a full BLAKE3 content hash, so only byte-identical
   files group. Every scan re-reads every candidate in full; a hash from an
   earlier scan is never trusted. Optional extra criteria (name, modified date,
   created date) narrow the groups. At least one copy of every group always
-  stays where it is.
+  stays where it is. Hard links to one file are labelled as such and count as
+  one copy when reclaimable space is measured, because removing one name of a
+  file frees nothing while another remains.
 - **Conflicting Files.** Files with the same size and the same modified time
-  but different content. Nothing that edits a file leaves both of those
-  untouched, so a difference underneath them points at bit rot, a bad sector
-  or an interrupted copy. Where the evidence allows, each copy is marked
-  *Corrupted* or *Intact* with the reason shown beside it; otherwise it is left
-  *Undetermined*. This category is a report only: it has no checkboxes and no
-  Move button, because choosing the copy to keep is your call.
+  but different content. Ordinary edits move the modified time, so a
+  difference underneath an unchanged one points at bit rot, a bad sector or
+  an interrupted copy; but tools that rewrite a file and put its timestamp
+  back leave the same trace, so a copy is marked *Corrupted* only on positive
+  evidence: a read that fails twice, a checksum or decode of its own that
+  fails, a run of zeros where the other copy holds data, or a one-or-two-bit
+  difference in a copy whose content changed under an unchanged timestamp.
+  *Intact* is granted only when a check covered the copy's payload: PNG,
+  gzip and ZIP-family checksums, a complete JPEG decode, or the checksums
+  inside every compressed PDF stream. Everything else is left *Undetermined*
+  with what was seen written beside it. This category is a report only: it
+  has no checkboxes and no Move button, because choosing the copy to keep is
+  your call.
 - **Empty Folders.** Folders holding nothing you could miss: no entries at
   all, or nothing but disposable junk such as `Thumbs.db`, `.DS_Store` and
   Synology's `@eaDir` thumbnail cache. A folder whose only content is a
@@ -34,7 +47,8 @@ Files you select are **moved, never deleted**, into a folder you choose, and
   and editor droppings such as `*.tmp`, `*.bak` and `desktop.ini`.
 - **Reference folders.** Folders you mark read-only are scanned but their
   files can never be selected or moved. Use them for the master copy of a
-  photo library or a backup.
+  photo library or a backup. The list is one setting shared by every tool
+  and view, and a change takes effect at once, without a rescan.
 - **Move.** Selected files go either into one new folder at the destination,
   named after the tool that found them and mirroring each file's original
   folder path, or straight into the destination. A name clash never
@@ -85,14 +99,16 @@ This writes one package per architecture family into `dist/`:
 Every move goes through the same checks, whether it comes from the app or
 from a direct call to the daemon:
 
-- Only files a scan actually listed can be moved, and only after the daemon
-  has confirmed, through DSM's File Station, that each file still has the
-  size, type and modified time the scan recorded. A file changed since the
-  scan is refused with "rescan and try again". For duplicates the first
-  64 KiB of content is re-read and compared as well.
+- Only files the tool's own scan listed can be moved, and only after the
+  daemon has confirmed, through DSM's File Station, that each file still has
+  the size, type and modified time that scan recorded. A file changed since
+  the scan is refused with "rescan and try again". For duplicates the first
+  64 KiB of content is re-read and compared as well, and an empty folder is
+  checked again for content just before it moves.
 - One copy of every duplicate group is held back, even if the request names
   them all, and the survivor stays protected until the next duplicates scan.
-  Files inside reference folders are never moved.
+  Files inside reference folders are never moved, and nothing is moved into
+  a reference folder either.
 - The move itself is executed by File Station with your own DSM account, so
   it behaves exactly like a move made in File Station: permissions, metadata
   and the real creation date carry over, and moves within a btrfs volume use
@@ -121,9 +137,17 @@ names it, not only the app.
   100,000 files; the other lists keep 20,000 rows. Narrowing the scan scope
   shows the rest.
 - **Long moves do not time out.** A move across volumes or onto an external
-  disk copies the data and takes as long as File Station needs; the app shows
-  per-file progress meanwhile. If the connection drops, the NAS finishes the
-  move and the app refreshes when it is done.
+  disk copies the data and takes as long as File Station needs, with no
+  deadline; the app shows per-file progress meanwhile. If the connection
+  drops, the NAS finishes the move and the app refreshes when it is done.
+- **Hard links** (several names for one file, as backup tools that use
+  `rsync --link-dest` create) are listed as duplicates but labelled, and the
+  reclaimable figures count the file once. Moving one name of a hard-linked
+  file frees no space while another name remains.
+- **Every scan issue is listed.** The toast after a scan quotes the first
+  location that could not be read; the summary bar links to the full list.
+  If the results could not be saved to disk, the app says so: they are real
+  on screen but will not survive a restart.
 - **Where moved files land in preserve mode** is a new folder named
   `Duplicates`, `Empty Folders`, `Empty Files` or `Temporary Files` inside the
   folder you picked, or the next free ` (n)` variant of that name. The app

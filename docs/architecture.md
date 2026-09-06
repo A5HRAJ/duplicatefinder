@@ -39,9 +39,11 @@ bin/dupfinder -mode daemon  127.0.0.1:9807, started by start-stop-status as the 
   `internal/media` and the pinned directory handle in `internal/dirhandle`)
   serves `/api/*` on
   loopback only. Every request must carry the daemon token, so other local
-  processes cannot drive it. Scans, moves, exports and cancels additionally
-  require the caller's DSM session, forwarded through the proxy; a raw call
-  with the token alone can read state and results, nothing more.
+  processes cannot drive it. Scans, moves, exports, cancels and changes to
+  the reference folders additionally require the caller's DSM session,
+  forwarded through the proxy; a raw call with the token alone can read state
+  and results, nothing more. Request bodies are bounded in the daemon and in
+  the proxy.
 
 The daemon binds its port before it touches the token file, so a second
 instance fails immediately and cannot rotate the token out from under the one
@@ -52,9 +54,16 @@ sleeping, so Package Center never reports a daemon that then died. The log
 
 ## Scanning
 
-A scan runs on one goroutine (`runScan` in `server/scan.go`, which hands each
-tool its own pass) with a per-tool accumulator; the tree is never materialized
-in memory.
+A scan names a set of tools and runs on one goroutine (`runScan` in
+`server/scan.go`). The scope is walked once, and every requested tool consumes
+that one walk — the empty-folder frames, the flat tools' bounded lists and the
+content pass's spill log — so five tools cost one enumeration rather than
+five. Each tool's result is published the moment its pass finishes: a scan
+stopped part-way keeps what it had found, and the app shows results as they
+land. The tree is never materialized in memory. The passes after the walk
+report progress in the frame of a scan run alone, and `setBand` maps each
+pass's frame into its share of the bar, so the bar climbs once from start to
+finish instead of falling back at every pass boundary.
 
 ### The walk
 
@@ -69,8 +78,11 @@ names. Content reads (hashing, EXIF) open files through the pinned root with
 `O_NOFOLLOW` on every path component (`openrel.go` in that package), which works on
 DSM's 3.10 kernels without `openat2`.
 
-Unreadable locations are collected into the scan's error list, capped at
-fifty entries plus a line saying how many more there were.
+Each entry's device and inode are recorded as well, so hard links — several
+names for one file — can be told from copies. Unreadable locations are
+collected into the scan's error list, bounded at 20,000 entries (the figure
+the flat tools' lists use) plus a line saying how many more there were; the
+app lists every one.
 
 ### Duplicates
 
@@ -97,7 +109,9 @@ fifty entries plus a line saying how many more there were.
    the per-row work a result needs (IDs, capture dates) is spent only on rows
    that survive the stored-results cap of 100,000 files. No single group may
    exceed that budget either. Anything dropped is counted into a truncation
-   report the UI shows.
+   report the UI shows. Reclaimable space — in the ranking, the totals and
+   the group header — is measured in physical copies: names sharing an inode
+   count once, and such rows are labelled as hard links.
 
 Created dates, when matching on them, are fetched from File Station per
 window; a file File Station cannot answer for gets a per-path sentinel key and
@@ -113,7 +127,9 @@ generations are history. `record` compares each fresh hash against the stored
 entry for the same path, size and mtime, and a difference is the bit-rot
 evidence the conflicting-files pass uses. Rot anywhere in a file is therefore
 caught by the next scan, at the price of re-reading every candidate every
-time. The store is capped at 500,000 entries, trimmed oldest generation first
+time. `record` also hands back the content the displaced entry held, which
+lets the conflicting-files pass compare a changed copy with its own former
+self. The store is capped at 500,000 entries, trimmed oldest generation first
 and, mid-scan, current-generation entries first so the history the rest of
 the scan still needs survives.
 
@@ -126,27 +142,49 @@ match criteria). Everything else is a new scan and re-reads everything.
 
 ### Conflicting files
 
-The duplicates scan also distils a second candidate set keyed on size and
-modified time alone, independent of the match criteria, and runs
-`scanCorrupted` (`server/corrupt.go`) over it after the duplicates result is
-complete. Members that disagree form a set. Each member is then judged by a
-ladder that stops at the first verdict:
+When Conflicting Files is requested, the content pass also distils a second
+candidate set keyed on size and modified time alone, independent of the match
+criteria, and runs `scanCorrupted` (`server/corrupt.go`) over it after the
+duplicates result is complete. Members that disagree form a set. Each member
+is then judged by a ladder in which only positive evidence convicts:
 
-1. the read failed with an I/O error, which on a checksummed volume means the
-   stored bytes are damaged;
-2. the content changed since an earlier scan while its size and modified time
-   did not, confirmed by re-checking that both are still current on disk;
-3. the file's own container is broken: PNG chunk CRCs, gzip's CRC and every
-   ZIP member's CRC convict a single copy; JPEG, PDF and ISO base-media files
-   are checked structurally, which catches truncation;
-4. the shape of the difference between two copies: a run of NULs on one side
-   is an interrupted copy and that side is the damaged one; a single flipped
-   bit is reported but convicts neither side.
+1. the read failed with an I/O error on two attempts (a read is retried once),
+   so the stored bytes cannot be read back;
+2. history — the content changed since an earlier scan while its size and
+   modified time did not, confirmed by re-checking that both are still
+   current on disk — is recorded as evidence, not as a verdict: tools that
+   rewrite a file and put its timestamp back (exiftool -P, touch -r, rsync
+   with times preserved) leave exactly that trace, so the rungs below decide
+   what kind of change it was;
+3. the file's own container: PNG chunk CRCs, gzip's CRC and every ZIP
+   member's CRC convict a single copy and prove it when they pass; a JPEG is
+   decoded completely, and a PDF's compressed streams are inflated so zlib
+   checks each Adler-32 trailer — both cover the payload and so both prove;
+   ISO base-media files are checked structurally, which catches truncation
+   but proves nothing about the samples inside. A container verdict re-checks
+   size and mtime first, so a file being saved while the scan reads it is not
+   convicted;
+4. the shape of a difference. A member whose content moved under a preserved
+   timestamp is compared with the sibling that holds exactly its former
+   content, so the difference between them is the change itself: a run of
+   zeros or a one-or-two-bit flip convicts it and makes the sibling the
+   original; a handful of bytes leaves the question open and a spread of them
+   is an edit — both described, convicting nobody. When the set holds exactly
+   two contents and nothing has been decided, the two are compared: a run of
+   NULs on one side is an interrupted copy and that side is the damaged one; a
+   flipped bit convicts the side whose content moved, or neither.
 
-A copy that verifies its own structure, in a set where another copy is
-positively damaged, is marked intact. Everything else stays undetermined.
-Sets whose members share a filename are listed first. The category is
-read-only: the daemon refuses any move that names it.
+A copy whose own payload verified, in a set where another copy is positively
+damaged, is marked intact. Everything else stays undetermined, with what was
+seen written next to it. Every validator polls the scan's cancel channel and
+none has a size cap; decompressed output is bounded so an archive bomb cannot
+turn a verdict into an outage, and a JPEG beyond 50 megapixels is left
+unproven rather than decoded into a small NAS's memory. Sets whose members
+share a filename are listed first, and a set with more members than the cap
+keeps the members carrying evidence ahead of the cut. The category is
+read-only: the daemon refuses any move that names it. The validators are
+fuzzed, and a corpus test runs them over a directory of real files and fails
+on any conviction.
 
 ### Empty folders, empty files, temporary files
 
@@ -156,9 +194,11 @@ topmost directory whose subtree holds no real file; junk names (the Temporary
 Files list) do not count as content, a zero-byte file does, and a directory
 the walk could not read makes it and every ancestor non-empty. Each
 candidate is then confirmed through File Station's own listing, which sees
-hidden entries the walk skipped: `@eaDir` is accepted as junk, any other
-directory rejects the candidate. A confirmation error is reported, never read
-as "not empty".
+hidden entries the walk skipped, and then through the daemon's own reading of
+the directory, so a hidden directory such as `.git` rejects the candidate
+whatever the listing chose to show: `@eaDir` is accepted as junk, any other
+directory rejects. A confirmation error is reported, never read as "not
+empty". A folder is confirmed empty once more just before it is moved.
 
 The two flat tools keep bounded top-K heaps ordered by path, capped at 20,000
 rows.
@@ -174,10 +214,12 @@ though the client holds one page. A page also carries a row budget, so one
 enormous group arrives trimmed and labelled with its true size.
 
 Reference-folder protection is decided by the daemon per page, on canonical
-paths, from the folders the stored results were scanned with, which is the
-same comparison the move refuses with. The padlocks, the reclaimable totals
-and the refusals can therefore never describe different sets; changing the
-reference folders takes effect at the next scan.
+paths, from its one reference list — the same list the move refuses with —
+so the padlocks, the reclaimable totals and the refusals can never describe
+different sets. The list is a setting shared by every tool and view: `POST
+/api/refs` replaces it at once (refused while a scan runs, since the scan's
+completion publishes the list it was started with), the change is persisted,
+and it takes effect in every view immediately rather than at the next scan.
 
 ## Persistence
 
@@ -186,15 +228,20 @@ reference folders, the keep-one survivors and the ID counter, so every
 move-safety invariant survives a restart. Writes are atomic: a temporary
 file, `fsync`, rename, then a directory sync. Results reach the disk before
 the interruption marker is cleared, so a crash during the final save is still
-reported as an interruption. A state file from a build that had tools this
-one lacks has those results dropped, because the move allowlist is built
-from every stored result.
+reported as an interruption; a save that fails keeps the marker and is
+published to the app, which tells the user the results on screen will not
+survive a restart. A state file from a build that had tools this one lacks has
+those results dropped, and a duplicates result whose rows carry no content
+fingerprint (an older build's) is dropped too, so no row is ever moved
+without the prefix re-read the move promises.
 
-`var/scan.interrupted` records a scan in flight: its tool, generation and
+`var/scan.interrupted` records a scan in flight: its tools, generation and
 normalized request. Found at daemon start it means the scan died, and the app
-offers **Resume** or **Start Over** at the next Scan click (for tools other
-than duplicates, re-running simply is the resume). Any admitted scan clears
-the marker, and a marker that cannot be removed is neutralized in place.
+offers **Resume** or **Start Over** at the next Scan click when the run
+included Duplicate Files (the other tools read no content, so re-running them
+is their resume). A resume must name the same tools, scope, reference folders,
+recursion and match criteria. Any admitted scan clears the marker, and a
+marker that cannot be removed is neutralized in place.
 
 ## Moves and exports
 
@@ -203,46 +250,63 @@ decodes the request, builds the vetting sets once, then runs `moveOne` per
 path. The checks run in this order, and every one of them compares
 symlink-resolved paths so an alias cannot slip past a prefix test:
 
-1. The tool must not be read-only, and in preserve mode must have a folder
-   name in the daemon's own table; the client's string is only ever a key.
+1. Every move names the tool whose results it acts on: the allowlist and the
+   identities its files must still match are built from that tool's rows
+   alone, so another tool's newer record of a rewritten file cannot stand in
+   for them. The tool must not be read-only, and in preserve mode its folder
+   name comes from the daemon's own table; the client's string is only ever a
+   key.
 2. No scan may be running (checked cheaply before the destination round trip
    and again, authoritatively, after the lock is taken).
 3. The destination is pinned, resolved and checked for containment in the
    volumes, then mapped to File Station's share space through the session's
    share table, which is fetched from File Station and never derived by
    string surgery (external shares mount under a directory that differs from
-   their name).
+   their name). A destination inside a reference folder is refused: nothing
+   leaves a reference folder and nothing is moved into one.
 4. Every requested path must be in the allowlist built from every stored
    result, and the identity File Station reports for it now (type, size,
    modified time as an epoch value) must match what some scan recorded. For
    duplicates the 64 KiB prefix is re-read and compared too, and with
    verification on the full hash must equal the scan's.
 5. Keep-one: for every duplicate group the request touches, File Station is
-   asked which members still exist as recorded; if the request would take the
-   last existing copy, one is held back. A directory move counts the group
-   members beneath it as requested. Survivors of dissolved groups stay
-   protected until the next duplicates scan. Reference-folder files are
-   refused.
+   asked which members still exist as their own group row recorded them; if
+   the request would take the last existing copy, one is held back. A
+   directory move counts the group members beneath it as requested.
+   Survivors of dissolved groups stay protected until the next duplicates
+   scan. Reference-folder files are refused.
 6. Names File Station cannot address (`.DS_Store` exactly, and any `._`
    AppleDouble name) are refused with a plain explanation rather than handed
    to File Station, which would report "no such file".
+7. An empty-folder row is confirmed empty once more, through File Station and
+   natively, just before it moves: its identity check sees only the folder's
+   type and modified time, and content that arrived since the scan must not
+   ride along into the cleanup folder.
 
 Execution is File Station's (`server/fsapi.go`): `CopyMove` with
-`remove_src`, polled to completion for up to twelve hours, always without the
-`overwrite` parameter. A name collision fails into a staging flow: the file is
-moved into a fresh `.dupfinder-tmp-*` folder inside the destination, renamed
-to the first free ` (n)` name per File Station's own view, and moved into
-place. A lost reply is not a failure: the daemon asks where the file actually
-is before reporting. A move that ends with the file parked in the staging
-folder reports the full path, and with verification on the parked copy is
-verified there. Failures that happen after the source is gone still prune the
-row, so it can never linger as a phantom survivor.
+`remove_src`, polled to completion with no deadline (a task DSM never finishes
+holds the request until the package is restarted, and the log says so every
+hour), always without the `overwrite` parameter. A name collision fails into a
+staging flow: the file is moved into a fresh `.dupfinder-tmp-*` folder inside
+the destination, renamed to the first free ` (n)` name per File Station's own
+view, and moved into place. A lost reply is not a failure: the daemon asks
+where the file actually is, and calls the move complete only when the entry at
+the destination carries the source's type, size and modified time. A generic
+File Station failure code goes through the staging retry only when the name is
+really taken at the destination; a directory found at both ends is reported as
+a partial move rather than staged, which would split it across two names. A
+move that ends with the file parked in the staging folder reports the full
+path, and with verification on the parked copy is verified there. Failures
+that happen after the source is gone still prune the row, so it can never
+linger as a phantom survivor.
 
 In preserve mode the batch's tool folder is allocated lazily, once per
 request, after the first file has cleared every check, so an all-refused
-request creates nothing. Two cases can leave an empty tool folder behind,
-both visible and harmless: a folder-creation reply lost in transit, and a
-batch whose every file File Station then fails to move.
+request creates nothing, and a batch whose every file then fails has its
+folder removed again once File Station lists it as empty. One case can still
+leave an empty folder behind, visible and harmless: a folder-creation reply
+lost in transit, since the daemon cannot prove it created the folder it would
+be deleting.
 
 Progress is published under the daemon's ordinary state lock, never the move
 lock, so `/api/state` stays answerable during a long move; the app polls it
@@ -262,10 +326,12 @@ scan-root and destination validation, the empty-folder confirmation, creation
 times and the volume overview. Kept native deliberately: content hashing (no
 API exists), scan enumeration (`Search` reports no per-path errors and no
 symlink indicator, so it would break the empty-folder gate and fabricate
-duplicate pairs), EXIF capture dates, the canonical-path containment checks
-(a security boundary must describe the filesystem the daemon actually walks)
-and volume-root discovery (the `/volume*`, `/volumeUSB*` and `/volumeSATA*`
-globs that define those walls).
+duplicate pairs), hard-link identity (device and inode, which no API
+reports), the second reading of a candidate empty folder (so the gate does
+not depend on what the listing chooses to show), EXIF capture dates, the
+canonical-path containment checks (a security boundary must describe the
+filesystem the daemon actually walks) and volume-root discovery (the
+`/volume*`, `/volumeUSB*` and `/volumeSATA*` globs that define those walls).
 
 ## Security model
 

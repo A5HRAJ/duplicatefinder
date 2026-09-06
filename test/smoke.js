@@ -61,6 +61,19 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   const errs = window.__harnessErrors || ['harness never initialized'];
   check('no window errors during construct/show: ' + JSON.stringify(errs.slice(0, 2)), errs.length === 0);
   const win = window.__win;
+  // A scan runs every ticked tool, and the daemon publishes each tool's result
+  // as its pass finishes — so a tool's flag flipping does not mean the scan is
+  // over. Anything that then acts on the daemon (a move, an export, another
+  // scan) has to wait for the whole run: the progress dialog goes when the
+  // poller sees running=false. Generous, because the ARM runner emulates.
+  const scanDone = async () => { for (let i = 0; i < 3000 && win.progressWin; i++) await sleep(200); };
+  // Which tools a Scan runs. The first scan below runs (nearly) all of them,
+  // proving the shared walk; every later scan is scoped to the tool its section
+  // is about, so the suite does not hash the whole fixture five times over —
+  // under the ARM runner's emulation that alone pushed sections past their
+  // waits.
+  const onlyTool = (id) => { Object.keys(win.state.tools).forEach((k) => { win.state.tools[k] = (k === id); }); };
+  const allTools = () => { Object.keys(win.state.tools).forEach((k) => { win.state.tools[k] = true; }); };
   check('main window constructed', !!win);
   if (!win) { console.log(failures + ' FAILURES'); process.exit(1); }
   check('main window rendered', !!win.rendered);
@@ -188,6 +201,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   win.startScan();
   for (let i = 0; i < 40 && !win.state.scanned.duplicates; i++) await sleep(300);
   check('scan completed and results stored', !!win.state.scanned.duplicates);
+  await scanDone();
   // Wait for the ROWS, not just the flag, before asserting on the card:
   // state.scanned[tool] flips when fetchMeta's totals arrive, one round trip
   // BEFORE the first page — so checking the active card here raced the load
@@ -944,8 +958,10 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
       /\ud83d\udd12/.test(win.scopeList.getEl().dom.textContent));
   }
   {
+    onlyTool('duplicates');
     const seq = win.__loads;
     win.startScan();
+    await scanDone();
     for (let i = 0; i < 100; i++) {
       let n = 0;
       if (win.__loads > seq) win.store.each((r) => { if (r.get('prot')) n++; });
@@ -998,8 +1014,10 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   // Back to no reference folders — by rescanning, which is what applies it.
   win.state.refDirs.pop();
   {
+    onlyTool('duplicates');
     const seq = win.__loads;
     win.startScan();
+    await scanDone();
     for (let i = 0; i < 100; i++) {
       let n = 0;
       if (win.__loads > seq) win.store.each((r) => { if (r.get('prot')) n++; });
@@ -1027,10 +1045,12 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   // empty-folder scan: truly empty dirs are listed; unreadable dirs (hidden
   // contents, like a Hyper Backup vault without permissions) are NOT
   win.setTool('empty_folders');
+  onlyTool('empty_folders');
   const efSeq = win.__loads;
   win.startScan();
   for (let i = 0; i < 40 && !win.state.scanned.empty_folders; i++) await sleep(300);
   check('empty-folder scan completed', !!win.state.scanned.empty_folders);
+  await scanDone();
   await waitForLoadAfter(win, efSeq, 1);
   const efNames = [];
   win.store.each((r) => efNames.push(r.get('name')));
@@ -1043,9 +1063,10 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   {
     const tfSeq = win.__loads;
     win.setTool('temp_files');
-    win.state.tools.temp_files = true;
+    onlyTool('temp_files');
     win.startScan();
     for (let i = 0; i < 40 && !win.state.scanned.temp_files; i++) await sleep(300);
+    await scanDone();
     await waitForLoadAfter(win, tfSeq, 1);
     let dsRec = null, plainRec = null;
     win.store.each((r) => {
@@ -1090,10 +1111,12 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   // flat tools sort server-side: a header click funnels through store.sort,
   // which must re-request the loaded window in the new order
   win.setTool('empty_files');
+  onlyTool('empty_files');
   const emSeq = win.__loads;
   win.startScan();
   for (let i = 0; i < 40 && !win.state.scanned.empty_files; i++) await sleep(300);
   check('empty-files scan completed', !!win.state.scanned.empty_files);
+  await scanDone();
   await waitForLoadAfter(win, emSeq, 2);
   check('empty files listed', win.store.getCount() >= 2);
   check('flat tool pages in rows and counts items',
@@ -1585,6 +1608,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   // the flag rides the /scan payload for the daemon's marker-gated check.
   // startScan revalidates against /state before showing the dialog, so the
   // stub answers /state too — with or without the notice, per leg.
+  allTools();
   {
     let scanBody = null;
     // The daemon's marker records the interrupted run's whole request, and
