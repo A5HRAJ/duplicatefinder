@@ -1096,7 +1096,13 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			this.volPanel = new Ext.Panel({ border: false, height: 76, html: '' });
 			this.westPanel = new Ext.Panel({
 				region: 'west',
-				width: 236,
+				// Wide enough for every tool label beside its checkbox, its icon
+				// and its badge at the badge's widest ("100,000", the duplicates
+				// cap). Measured on DSM 7.4: at 236 the checkbox left "Duplicate
+				// Files", "Temporary Files" and "Conflicting Files" clipped, and
+				// at 280 nothing clips while the top toolbar still has room to
+				// spare at the window's 1300 px minimum width.
+				width: 280,
 				border: true,
 				layout: 'vbox',
 				layoutConfig: { align: 'stretch' },

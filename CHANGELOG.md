@@ -4,6 +4,15 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
+## [1.1.1] - 2026-09-05
+
+### Fixed
+- The sidebar clipped the longer tool names ("Duplicate Files", "Temporary
+  Files", "Conflicting Files") once the tool checkboxes were added beside
+  them. Found on a DS916+; the rail is now wide enough for every name with
+  its badge at full width, and the toolbar still fits at the window's
+  minimum width.
+
 ## [1.1.0] - 2026-09-05
 
 ### Added

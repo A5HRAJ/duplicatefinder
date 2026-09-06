@@ -1,5 +1,5 @@
 PKG_NAME = duplicatefinder
-PKG_VERS = 1.1.0
+PKG_VERS = 1.1.1
 PKG_EXT = tar.gz
 # `digests` holds the hashes of the archive GitHub serves for tag v$(PKG_VERS)
 # (archive/refs/tags/v$(PKG_VERS).tar.gz); regenerate it with `make digests`
