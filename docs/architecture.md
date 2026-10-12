@@ -303,7 +303,13 @@ symlink-resolved paths so an alias cannot slip past a prefix test:
    the request would take the last existing copy, one is held back. A
    directory move counts the group members beneath it as requested.
    Survivors of dissolved groups stay protected until the next duplicates
-   scan. Reference-folder files are refused.
+   scan. Reference-folder files are refused. While a group still has an
+   original on disk, a copy Duplicate Finder itself moved never counts as the
+   copy that stays (`server/moveout.go`): every move records where it landed
+   and each landed file's data (shared folder, inode, size, modified time),
+   so a copy stays recognised after the user renames or reorganises the
+   folder it was moved into, and is an original again once put back where it
+   came from.
 6. Names File Station cannot address (`.DS_Store` exactly, and any `._`
    AppleDouble name) are refused with a plain explanation rather than handed
    to File Station, which would report "no such file".
@@ -374,8 +380,8 @@ scan-root and destination validation, the empty-folder confirmation, creation
 times and the volume overview. Kept native deliberately: content hashing (no
 API exists), scan enumeration (`Search` reports no per-path errors and no
 symlink indicator, so it would break the empty-folder gate and fabricate
-duplicate pairs), hard-link identity (device and inode, which no API
-reports), on-disk size (`st_blocks`, likewise unreported, and what a sparse
+duplicate pairs), hard-link identity and the record of moved copies (device and inode, which
+no API reports), on-disk size (`st_blocks`, likewise unreported, and what a sparse
 file frees), the file-type check that keeps pipes, sockets and devices out
 of the scan and out of the content readers (a listing reports none of it,
 and the open that would find out is the one that hangs), the second reading

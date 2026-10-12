@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
 
 // Only the batch-folder LAYOUT marks an unrecorded moved copy: a folder name
 // alone is a user's own "Duplicates" folder until it holds a volume name.
@@ -48,5 +53,82 @@ func TestKeepOneNeverLetsTheLastOriginalFollowItsMovedCopy(t *testing.T) {
 	onlyOut := map[string]bool{"/v/out/f": true}
 	if d := keepOneDrops([]Group{g}, both, nil, newDirResolver(), onlyOut, isOut); len(d) != 1 || !d["/v/out/f"] {
 		t.Fatalf("with the original gone, the moved copy is the one to keep: %v", d)
+	}
+}
+
+// A moved copy is recognised by the file itself, so renaming or reorganising
+// the folder it was moved into does not make it an "original" again — while
+// a moved file put back where it came from, a file edited since, a file with
+// a second name and an unrelated file of the same content are not mistaken
+// for one.
+func TestMovedCopyIsRecognisedByItsData(t *testing.T) {
+	root := t.TempDir()
+	dest := filepath.Join(root, "dest")
+	os.Mkdir(dest, 0o755)
+	moved := filepath.Join(dest, "x.jpg")
+	os.WriteFile(moved, []byte("same content"), 0o644)
+	orig := filepath.Join(root, "x.jpg") // where it was moved from
+	m := moveOutSet{}.with(append([]string{moved, fromKey + orig}, landedData(moved)...))
+	if !m.isOut(moved) {
+		t.Fatal("a just-moved copy must be out")
+	}
+
+	renamed := filepath.Join(root, "To review")
+	if err := os.Rename(dest, renamed); err != nil {
+		t.Fatal(err)
+	}
+	if !m.isOut(filepath.Join(renamed, "x.jpg")) {
+		t.Fatal("renaming the folder made the moved copy look like an original")
+	}
+	deeper := filepath.Join(root, "Sorted", "2020")
+	os.MkdirAll(deeper, 0o755)
+	if err := os.Rename(filepath.Join(renamed, "x.jpg"), filepath.Join(deeper, "x.jpg")); err != nil {
+		t.Fatal(err)
+	}
+	if !m.isOut(filepath.Join(deeper, "x.jpg")) {
+		t.Fatal("moving the copy elsewhere in its shared folder made it look like an original")
+	}
+
+	other := filepath.Join(root, "other.jpg") // same bytes, same time, its own data
+	os.WriteFile(other, []byte("same content"), 0o644)
+	fi, _ := os.Stat(filepath.Join(deeper, "x.jpg"))
+	os.Chtimes(other, fi.ModTime(), fi.ModTime())
+	if m.isOut(other) {
+		t.Fatal("an unrelated file of the same content was taken for the moved copy")
+	}
+
+	link := filepath.Join(root, "hardlink.jpg")
+	if err := os.Link(filepath.Join(deeper, "x.jpg"), link); err == nil {
+		if m.isOut(link) {
+			t.Fatal("a second name of the data is not a copy this app moved")
+		}
+		os.Remove(link)
+	}
+
+	if err := os.Rename(filepath.Join(deeper, "x.jpg"), orig); err != nil {
+		t.Fatal(err)
+	}
+	if m.isOut(orig) {
+		t.Fatal("a moved file put back where it came from is an original again")
+	}
+	os.Rename(orig, filepath.Join(deeper, "x.jpg"))
+	later := fi.ModTime().Add(time.Hour)
+	os.Chtimes(filepath.Join(deeper, "x.jpg"), later, later)
+	if m.isOut(filepath.Join(deeper, "x.jpg")) {
+		t.Fatal("a moved copy the user has since edited is theirs, not a moved copy")
+	}
+}
+
+// A moved folder's files are recorded one by one.
+func TestLandedDataCoversAMovedFolder(t *testing.T) {
+	root := t.TempDir()
+	d := filepath.Join(root, "junk")
+	os.Mkdir(d, 0o755)
+	os.WriteFile(filepath.Join(d, "a.tmp"), []byte("a"), 0o644)
+	os.WriteFile(filepath.Join(d, "b.bak"), []byte("b"), 0o644)
+	m := moveOutSet{}.with(landedData(d))
+	os.Rename(d, filepath.Join(root, "elsewhere"))
+	if !m.isOut(filepath.Join(root, "elsewhere", "b.bak")) || !m.isOut(filepath.Join(root, "elsewhere", "a.tmp")) {
+		t.Fatal("the files of a moved folder must stay recognised after the folder is renamed")
 	}
 }

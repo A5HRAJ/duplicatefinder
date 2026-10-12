@@ -166,6 +166,14 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			if batch == nil {
 				landed = append(landed, at)
 			}
+			// Every landed file is also recorded by its data, so the record
+			// survives the user renaming or reorganising the folder it is in.
+			landed = append(landed, landedData(at)...)
+		}
+		if gone {
+			// And where it came from: a moved file the user puts back there is
+			// an original again, whatever its data says.
+			landed = append(landed, fromKey+cp, fromKey+src)
 		}
 		if gone {
 			movedCanon = append(movedCanon, cp)
@@ -225,25 +233,23 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if anyLanded {
-		// Record where this request put things, so the next duplicates scan's
-		// pairing of each moved copy with its original can never make the
-		// moved copy the one that stays (moveout.go). Preserve mode records
-		// its one batch folder; a flat move records each entry it landed,
-		// never the whole destination, which may hold the user's own files.
-		if batch != nil && batch.name != "" {
-			landed = append(landed, filepath.Join(destCanon, batch.name))
-		}
-		if len(landed) > 0 {
-			s.mu.Lock()
-			s.moveOut = s.moveOut.with(landed)
-			s.mu.Unlock()
-		}
+	// Record where this request put things, so the next duplicates scan's
+	// pairing of each moved copy with its original can never make the moved
+	// copy the one that stays (moveout.go). Preserve mode records its one
+	// batch folder; a flat move records each entry it landed, never the whole
+	// destination, which may hold the user's own files.
+	if anyLanded && batch != nil && batch.name != "" {
+		landed = append(landed, filepath.Join(destCanon, batch.name))
+	}
+	if len(landed) > 0 {
+		s.mu.Lock()
+		s.moveOut = s.moveOut.with(landed)
+		s.mu.Unlock()
 	}
 	if len(movedCanon) > 0 {
 		s.pruneMoved(movedCanon, movedDirs, v.canon)
 	}
-	if anyLanded || len(movedCanon) > 0 {
+	if len(landed) > 0 || len(movedCanon) > 0 {
 		// Pruned rows, new keep-one survivors and the record of moved copies
 		// must survive a restart too, or a reboot would resurrect moved rows
 		// and forget protections.
