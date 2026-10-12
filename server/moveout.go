@@ -7,6 +7,9 @@
 package main
 
 import (
+	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -45,13 +48,88 @@ func inBatchLayout(p string) bool {
 	return false
 }
 
-// moveOutSet is the record of where moves put things, as canonical paths: a
-// preserve-mode batch folder, or — for a flat move, which lands among
-// whatever the destination already held — each moved entry's own final
-// path, so files that were there before are not mistaken for moved copies.
+// moveOutSet is the record of where moves put things. Three kinds of entry
+// share the one set, told apart by their form:
+//
+//   - a canonical path: a preserve-mode batch folder, or — for a flat move,
+//     which lands among whatever the destination already held — each moved
+//     entry's own final path, so files that were there before are not
+//     mistaken for moved copies;
+//   - "data:" + share + inode + size + modified time (dataKeyOf): every
+//     regular file a move landed, recognised by the file itself, so renaming
+//     or moving the folder it sits in — anywhere within its shared folder —
+//     does not turn the copy back into an "original";
+//   - "from:" + path: a path an entry was moved AWAY from. Whatever stands
+//     there later — the user's own restore of the moved file, or something
+//     new — is not a copy in a cleanup folder.
+//
 // Copy-on-write: a move publishes a NEW set under mu and never mutates a
 // published one, so readers hold it without a lock.
 type moveOutSet map[string]bool
+
+const (
+	dataKey = "data:"
+	fromKey = "from:"
+)
+
+// shareRoot is the shared folder a canonical path lies in, "/volume1/Photos"
+// for "/volume1/Photos/2020/a.jpg": the namespace an inode is unique within
+// on Btrfs, where every shared folder is a subvolume of its own. "" for a
+// path too short to name one.
+func shareRoot(p string) string {
+	parts := strings.SplitN(p, "/", 4)
+	if len(parts) < 4 || parts[0] != "" || parts[1] == "" || parts[2] == "" {
+		return ""
+	}
+	return "/" + parts[1] + "/" + parts[2]
+}
+
+// dataKeyOf identifies the regular file at canonical path p by its data: the
+// shared folder, inode, size and modified time. A rename or a move within
+// the shared folder keeps all four; an unrelated file matching all four by
+// chance after the moved one was deleted is not a practical event. "" for
+// anything but a regular file with a readable inode.
+func dataKeyOf(p string, fi os.FileInfo) string {
+	root := shareRoot(p)
+	if root == "" || !fi.Mode().IsRegular() {
+		return ""
+	}
+	l := linkOf(fi)
+	if l.ino == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s%s|%d|%d|%d", dataKey, root, l.ino, fi.Size(), fi.ModTime().Unix())
+}
+
+// landedData returns the data keys of the regular files a move just put at
+// the canonical path at: the file itself, or every file of a moved folder.
+func landedData(at string) []string {
+	var out []string
+	fi, err := os.Lstat(at)
+	if err != nil {
+		return nil
+	}
+	if !fi.IsDir() {
+		if k := dataKeyOf(at, fi); k != "" {
+			out = append(out, k)
+		}
+		return out
+	}
+	filepath.WalkDir(at, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || len(out) >= maxManifest {
+			return nil
+		}
+		if d.Type().IsRegular() {
+			if fi, ierr := d.Info(); ierr == nil {
+				if k := dataKeyOf(p, fi); k != "" {
+					out = append(out, k)
+				}
+			}
+		}
+		return nil
+	})
+	return out
+}
 
 // covers reports whether p is a recorded entry or lies inside one. It walks
 // p's ancestors — tree depth, not the size of the record.
@@ -69,7 +147,24 @@ func (m moveOutSet) covers(p string) bool {
 
 // isOut reports whether the canonical path p is a copy Duplicate Finder moved.
 func (m moveOutSet) isOut(p string) bool {
-	return inBatchLayout(p) || m.covers(p)
+	return inBatchLayout(p) || m.covers(p) || m.holdsMovedData(p)
+}
+
+// holdsMovedData reports whether the file at p is one a move landed, by its
+// data rather than its path. Not at a path something was moved away from —
+// a moved file put back where it came from is an original again — and not
+// for a file with several names: its other names share the inode, and one
+// of them may be the very place the moved name was taken from.
+func (m moveOutSet) holdsMovedData(p string) bool {
+	if len(m) == 0 || m[fromKey+p] {
+		return false
+	}
+	fi, err := os.Lstat(p)
+	if err != nil || linkOf(fi).n > 1 {
+		return false
+	}
+	k := dataKeyOf(p, fi)
+	return k != "" && m[k]
 }
 
 // with returns a new set holding m's entries plus add.

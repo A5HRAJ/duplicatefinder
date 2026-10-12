@@ -237,6 +237,29 @@ r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/dest/b.txt\
 echo "$r" | grep -q '"moved":\["' || fail "moving the moved copy on was refused: $r"
 pass "a moved copy can still be moved on"
 
+echo "== moved copies after their folder is renamed"
+# The record must follow the moved file, not the folder's name: rename the
+# folder a flat move landed in, and the copy inside it is still a moved copy.
+printf 'renamed-folder content' > "$SHARE/y1.txt"
+cp -p "$SHARE/y1.txt" "$SHARE/y2.txt"
+mkdir -p "$SHARE/kept"
+scan '["duplicates"]'
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/y2.txt\"],\"dest\":\"$SHARE/kept\",\"verify\":false,\"preserve\":false}")
+echo "$r" | grep -q '"moved":\["' || fail "the flat move for the rename check failed: $r"
+mv "$SHARE/kept" "$SHARE/kept renamed"
+scan '["duplicates"]'
+api POST /api/results '{"tool":"duplicates","offset":0,"limit":100}' | python3 -c '
+import json,sys
+share=sys.argv[1]
+out={f["path"]+"/"+f["name"]: f.get("out",False) for g in json.load(sys.stdin)["groups"] for f in g["files"]}
+want={share+"/y1.txt":False, share+"/kept renamed/y2.txt":True}
+bad={p:(out.get(p),w) for p,w in want.items() if out.get(p)!=w}
+if bad: sys.exit("moved-copy flags wrong after the rename (got, want): %r" % bad)' "$SHARE" || fail "renaming the folder lost the moved-copy record"
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/y1.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")
+echo "$r" | grep -q 'already moved' || fail "moving the original past its renamed-folder copy was not refused: $r"
+[ -f "$SHARE/y1.txt" ] || fail "the original moved despite the refusal"
+pass "a moved copy stays a moved copy after its folder is renamed, and its original stays put"
+
 echo "== SIGTERM"
 kill -TERM "$DPID"
 for i in $(seq 1 20); do kill -0 "$DPID" 2>/dev/null || break; sleep 0.25; done
