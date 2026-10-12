@@ -1650,6 +1650,81 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     fired3 === null && /already running/.test(msg3 || ''));
   win.sm.clearSelections();
 
+  // A move whose own answer never arrives (DSM's web server gives up on long
+  // requests): the window keeps following it and, once the daemon reports no
+  // move running, shows the report the daemon kept — the same account the
+  // answer would have given — and tells the daemon it was shown.
+  const reportDest = volRoot + '/spare/report-dest';
+  fsm.mkdirSync(reportDest, { recursive: true });
+  // Puts a file these checks moved back where it came from, so the fixture
+  // the later sections count is unchanged.
+  const moveBack = (src) => {
+    const landed = reportDest + '/' + path.basename(src);
+    if (src && fsm.existsSync(landed)) fsm.renameSync(landed, src);
+  };
+  {
+    for (let i = 0; i < 40 && !win.store.getCount(); i++) await sleep(200);
+    win.sm.selectRow(4, true);
+    let msgO = null, acked = null, sentId = null, sentSrc = null;
+    win.notify = function (m) { msgO = m; };
+    window.Ext.Ajax.request = function (o) {
+      if (/\/move(\?|$)/.test(o.url || '')) {
+        sentId = o.jsonData && o.jsonData.id;
+        sentSrc = o.jsonData && o.jsonData.files[0];
+        const cb = o.callback;
+        o.callback = function (opts) { cb.call(this, opts, false, { responseText: '', status: 0 }); };
+      }
+      if (/\/move\/report(\?|$)/.test(o.url || '') && o.method === 'POST') acked = o.jsonData;
+      return oa2.apply(this, arguments);
+    };
+    win.doMove(win.sm.getSelections(), reportDest, false, 'duplicates', true);
+    for (let i = 0; i < 60 && !/^Moved 1 /.test(msgO || ''); i++) await sleep(200);
+    for (let i = 0; i < 20 && !acked; i++) await sleep(100);
+    window.Ext.Ajax.request = oa2;
+    check('a move whose answer was lost is reported from the kept report (' + JSON.stringify(msgO) + ')',
+      /^Moved 1 file to /.test(msgO || ''));
+    check('the shown report is acknowledged under the id the move was sent with',
+      !!acked && !!sentId && acked.id === sentId);
+    check('the window is free for the next move', win._moveInFlight === false);
+    moveBack(sentSrc);
+  }
+
+  // A report nobody saw — the window that started the move was closed — is
+  // shown by the next window that opens.
+  {
+    const API0 = 'http://localhost:' + PORT + '/api';
+    for (let i = 0; i < 40 && !win.store.getCount(); i++) await sleep(200);
+    const recU0 = win.store.getAt(4);
+    const raw = await (await fetch(API0 + '/move', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ files: [recU0.get('path') + '/' + recU0.get('name')], dest: reportDest,
+        preserve: false, tool: 'duplicates', verify: false, id: 'smoke-unseen' }),
+    })).json();
+    check('a move with no window following it ran (' + JSON.stringify(raw.errors) + ')', raw.moved && raw.moved.length === 1);
+    const st0 = await (await fetch(API0 + '/state')).json();
+    check('/state says its report is waiting', !!st0.lastMove && st0.lastMove.id === 'smoke-unseen');
+    const win2 = new window.SYNO.SDS.DuplicateFinder.MainWindow({});
+    let msg5 = null;
+    win2.notify = function (m) { msg5 = m; };
+    win2.show();
+    for (let i = 0; i < 60 && !/Your last move has finished/.test(msg5 || ''); i++) await sleep(200);
+    check('the next window shows the unseen report (' + JSON.stringify(msg5) + ')',
+      /^Your last move has finished\. Moved 1 file to /.test(msg5 || ''));
+    let st1 = null;
+    for (let i = 0; i < 20; i++) {
+      st1 = await (await fetch(API0 + '/state')).json();
+      if (!st1.lastMove) break;
+      await sleep(100);
+    }
+    check('once shown, the report is no longer offered', !st1.lastMove);
+    await sleep(1500); // let its first page load land before it goes
+    win2.close();
+    await sleep(200);
+    moveBack(raw.moved[0]);
+    win.reloadPage();
+    await sleep(500);
+  }
+
   // A selection REPLACED between opening the dialog and picking the folder
   // must not move the originally captured batch — the pick IS the move, with
   // no confirmation after it.
