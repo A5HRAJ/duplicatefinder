@@ -115,18 +115,22 @@ the next it is an ordinary DSM upgrade, and the var dir stays (the
 
 - The public repository is https://github.com/A5HRAJ/duplicatefinder, and
   `MAINTAINER`, `HOMEPAGE` and `PKG_DIST_SITE` name it. Tag `v1.1.2` marks
-  the source this recipe builds (1.1.2-5; `v1.1.1` was 1.1.1-4, `v1.1.0`
-  1.1.0-3, `v1.0.1` 1.0.1-2 and `v1.0.0` 1.0.0-1); `digests` holds the SHA1,
-  SHA256 and MD5 of the archive GitHub serves for that tag
-  (`archive/refs/tags/v1.1.2.tar.gz`, top directory `duplicatefinder-1.1.2`). A new release means a new tag, a new
-  `PKG_VERS`/`SPK_VERS`, `SPK_REV` one higher, a `CHANGELOG` line, and
-  `make digests` in `cross/duplicatefinder`.
+  the source this recipe builds. `SPK_REV` restarted at 1 for the
+  SynoCommunity submission (1.1.2-1), as every new spksrc package does; the
+  revisions 1.0.0-1 to 1.1.2-5 were this repository's own builds, and since
+  DSM compares the version before the revision, a NAS running 1.1.2-5 still
+  upgrades to the next release. `digests` holds the SHA1, SHA256 and MD5
+  of the archive GitHub serves for that tag
+  (`archive/refs/tags/v1.1.2.tar.gz`, top directory
+  `duplicatefinder-1.1.2`). A new release means a new tag, a new
+  `PKG_VERS`/`SPK_VERS`, `SPK_REV` one higher (never reset again), a
+  `CHANGELOG` line, and `make digests` in `cross/duplicatefinder`.
 - The tagged archive itself still carries the zeroed `digests` file. That is
   unavoidable, since the hashes depend on the archive's bytes, and harmless:
   spksrc reads `digests` from its own tree, never from the archive.
 - `LICENSE = MIT` matches the repository's LICENSE file.
 - The daemon's `/api/info` reports `PKG_VERS` alone (`1.1.2`, never
-  `1.1.2-5`): the cross package cannot see `SPK_REV`.
+  `1.1.2-1`): the cross package cannot see `SPK_REV`.
 - Built through the spksrc toolchain on 2026-09-04 for x64, aarch64 and
   armv7 as 1.0.0-1 (`duplicatefinder_<arch>-7.1_1.0.0-1.spk`, the build the
   per-arch checks under "Building it" describe), then again as 1.0.1-2 for

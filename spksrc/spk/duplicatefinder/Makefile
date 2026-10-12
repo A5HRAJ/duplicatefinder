@@ -1,6 +1,6 @@
 SPK_NAME = duplicatefinder
 SPK_VERS = 1.1.2
-SPK_REV = 5
+SPK_REV = 1
 SPK_ICON = src/duplicatefinder.png
 
 DEPENDS = cross/duplicatefinder
@@ -16,7 +16,7 @@ REQUIRED_MIN_DSM = 7.0
 MAINTAINER = A5HRAJ
 DISPLAY_NAME = Duplicate Finder
 DESCRIPTION = Find and clean up duplicate files, empty folders, empty files and temporary junk on your DiskStation, and spot conflicting files: copies that share a size and modified time but no longer hold the same content. Duplicates are matched by BLAKE3 content hash. Selected files are moved \(never deleted\) to a folder you choose.
-CHANGELOG = "1. Named pipes and sockets are no longer listed as empty files, and verifying one can no longer hang every later scan and move. 2. Reclaimable space counts what sparse files really occupy. 3. File names that are not valid Unicode are shown and saved intact, and marked as not movable with the reason. 4. A move onto a volume without room is refused before it starts, and the package stops cleanly."
+CHANGELOG = "1. Initial package. Duplicate Finder 1.1.2."
 
 HOMEPAGE = https://github.com/A5HRAJ/duplicatefinder
 LICENSE  = MIT
