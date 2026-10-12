@@ -164,3 +164,29 @@ func TestRewriteStringsLeavesUnchangedValuesAlone(t *testing.T) {
 		t.Fatal("a value without invalid bytes reported a change")
 	}
 }
+
+// The escape is only reversible if a name that ALREADY holds one of the
+// escape runes, as perfectly valid UTF-8, is escaped too: otherwise the
+// app sends that name back, unescapeBytes turns the rune into a single
+// byte, and the daemon acts on a different path — "x\xc3" — than the file
+// the row showed. Both files are real files a filesystem can hold at once.
+func TestEscapeBytesIsReversibleForNamesHoldingAnEscapeRune(t *testing.T) {
+	real := "/volume1/x/a" + string(rune(escBase+0xc3)) + ".txt" // valid UTF-8
+	other := "/volume1/x/a\xc3.txt"                              // one invalid byte
+	for _, s := range []string{real, other, real + "\xff", "\xf4\x8f\xbb", string(rune(escBase + 0x80)), string(rune(escBase + 0x7f))} {
+		if got := unescapeBytes(escapeBytes(s)); got != s {
+			t.Errorf("round trip of %q gave %q", s, got)
+		}
+	}
+	if escapeBytes(real) == escapeBytes(other) {
+		t.Errorf("two different names escape to the same string %q", escapeBytes(real))
+	}
+	b, err := marshalBytesafe(map[string]string{"p": real})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]string
+	if err := unmarshalBytesafe(b, &back); err != nil || back["p"] != real {
+		t.Errorf("JSON round trip of %q gave %q (%v)", real, back["p"], err)
+	}
+}

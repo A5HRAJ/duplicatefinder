@@ -41,22 +41,49 @@ const escBase = 0x10FE00
 // replaced by its escape rune. A valid string is returned as is, without
 // allocating: this runs over every string of every response on the slow
 // path, and almost all of them are plain UTF-8.
+//
+// A name can also hold an escape rune itself, as perfectly valid UTF-8. Left
+// alone, unescapeBytes would later turn it into one byte, and the path the
+// app sends back would name a DIFFERENT file — "a\xc3.txt" instead of the
+// one shown. So each byte of such a rune is escaped too, which keeps the
+// mapping one-to-one: every string has exactly one escaped form, and
+// unescapeBytes always returns the bytes that went in.
 func escapeBytes(s string) string {
-	if utf8.ValidString(s) {
+	if utf8.ValidString(s) && !holdsEscapeRune(s) {
 		return s
 	}
 	b := make([]byte, 0, len(s)+8)
 	for i := 0; i < len(s); {
 		r, n := utf8.DecodeRuneInString(s[i:])
-		if r == utf8.RuneError && n == 1 {
-			b = utf8.AppendRune(b, rune(escBase)+rune(s[i]))
-			i++
+		if (r == utf8.RuneError && n == 1) || isEscapeRune(r) {
+			for _, c := range []byte(s[i : i+n]) {
+				b = utf8.AppendRune(b, rune(escBase)+rune(c))
+			}
+			i += n
 			continue
 		}
 		b = append(b, s[i:i+n]...)
 		i += n
 	}
 	return string(b)
+}
+
+// isEscapeRune reports whether r is one of the runes a byte travels as.
+func isEscapeRune(r rune) bool { return r >= escBase+0x80 && r <= escBase+0xFF }
+
+// escapeRunePrefixes are the first three bytes every escape rune's UTF-8
+// form starts with: U+10FE80…U+10FEBF is F4 8F BA xx, U+10FEC0…U+10FEFF is
+// F4 8F BB xx.
+var escapeRunePrefixes = []string{"\xf4\x8f\xba", "\xf4\x8f\xbb"}
+
+// holdsEscapeRune reports whether s contains an escape rune's UTF-8 bytes.
+func holdsEscapeRune(s string) bool {
+	for _, p := range escapeRunePrefixes {
+		if strings.Contains(s, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // escapeMarker is the two-byte UTF-8 prefix every escape rune shares: the
@@ -73,7 +100,7 @@ func unescapeBytes(s string) string {
 	b := make([]byte, 0, len(s))
 	for i := 0; i < len(s); {
 		r, n := utf8.DecodeRuneInString(s[i:])
-		if r >= escBase+0x80 && r <= escBase+0xFF {
+		if isEscapeRune(r) {
 			b = append(b, byte(r-escBase))
 		} else {
 			b = append(b, s[i:i+n]...)
@@ -212,10 +239,12 @@ func rewriteInPlace(ptr any, fn func(string) string) {
 // encoding is kept whenever it lost nothing; the encoder marks every byte it
 // replaced with the six-character escape \ufffd (a genuine U+FFFD is written
 // raw, never escaped), so its absence proves the fast path safe, and its
-// presence sends the value through escapeBytes and a second encoding.
+// presence sends the value through escapeBytes and a second encoding. So
+// does a raw escape rune in the output: a name that holds one as valid UTF-8
+// must be escaped too, or it would come back as a different name.
 func marshalBytesafe(v any) ([]byte, error) {
 	b, err := json.Marshal(v)
-	if err != nil || !bytes.Contains(b, []byte(`\ufffd`)) {
+	if err != nil || (!bytes.Contains(b, []byte(`\ufffd`)) && !holdsEscapeRune(string(b))) {
 		return b, err
 	}
 	nv, changed := rewriteStrings(reflect.ValueOf(v), escapeBytes)
