@@ -64,8 +64,15 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 	var PAGE_TIMEOUT = 60000;
 
 	/* ------------------------------------------------------------ utils */
+	/* A name that is not valid Unicode reaches the app with each such byte
+	   carried as a private-use character (server/bytesafe.go), so the string
+	   still names the file when it is sent back. On screen each is drawn as
+	   the replacement character, the way any tool shows an undecodable
+	   byte; BYTE_ESC is that character range (U+10FE80…U+10FEFF) as the
+	   surrogate pair JavaScript stores it in. */
+	var BYTE_ESC = /\uDBFF[\uDE80-\uDEFF]/g;
 	function esc(s) {
-		return Ext.util.Format.htmlEncode(String(s == null ? '' : s));
+		return Ext.util.Format.htmlEncode(String(s == null ? '' : s).replace(BYTE_ESC, '\uFFFD'));
 	}
 	function fmtBytes(b) {
 		b = b || 0;
@@ -1524,7 +1531,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					// which reads exactly like a backend bug.
 					'id', 'name', 'path', 'size', 'date', 'created', 'captured',
 					'hash', 'ext', 'prot', 'isDir', 'gidx', 'grpLabel', 'ord',
-					'verdict', 'evidence', 'nomove', 'links'
+					'verdict', 'evidence', 'nomove', 'links', 'alloc'
 				]),
 				paramNames: { start: 'offset', limit: 'limit', sort: 'sort', dir: 'dir' },
 				groupField: 'gidx',
@@ -2027,7 +2034,10 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// reclaimable space is measured in copies, never in names.
 			var keep = Math.max(g.prot || 0, 1);
 			var copies = g.copies || whole;
-			var recl = g.size * Math.max(0, copies - keep);
+			// g.reclaim is the daemon's figure, measured on disk: a sparse
+			// or compressed copy frees less than its size. The arithmetic
+			// below is the fallback for a daemon that predates it.
+			var recl = (g.reclaim != null) ? g.reclaim : g.size * Math.max(0, copies - keep);
 			return fmtNum(whole) + ' identical files' +
 				(copies < whole ? ' <span class="df-group-more">(' + fmtNum(copies) + ' copies; the rest are hard links)</span>' : '') +
 				' &nbsp;·&nbsp; ' + fmtBytes(g.size) + ' each &nbsp;·&nbsp; ' + esc(g.ext) +
@@ -2773,7 +2783,12 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// once at the end instead
 			if (this._bulkSelecting) return;
 			var recs = this.sm.getSelections(), bytes = 0;
-			Ext.each(recs, function (r) { bytes += r.get('size') || 0; });
+			// What a row frees is what it holds on disk (alloc, when the scan
+			// recorded less than its size), not its apparent size.
+			Ext.each(recs, function (r) {
+				var a = r.get('alloc');
+				bytes += (a != null ? a : r.get('size')) || 0;
+			});
 			if (isReadOnly(this.state.tool)) {
 				// Says what to do next instead of offering an action the tool
 				// does not have. Export stays available beside it.

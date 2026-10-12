@@ -4,6 +4,43 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
+## [Unreleased]
+
+### Fixed
+- A named pipe or a socket in the scan scope (a Docker container's socket, a
+  backup of a Linux system) was listed as an Empty File, and moving it with
+  Verify on hung the daemon for good: opening a pipe to read it never
+  returns, so the move never finished and every later scan and move was
+  refused until the package was restarted. Only regular files and folders are
+  scanned now, and the content readers refuse anything else at once.
+- Sparse files — virtual machine disks, preallocated downloads — were counted
+  at their apparent size, so two 1 GB images that occupied nothing were
+  reported as 1 GB reclaimable. Reclaimable space is now measured in bytes
+  held on disk, per copy, and never promises more than removing all but the
+  largest copy would free.
+- A file whose name is not valid UTF-8 (a Latin-1 or Shift-JIS name from an
+  old Windows or Linux machine) was listed but could never be moved: the
+  name lost its bytes on the way to the app, every move was refused with
+  "not part of the current scan results", two such files showed as the same
+  row twice, and the bytes were lost again in the saved results. Names now
+  travel byte for byte in both directions and in the state file, the app
+  draws each undecodable byte as �, and such a row is marked unmovable with
+  the reason — DSM's File Station cannot address the name — instead of
+  failing the move with a message that sends the user in circles.
+- A move onto another volume that could not hold the files failed partway,
+  one file at a time; it is now refused before anything is created, with the
+  free and needed amounts.
+- The daemon had no handler for the stop signal, so a package stop, a DSM
+  reboot or an upgrade killed it on the spot: a move batch in progress now
+  finishes the file it is on, reports the rest as not attempted and saves what
+  it moved before exiting. The HTTP server also gained header and idle
+  timeouts.
+
+### Added
+- `test/audit.sh`, run by the release gate: the real daemon against named
+  pipes and sockets, sparse files, names outside UTF-8, Stop, a full
+  destination volume and SIGTERM.
+
 ## [1.1.1] - 2026-09-05
 
 ### Fixed

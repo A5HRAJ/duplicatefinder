@@ -266,7 +266,7 @@ func (s *Server) hashSubSpill(src *spill, handles []*dirhandle.Handle, rootOf []
 		}
 		f := fEnt{rel: r.rel, rh: handles[r.rootIdx],
 			path: filepath.Join(rootOf[r.rootIdx], r.rel),
-			size: r.size, mod: time.Unix(r.mod, 0), link: r.link}
+			size: r.size, holes: r.holes, mod: time.Unix(r.mod, 0), link: r.link}
 		h, herr := hashFile(f.openContent, 64*1024, cancel)
 		if herr != nil {
 			unreadable++ // it cannot group, but the scan should not pretend it never existed
@@ -294,7 +294,7 @@ func (s *Server) hashSubSpill(src *spill, handles []*dirhandle.Handle, rootOf []
 			}
 		}
 		n++
-		return out.addRaw(r.rootIdx, r.size, r.mod, r.rel, prefixTag(h), r.link)
+		return out.addRaw(r.rootIdx, r.size, r.mod, r.rel, prefixTag(h), r.link, r.holes)
 	})
 	acc.noteSkipped(unreadable)
 	if cached > 0 {

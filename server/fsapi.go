@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // dsmBaseHeader carries the local DSM base URL (scheme://127.0.0.1:port),
@@ -216,11 +217,8 @@ func worthStaging(err error) bool {
 
 // jsonArr encodes path-like parameters as a JSON array, the Web API's
 // unambiguous list syntax — a comma inside a filename must not split it
-// into two paths.
-func jsonArr(items ...string) string {
-	b, _ := json.Marshal(items)
-	return string(b)
-}
+// into two paths. jsonArr lives in bytesafe.go: it quotes names byte for
+// byte, where the standard encoder would rewrite a non-UTF-8 name.
 
 // ---------------------------------------------------------- API versions
 
@@ -337,6 +335,11 @@ func (s *fsSession) do(req *http.Request, api string, out any) error {
 	if err != nil {
 		return err
 	}
+	// A name that is not UTF-8 comes back from DSM as the bytes it holds.
+	// Escaped before decoding — JSON structure is ASCII, so every such byte
+	// is inside a string — and restored below, so a path the daemon asked
+	// about is answered under the path it asked with.
+	body = []byte(escapeBytes(string(body)))
 	var env fsEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
 		return fmt.Errorf("unexpected DSM response (%s)", resp.Status)
@@ -349,7 +352,10 @@ func (s *fsSession) do(req *http.Request, api string, out any) error {
 		return fe
 	}
 	if out != nil && len(env.Data) > 0 {
-		return json.Unmarshal(env.Data, out)
+		if err := json.Unmarshal(env.Data, out); err != nil {
+			return err
+		}
+		rewriteInPlace(out, unescapeBytes)
 	}
 	return nil
 }
@@ -365,7 +371,7 @@ func (s *fsSession) copyMoveOnce(srcShare, destShare string) error {
 	}
 	// dest_folder_path is documented as a singular String (unlike path);
 	// send it JSON-quoted, matching the guide's own example.
-	destJSON, _ := json.Marshal(destShare)
+	destJSON := []byte(jsonQuote(destShare))
 	err := s.call("SYNO.FileStation.CopyMove", "start", url.Values{
 		"path":              {jsonArr(srcShare)},
 		"dest_folder_path":  {string(destJSON)},
@@ -698,6 +704,23 @@ func fsCannotAddress(name string) bool {
 	return name == ".DS_Store" || strings.HasPrefix(name, "._")
 }
 
+// fsCannotAddressPath is fsCannotAddress over the whole path: the entry's own
+// name as above, and any path that is not valid UTF-8 — a Latin-1 or
+// Shift-JIS name copied in over rsync, NFS or a USB drive (SMB and AFP
+// convert names to UTF-8 on the way in, so File Station never meets one
+// from there). This clause is INFERRED, not measured: File Station's
+// parameters are JSON, its own encoder rewrites such bytes as U+FFFD on the
+// way out (measured through the daemon's reader, which is why bytesafe.go
+// exists), and DSM's shell fixes for these names are rename tools, not File
+// Station. Whether its parser would accept the raw bytes back is unknown
+// until probed on a NAS; refusing here is right either way, since a failed
+// attempt would answer "no such file or folder" for a file the scan has
+// just read. Unlike the name clauses this one covers the whole path: a
+// valid name inside such a folder is just as unreachable.
+func fsCannotAddressPath(p string) bool {
+	return fsCannotAddress(filepath.Base(p)) || !utf8.ValidString(p)
+}
+
 // --------------------------------------------------------- share listing
 
 // folderIsEmpty reports whether a share-space folder holds no entry at all,
@@ -707,7 +730,7 @@ func (s *fsSession) folderIsEmpty(folderShare string) (bool, error) {
 	var data struct {
 		Total int `json:"total"`
 	}
-	fp, _ := json.Marshal(folderShare)
+	fp := []byte(jsonQuote(folderShare))
 	if err := s.call("SYNO.FileStation.List", "list", url.Values{
 		"folder_path": {string(fp)},
 		"offset":      {"0"},
@@ -738,7 +761,7 @@ func (s *fsSession) folderIsEmpty(folderShare string) (bool, error) {
 func (s *fsSession) folderHoldsOnlyJunk(folderShare string) (bool, error) {
 	const page = 500
 	const maxEntries = 10000 // past this, refuse rather than trust a partial read
-	fp, _ := json.Marshal(folderShare)
+	fp := []byte(jsonQuote(folderShare))
 	for off := 0; off < maxEntries; off += page {
 		var data struct {
 			Files []struct {
@@ -967,7 +990,7 @@ func (s *fsSession) getInfo(shares []string, additional []string) (map[string]fs
 		if j > len(shares) {
 			j = len(shares)
 		}
-		arr, _ := json.Marshal(shares[i:j])
+		arr := []byte(jsonArr(shares[i:j]...))
 		v := url.Values{"path": {string(arr)}}
 		if len(additional) > 0 {
 			v.Set("additional", jsonArr(additional...))
@@ -978,7 +1001,19 @@ func (s *fsSession) getInfo(shares []string, additional []string) (map[string]fs
 		if err := s.call("SYNO.FileStation.List", "getinfo", v, &data); err != nil {
 			return nil, err
 		}
-		for _, f := range data.Files {
+		asked := map[string]bool{}
+		for _, p := range shares[i:j] {
+			asked[p] = true
+		}
+		for k, f := range data.Files {
+			if !asked[f.Path] && len(data.Files) == j-i {
+				// DSM answered under a path that is not one this call asked
+				// about — a name outside UTF-8 rewritten by its own encoder is
+				// the known cause — and it answered every path in the order
+				// asked. Position, not the echoed spelling, then says which
+				// question this answer belongs to.
+				f.Path = shares[i+k]
+			}
 			out[f.Path] = f
 		}
 	}

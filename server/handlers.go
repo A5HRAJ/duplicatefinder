@@ -6,7 +6,6 @@ package main
 
 import (
 	"dupfinder/internal/dirhandle"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -232,7 +231,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req ScanReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBytesafe(r.Body, &req); err != nil {
 		writeErr(w, 400, "bad request body")
 		return
 	}
@@ -353,7 +352,7 @@ func (s *Server) handleRefs(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RefDirs []string `json:"refDirs"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBytesafe(r.Body, &req); err != nil {
 		writeErr(w, 400, "bad request body")
 		return
 	}
@@ -405,13 +404,18 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// cancelled says whether there was a running scan to stop: a caller that
+	// arrives after the scan finished on its own learns that its Stop changed
+	// nothing, and the test suite can tell the two outcomes apart.
+	cancelled := false
 	s.mu.Lock()
 	if s.job.Running && s.job.cancel != nil {
 		close(s.job.cancel)
 		s.job.cancel = nil
+		cancelled = true
 	}
 	s.mu.Unlock()
-	writeJSON(w, 200, map[string]any{"ok": true})
+	writeJSON(w, 200, map[string]any{"ok": true, "cancelled": cancelled})
 }
 
 // snapshotGroupsLocked deep-copies a result's duplicate groups (caller

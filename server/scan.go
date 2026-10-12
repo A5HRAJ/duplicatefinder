@@ -23,11 +23,16 @@ const hashAlgoName = "Blake3"
 type fEnt struct {
 	path, name, dir string
 	size            int64
-	mod, created    time.Time
-	isDir           bool
-	rel             string            // path relative to the pinned root
-	rh              *dirhandle.Handle // pinned root; nil only for hand-built test entries
-	link            fileLink          // the data behind the name, for hard-link detection
+	// holes is how much of size occupies no space on disk (size minus
+	// physOf): zero for an ordinary file, up to all of it for a sparse or
+	// compressed one. What removing the file frees is size minus holes, and
+	// reclaimable space is measured in that.
+	holes        int64
+	mod, created time.Time
+	isDir        bool
+	rel          string            // path relative to the pinned root
+	rh           *dirhandle.Handle // pinned root; nil only for hand-built test entries
+	link         fileLink          // the data behind the name, for hard-link detection
 }
 
 // fileLink identifies the data a name refers to. Names sharing a device and
@@ -78,7 +83,7 @@ func (f fEnt) openContent() (*os.File, error) {
 	if f.rh != nil {
 		return f.rh.OpenRel(f.rel)
 	}
-	return os.Open(f.path)
+	return dirhandle.OpenFile(f.path)
 }
 
 func (s *Server) setProgress(p float64, label string) {
@@ -782,14 +787,20 @@ func (s *Server) fileEnt(f fEnt) FileEnt {
 		ID: "f" + strconv.Itoa(id), Name: f.name, Dir: f.dir,
 		Size: f.size, Mod: fmtTime(f.mod), ModUnix: modUnix, Created: fmtTime(f.created),
 		Ext: extOf(f.name),
-		// Set here rather than per tool: it is a property of the NAME, true
+		// Set here rather than per tool: it is a property of the PATH, true
 		// of any row any tool surfaces, so every one of them gets it right
-		// without each scan case having to remember.
-		NoMove: fsCannotAddress(f.name),
+		// without each scan case having to remember. Built from the two
+		// fields the row itself carries (FileEnt's Dir and Name), so it does
+		// not depend on fEnt.path, which only the walk fills in.
+		NoMove: fsCannotAddressPath(filepath.Join(f.dir, f.name)),
 	}
 	if f.link.n > 1 {
 		fe.Links = int(f.link.n)
 		fe.Ino = strconv.FormatUint(f.link.dev, 16) + ":" + strconv.FormatUint(f.link.ino, 16)
+	}
+	if f.holes > 0 {
+		alloc := f.size - f.holes
+		fe.Alloc = &alloc
 	}
 	return fe
 }
@@ -864,3 +875,37 @@ func scrubErr(err error, repl map[string]string) error {
 }
 
 var procFdRe = regexp.MustCompile(`/proc/self/fd/\d+`)
+
+// copyPhys is what each distinct copy among files occupies on disk: names
+// sharing an inode are one copy (as physicalCopies counts them) and appear
+// once; every other name is a copy of its own.
+func copyPhys(files []fEnt) []int64 {
+	out := make([]int64, 0, len(files))
+	seen := map[fileLink]bool{}
+	for i := range files {
+		l := files[i].link
+		if l.n > 1 && l.ino != 0 {
+			if seen[l] {
+				continue
+			}
+			seen[l] = true
+		}
+		out = append(out, files[i].size-files[i].holes)
+	}
+	return out
+}
+
+// reclaimPhys is what removing every copy but one frees, the one that stays
+// being the largest on disk — so the figure can only understate, never
+// promise blocks a sparse copy never held. The on-disk twin of
+// groupReclaim (results.go), for groups still in their scan-time form.
+func reclaimPhys(phys []int64) int64 {
+	var sum, largest int64
+	for _, p := range phys {
+		sum += p
+		if p > largest {
+			largest = p
+		}
+	}
+	return sum - largest
+}

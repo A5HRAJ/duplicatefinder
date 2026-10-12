@@ -413,6 +413,34 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     check('a group with hard links reports copies and reclaims by copies',
       /3 identical files/.test(label) && /2 copies/.test(label) && /1000 B reclaimable|1\.00 KB reclaimable|1000 B/.test(label));
   }
+  // Reclaimable space is what the daemon measured on disk, not size times
+  // copies: a pair of sparse virtual-machine images occupies nothing, and the
+  // header must not offer their apparent size.
+  {
+    const sparse = win.dupGroupLabel({ size: 2 * 1024 * 1024 * 1024, ext: 'IMG', reclaim: 0, prot: 0 }, 2, 2);
+    check('a sparse duplicate pair advertises no reclaimable space',
+      /2 identical files/.test(sparse) && /0 B reclaimable/.test(sparse));
+    const dense = win.dupGroupLabel({ size: 1000, ext: 'MOV', reclaim: 1000, prot: 0 }, 2, 2);
+    check('an ordinary pair still advertises the copy it can free', /1000 B reclaimable/.test(dense));
+    // A daemon that predates the field falls back to the old arithmetic.
+    const old = win.dupGroupLabel({ size: 1000, ext: 'MOV', prot: 0 }, 2, 2);
+    check('a group without a daemon figure falls back to size times copies', /1000 B reclaimable/.test(old));
+  }
+  // A name the filesystem holds as bytes that are not valid Unicode reaches
+  // the app with each such byte carried as a private-use character, so the
+  // string still names the file when it is sent back; on screen each is drawn
+  // as the replacement character. \uDBFF\uDE80 is the first of that range —
+  // keep in step with BYTE_ESC in DuplicateFinder.js and escBase in
+  // server/bytesafe.go (server/bytesafe_test.go pins the pair).
+  {
+    const cm = win.grid.getColumnModel();
+    const nameIdx = cm.findColumnIndex('name');
+    const raw = 'caf\uDBFF\uDEE9.txt';
+    const rec = new window.Ext.data.Record({ name: raw, prot: false });
+    const html = cm.getRenderer(nameIdx)(raw, {}, rec);
+    check('an undecodable byte in a name is drawn as the replacement character',
+      html.indexOf('caf\uFFFD.txt') >= 0 && html.indexOf('\uDBFF') < 0);
+  }
   // Every scan issue is reachable, escaped — not only the first one the toast
   // quotes: the summary bar links to a dialog listing them all.
   {

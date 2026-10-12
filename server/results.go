@@ -9,7 +9,6 @@ package main
 // fraction of the data. The GET dump remains for raw localhost API callers.
 
 import (
-	"encoding/json"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -469,7 +468,7 @@ func slicePage[T any](in []T, off, lim int) []T {
 // needs no DSM session.
 func (s *Server) handlePagedResults(w http.ResponseWriter, r *http.Request) {
 	var q resultsQuery
-	if err := json.NewDecoder(r.Body).Decode(&q); err != nil {
+	if err := decodeBytesafe(r.Body, &q); err != nil {
 		writeErr(w, 400, "bad request body")
 		return
 	}
@@ -523,6 +522,7 @@ func (s *Server) handlePagedResults(w http.ResponseWriter, r *http.Request) {
 		// Before trimming, while the group is still whole.
 		if q.Tool == "duplicates" {
 			markGroupProt(page, refs)
+			markGroupReclaim(page)
 		}
 		resp["groups"] = trimGroupRows(page)
 	} else {
@@ -694,44 +694,86 @@ func dupTotals(groups []Group, refs *refMatcher) pageTotals {
 	for _, g := range groups {
 		t.Files += len(g.Files)
 		t.Bytes += g.Size * int64(len(g.Files))
-		// Measured in physical copies: hard links to one file are one copy,
-		// and a protected name protects the copy behind it.
-		copies := physicalRows(g.Files, nil)
-		keep := 0
+		var prot func(*FileEnt) bool
 		if !refs.empty() {
-			keep = physicalRows(g.Files, func(f *FileEnt) bool { return refs.protects(f.Dir, f.Name) })
+			prot = func(f *FileEnt) bool { return refs.protects(f.Dir, f.Name) }
 		}
-		if keep < 1 {
-			keep = 1
-		}
-		if n := copies - keep; n > 0 {
-			t.Reclaimable += g.Size * int64(n)
-		}
+		t.Reclaimable += groupReclaim(g.Size, g.Files, prot)
 	}
 	return t
 }
 
-// physicalRows counts the distinct pieces of data among the rows only
-// accepts (all rows when only is nil): rows sharing an inode are one copy,
-// rows without link information are one copy each.
-func physicalRows(files []FileEnt, only func(*FileEnt) bool) int {
-	n := 0
-	seen := map[string]bool{}
-	for i := range files {
-		f := &files[i]
-		if only != nil && !only(f) {
-			continue
-		}
-		if f.Ino == "" {
-			n++
-			continue
-		}
-		if !seen[f.Ino] {
-			seen[f.Ino] = true
-			n++
+// rowPhys is what a row's file occupies on disk: the group's size — every
+// member of a duplicate group has it by definition — unless the scan
+// recorded less for this copy (FileEnt.Alloc).
+func rowPhys(f *FileEnt, size int64) int64 {
+	if f.Alloc != nil {
+		return *f.Alloc
+	}
+	return size
+}
+
+// groupReclaim is what moving a duplicate group's copies frees: every copy
+// that is not kept, measured on disk (rowPhys). Hard links to one file are
+// one copy, and a protected NAME keeps the copy behind it (protects; nil
+// when no reference folder is set). With nothing protected one copy stays,
+// and it is the one occupying the most: the figure can then only understate
+// — a dense copy beside a sparse one frees everything or nothing depending
+// on which goes, and the header promises only what is certain. The same
+// arithmetic serves the toolbar total (dupTotals) and each group's header
+// (markGroupReclaim), so the two cannot disagree.
+func groupReclaim(size int64, files []FileEnt, protects func(*FileEnt) bool) int64 {
+	keptIno := map[string]bool{}
+	keptRow := map[int]bool{}
+	if protects != nil {
+		for i := range files {
+			if !protects(&files[i]) {
+				continue
+			}
+			if files[i].Ino != "" {
+				keptIno[files[i].Ino] = true
+			} else {
+				keptRow[i] = true
+			}
 		}
 	}
-	return n
+	seen := map[string]bool{}
+	var sum, largest int64
+	anyKept := false
+	for i := range files {
+		f := &files[i]
+		if f.Ino != "" {
+			if seen[f.Ino] {
+				continue
+			}
+			seen[f.Ino] = true
+			if keptIno[f.Ino] {
+				anyKept = true
+				continue
+			}
+		} else if keptRow[i] {
+			anyKept = true
+			continue
+		}
+		p := rowPhys(f, size)
+		sum += p
+		if p > largest {
+			largest = p
+		}
+	}
+	if anyKept {
+		return sum
+	}
+	return sum - largest
+}
+
+// markGroupReclaim writes each page group's reclaimable figure (Group.Reclaim)
+// from the rows markGroupProt has just flagged; like it, this must run before
+// trimGroupRows, over the whole group.
+func markGroupReclaim(groups []Group) {
+	for i := range groups {
+		groups[i].Reclaim = groupReclaim(groups[i].Size, groups[i].Files, func(f *FileEnt) bool { return f.Prot })
+	}
 }
 
 // corruptedTotals aggregates corrupted sets. Reclaimable stays zero: nothing

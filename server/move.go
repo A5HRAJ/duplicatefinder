@@ -7,14 +7,15 @@ package main
 
 import (
 	"dupfinder/internal/dirhandle"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // MoveReq is the body of POST /api/move. Files are full paths. Tool names
@@ -102,6 +103,16 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "the destination is inside a read-only reference folder")
 		return
 	}
+	// A move to another volume is a copy followed by a delete, so the
+	// destination's volume has to hold every such file. Checked here, before
+	// anything is created: File Station would otherwise fail the batch
+	// partway, one file at a time, once the volume was full.
+	if need := v.crossVolumeNeed(req.Files, destCanon); need > 0 {
+		if free, known := sess.volumeFree(destCanon); known && need > free {
+			writeErr(w, 400, fmt.Sprintf("the destination volume has %s free, and moving these files onto it needs %s — free some space, or choose a destination on the same volume as the files", fmtBytes(free), fmtBytes(need)))
+			return
+		}
+	}
 
 	// In preserve mode the whole batch moves into ONE new folder at the
 	// destination (batchFolder). It is allocated here, inside moveMu, not
@@ -128,6 +139,13 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	errs := []map[string]string{}
 	for i, src := range req.Files {
 		src = filepath.Clean(src)
+		// The daemon has been told to stop: the files not yet started stay
+		// where they are and are reported so, and the batch goes on to save
+		// what it did move before the process exits.
+		if s.stopping.Load() {
+			errs = append(errs, map[string]string{"path": src, "error": "not attempted — Duplicate Finder is stopping"})
+			continue
+		}
 		// Announce the file BEFORE working on it: the whole point is to name
 		// what is currently taking the time, and a large cross-volume copy
 		// sits on this iteration for minutes. note lets the per-file step say
@@ -232,7 +250,7 @@ func decodeMoveRequest(w http.ResponseWriter, r *http.Request) (req MoveReq, fol
 		writeErr(w, 405, "POST required")
 		return req, "", false
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBytesafe(r.Body, &req); err != nil {
 		writeErr(w, 400, "bad request body")
 		return req, "", false
 	}
@@ -411,6 +429,8 @@ func (v *moveVet) refuse(cp string) error {
 	// that sends the user looking for a vanished file instead of telling
 	// them what is actually true. Checked on the base name of the path
 	// being moved, matching what the scan recorded in NoMove.
+	case !utf8.ValidString(cp):
+		return errors.New("this file's name is not valid Unicode text, and DSM's File Station cannot address such a name, so it cannot be moved — rename it over SSH or from the computer that wrote it")
 	case fsCannotAddress(filepath.Base(cp)):
 		return errors.New("DSM's File Station cannot see this file, so it cannot be moved — delete it from the Mac that made it, or move the whole folder that holds it")
 	case !v.allowed[cp]:
@@ -614,12 +634,15 @@ type movedButError struct{ msg string }
 
 func (e movedButError) Error() string { return e.msg }
 
-// verifyRead hashes a file at an absolute filesystem path. Plain os.Open,
-// matching contentPrefixUnchanged: the paths handed in are either the
-// canonical vetted source or a destination chain this very request created
-// under the picker's canonical folder.
+// verifyRead hashes a file at an absolute filesystem path, opened as
+// contentPrefixUnchanged opens: the paths handed in are either the canonical
+// vetted source or a destination chain this very request created under the
+// picker's canonical folder. dirhandle.OpenFile refuses anything but a
+// regular file without ever blocking, so a named pipe or socket that some
+// row named is a read error here — "could not read the file to verify it"
+// — and not a move that never returns.
 func verifyRead(p string) (string, error) {
-	return hashFile(func() (*os.File, error) { return os.Open(p) }, -1, nil)
+	return hashFile(func() (*os.File, error) { return dirhandle.OpenFile(p) }, -1, nil)
 }
 
 // note lets the per-file progress line say when the time is going into
@@ -988,4 +1011,78 @@ func keepOneDrops(groups []Group, requested map[string]bool, refDirs []string, c
 		}
 	}
 	return drops
+}
+
+// crossVolumeNeed sums the sizes of the request's files that would have to be
+// COPIED to reach dest: File Station moves a file to another volume by
+// copying it there and deleting the source, so the destination's volume must
+// hold every such byte, while a move within one volume needs none. Sizes are
+// the scan's own record of each file — the identity the move is vetted
+// against; directories, and paths no scan listed, contribute nothing here,
+// the vetting refuses those on its own. A sparse file counts at its full
+// size: a copy of one cannot be assumed to stay sparse.
+func (v *moveVet) crossVolumeNeed(files []string, destCanon string) int64 {
+	destVol := volumeOf(destCanon, v.vols)
+	var need int64
+	for _, src := range files {
+		cp := v.canon.path(filepath.Clean(src))
+		if destVol == "" || volumeOf(cp, v.vols) == destVol {
+			continue
+		}
+		for _, id := range v.idents[cp] {
+			if !id.isDir {
+				need += id.size
+				break
+			}
+		}
+	}
+	return need
+}
+
+// volumeOf returns the volume root p lives under, or "" when none does.
+func volumeOf(p string, vols []string) string {
+	for _, r := range vols {
+		if p == r || strings.HasPrefix(p, r+"/") {
+			return r
+		}
+	}
+	return ""
+}
+
+// volumeFree is the free space File Station reports for the volume holding
+// p, and whether it could be established at all — an unknown figure refuses
+// nothing.
+func (s *fsSession) volumeFree(p string) (int64, bool) {
+	vols, err := s.listShares()
+	if err != nil {
+		return 0, false
+	}
+	for _, v := range vols {
+		if v.Total <= 0 {
+			continue
+		}
+		roots := []string{v.Path}
+		if rv, err := filepath.EvalSymlinks(v.Path); err == nil && rv != v.Path {
+			roots = append(roots, rv)
+		}
+		if volumeOf(p, roots) != "" {
+			return v.Total - v.Used, true
+		}
+	}
+	return 0, false
+}
+
+// fmtBytes renders a byte count the way the app does, for a refusal that
+// has to name two sizes in one sentence.
+func fmtBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit && exp < 4; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTP"[exp])
 }

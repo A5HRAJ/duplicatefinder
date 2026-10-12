@@ -4,20 +4,23 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 // Server holds scan results and job state for the daemon.
@@ -61,6 +64,12 @@ type Server struct {
 	// endMove, so it brackets vet -> execute -> prune -> save entirely.
 	moveActive bool
 	keepers    map[string]bool
+	// stopping is set when the daemon has been asked to stop (SIGTERM from
+	// the package's stop script, DSM shutting down, a package upgrade). A
+	// move batch in progress finishes the file it is on, reports the rest as
+	// not attempted, and saves what moved, instead of being killed with its
+	// bookkeeping half-written.
+	stopping atomic.Bool
 }
 
 // scanAdmissionLocked reports the 409 message that must refuse a new scan, or
@@ -266,8 +275,51 @@ func runDaemon(port int, varDir string) {
 	s.loadState()
 	s.interrupted = s.loadMarker()
 	log.Printf("Duplicate Finder %s listening on %s", appVersion, addr)
-	if err := http.Serve(l, handler); err != nil {
+	srv := newHTTPServer(handler)
+	// The package's stop script sends SIGTERM and, ten seconds later, SIGKILL.
+	// Without a handler the first signal ended the process on the spot, mid-
+	// write if that is where it was. Now the listener closes, requests in
+	// flight get shutdownGrace to finish — a move batch stops starting files
+	// (s.stopping) and saves what it moved — and the process exits cleanly. A
+	// scan in flight is left to die with the process on purpose: its marker
+	// stays on disk, which is exactly what makes the next start offer to
+	// resume it.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+	done := make(chan struct{})
+	go func() {
+		sig := <-stop
+		log.Printf("stopping (%v)", sig)
+		s.stopping.Store(true)
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("stopped with a request still running: %v", err)
+		}
+		close(done)
+	}()
+	if err := srv.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
+	}
+	<-done
+	log.Printf("stopped")
+}
+
+// shutdownGrace is how long requests in flight get after a stop signal —
+// inside the ten seconds the package's stop script allows before it kills.
+const shutdownGrace = 8 * time.Second
+
+// newHTTPServer is the daemon's server, with the timeouts a server that is
+// never meant to be left holding a dead connection needs — and only those:
+// a read or write deadline on the whole request would cut off a 64 MiB move
+// list or a move batch that legitimately runs for hours, so the header
+// timeout guards the connection setup and the idle timeout reaps keep-alive
+// connections nobody is using.
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 }
 
@@ -353,8 +405,14 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	// Encoded before the status line goes out: an encoding failure is then a
+	// 500 with a reason, not a 200 with an empty body.
+	b, err := marshalBytesafe(v)
+	if err != nil {
+		code, b = 500, []byte(`{"error":"internal error: response could not be encoded"}`)
+	}
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(v)
+	w.Write(append(b, '\n'))
 }
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
