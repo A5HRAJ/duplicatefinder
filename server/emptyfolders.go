@@ -38,8 +38,13 @@ func confirmEmpty(p string, sess *fsSession) (bool, error) {
 }
 
 // dirHoldsOnlyJunk is confirmEmpty's native half: every entry of the
-// directory must be junk (isTempName) or Synology's @eaDir cache. It fails
-// closed — a directory that cannot be read has unknown contents.
+// directory must be a junk FILE (isTempName) or Synology's @eaDir cache. It
+// fails closed — a directory that cannot be read has unknown contents.
+//
+// The junk names describe files only. A directory called ".DS_Store" or
+// "._photos" is a folder the walk never entered (dot-names are skipped as
+// hidden) and File Station's listing never shows, so this is the one check
+// that sees it — and whatever it holds, the folder around it is not empty.
 func dirHoldsOnlyJunk(p string) (bool, error) {
 	d, err := os.Open(p)
 	if err != nil {
@@ -47,9 +52,12 @@ func dirHoldsOnlyJunk(p string) (bool, error) {
 	}
 	defer d.Close()
 	for {
-		names, err := d.Readdirnames(256)
-		for _, n := range names {
-			if n != "@eaDir" && !isTempName(n) {
+		ents, err := d.ReadDir(256)
+		for _, e := range ents {
+			if e.Name() == "@eaDir" {
+				continue
+			}
+			if e.IsDir() || !isTempName(e.Name()) {
 				return false, nil
 			}
 		}

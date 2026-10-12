@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -239,5 +240,38 @@ func TestEmptyFolderRowReportsTheJunkItHolds(t *testing.T) {
 	}
 	if e := got["/r/bare"]; e.Size != 0 || e.Junk != 0 || e.JunkEx != nil {
 		t.Fatalf("a bare folder must report nothing inside it: %+v", e)
+	}
+}
+
+// The native half of the confirmation reads the directory itself, and a
+// DIRECTORY whose name happens to be junk-shaped is not junk: the walk never
+// went inside it (".DS_Store", "._x" and every other dot-name are skipped as
+// hidden), and File Station's listing omits exactly those names, so this
+// check is the only one that sees it at all. Whatever such a folder holds,
+// the parent is not empty — only Synology's @eaDir cache is accepted.
+func TestNativeJunkCheckRejectsJunkNamedDirectories(t *testing.T) {
+	for _, sub := range []string{".DS_Store", "._photos", "old.bak", "~$draft"} {
+		d := t.TempDir()
+		mkfile(t, filepath.Join(d, "Thumbs.db"), "x")
+		mkfile(t, filepath.Join(d, sub, "precious.jpg"), "real data")
+		if ok, err := dirHoldsOnlyJunk(d); err != nil || ok {
+			t.Errorf("a folder holding a %q directory was confirmed junk-only (ok=%v err=%v)", sub, ok, err)
+		}
+	}
+	d := t.TempDir()
+	mkfile(t, filepath.Join(d, "Thumbs.db"), "x")
+	mkfile(t, filepath.Join(d, "@eaDir", "SYNOPHOTO_THUMB_S.jpg"), "t")
+	if ok, err := dirHoldsOnlyJunk(d); err != nil || !ok {
+		t.Errorf("junk plus @eaDir must still confirm (ok=%v err=%v)", ok, err)
+	}
+}
+
+func mkfile(t *testing.T, p, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
