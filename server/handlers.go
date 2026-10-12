@@ -99,6 +99,12 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	if s.move.Running {
 		out["move"] = s.move
 	}
+	// A finished move whose report the app has not shown yet — its own
+	// request's answer was lost, or the window was closed meanwhile. The app
+	// fetches it from /api/move/report.
+	if s.lastMove != nil && !s.lastMove.Seen && !s.move.Running {
+		out["lastMove"] = map[string]any{"id": s.lastMove.ID}
+	}
 	// A scan the previous daemon run never finished: the UI offers to resume
 	// it or start over (see scanMarker).
 	if s.interrupted != nil {

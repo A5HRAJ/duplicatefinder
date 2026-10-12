@@ -1823,6 +1823,16 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 								? ' — the next Scan will offer to resume it' : ' — run Scan again') + '.');
 					}
 					if (st.running) me.attachProgress();
+					// A move this window did not start: still running (begun
+					// before a reload, or in another window) — follow it to
+					// its end — or finished with a report nobody has seen yet,
+					// because the window that started it lost its answer or
+					// was closed. Either way the user gets the full account.
+					if (st.move && st.move.running) {
+						me.followRunningMove(st.move);
+					} else if (st.lastMove && st.lastMove.id) {
+						me.fetchMoveReport(st.lastMove.id, 'Your last move has finished. ');
+					}
 					// Every scanned tool's totals feed its rail badge; only the
 					// visible one loads an actual page of rows.
 					me.refreshView();
@@ -3642,49 +3652,16 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// the data), so the request runs with an effectively unlimited
 			// timeout behind a busy dialog that masks the app meanwhile.
 			var busy = this.showBusy('Moving ' + paths.length + ' ' + lower + '…');
-			// /move is one long blocking request, so its own response cannot
-			// report progress. The daemon publishes per-file progress on
-			// /state instead, and this polls it alongside the move. Kept
-			// deliberately separate from the scan poller (pollTask): their
-			// lifecycles differ and sharing the timer would tangle them.
-			//
-			// Nothing here may assume a move and a scan cannot be requested
-			// together: this client cannot prevent it — a second DSM tab or a
-			// reload mid-move reaches /api/scan directly. The daemon refuses
-			// both directions (scanAdmissionLocked / beginMove).
-			me._moveOrphaned = false;
-			var stopPoll = function () {
-				if (me._movePoll) { clearInterval(me._movePoll); me._movePoll = null; }
-			};
-			me._movePoll = setInterval(function () {
-				api('/state', 'GET', null, function (err, st) {
-					if (err || !st) return;
-					me.noteSaveError(st);
-					if (st.move && st.move.total) {
-						busy.setProgress(st.move.done, st.move.total,
-							st.move.done + ' of ' + st.move.total +
-								(st.move.name ? ' — ' + st.move.name : ''));
-						return;
-					}
-					// The request's own answer was lost (see the transport
-					// branch below) and the daemon has now finished: this is
-					// where the move ends for the user.
-					if (me._moveOrphaned) {
-						me._moveOrphaned = false;
-						me._moveInFlight = false;
-						stopPoll();
-						busy.close();
-						me.sm.clearSelections();
-						me.reloadPage();
-						me.notify('The move finished on the NAS and the results were refreshed. Any per-file issue is in the daemon log (dupfinder.log).');
-					}
-				});
-			}, 700);
+			// Names this request, so the daemon can keep its report under the
+			// name and this window (or a later one) can fetch it if the
+			// request's own answer never arrives — see followMove.
+			var id = 'm' + new Date().getTime().toString(36) + Math.random().toString(36).slice(2, 8);
+			var follow = me.followMove(busy, id);
 			me._moveInFlight = true;
 			// verify defaults ON when the caller does not say otherwise — the
 			// dialog always says, so this covers programmatic callers, and the
 			// default lands on the safe side.
-			api('/move', 'POST', { files: paths, dest: dest, preserve: preserve, tool: tool, verify: verify !== false }, function (err, j, meta) {
+			api('/move', 'POST', { files: paths, dest: dest, preserve: preserve, tool: tool, verify: verify !== false, id: id }, function (err, j, meta) {
 				if (err && meta && meta.transport) {
 					// The connection died — DSM's web server gave up on the
 					// request long before the 12-hour timeout here — while the
@@ -3692,13 +3669,13 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					// unknown and claiming failure would be wrong; so would
 					// dropping the dialog and losing sight of a move that is
 					// still running. Keep polling /state until the daemon
-					// reports no move, then refresh (the poller above).
-					me._moveOrphaned = true;
+					// reports no move, then fetch the report it kept.
+					follow.orphan();
 					me.notify('The connection was interrupted while moving — the NAS is still working on it; waiting for it to finish.');
 					return;
 				}
+				follow.stop();
 				me._moveInFlight = false;
-				stopPoll();
 				busy.close();
 				if (err) {
 					me.notify(err);
@@ -3709,33 +3686,108 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				// screen has shifted: reload it (onPageLoaded repaints the
 				// summary, badges and totals).
 				me.reloadPage();
-				var n = (j.moved || []).length;
-				if (j.errors && j.errors.length) {
-					// A persistent dialog, never only the 3.6-second toast:
-					// among these entries may sit the one message this whole
-					// feature exists to produce — "the destination copy does
-					// not match" — and its row has just been pruned, so this
-					// listing (plus the daemon log) is the only place the
-					// user can still learn WHICH file needs their attention.
-					me.showMoveIssues(paths.length, n, j.errors);
-					if (j.saveError) me.notify(j.saveError);
-				} else {
-					// Under preserve the files are NOT at `dest` — the daemon
-					// created a folder inside it and may have had to number
-					// it, and only the daemon knows which name it got. Report
-					// what it says, never a name derived here. A save that
-					// failed after the prune rides on the same toast: the
-					// pruned rows would be back after a restart.
-					me.notify('Moved ' + n + ' ' + itemNoun(tool, n).toLowerCase() + ' to ' + (j.folder || dest) +
-						(j.saveError ? ' — ' + j.saveError : ''));
-				}
+				me.presentMoveReport(j, '');
 			}, { timeout: LONG_OP_TIMEOUT });
+		},
+
+		// Polls /state while a move runs and drives busy's progress bar from
+		// it: /move is one long blocking request, so its own response cannot
+		// report progress. Kept deliberately separate from the scan poller
+		// (pollTask): their lifecycles differ and sharing the timer would
+		// tangle them. Once orphaned — the move's own request lost its
+		// answer, or this window opened while a move was already running —
+		// the poll is also where the move ends: when the daemon reports no
+		// move, the report it kept under id is fetched and shown.
+		//
+		// Nothing here may assume a move and a scan cannot be requested
+		// together: this client cannot prevent it — a second DSM tab or a
+		// reload mid-move reaches /api/scan directly. The daemon refuses
+		// both directions (scanAdmissionLocked / beginMove).
+		followMove: function (busy, id) {
+			var me = this, orphaned = false;
+			var stop = function () {
+				if (me._movePoll) { clearInterval(me._movePoll); me._movePoll = null; }
+			};
+			stop();
+			me._movePoll = setInterval(function () {
+				api('/state', 'GET', null, function (err, st) {
+					if (err || !st || !me._movePoll) return;
+					me.noteSaveError(st);
+					if (st.move && st.move.total) {
+						busy.setProgress(st.move.done, st.move.total,
+							st.move.done + ' of ' + st.move.total +
+								(st.move.name ? ' — ' + st.move.name : ''));
+						return;
+					}
+					if (!orphaned) return;
+					stop();
+					me._moveInFlight = false;
+					busy.close();
+					me.sm.clearSelections();
+					me.reloadPage();
+					me.fetchMoveReport(id, '');
+				});
+			}, 700);
+			return { stop: stop, orphan: function () { orphaned = true; } };
+		},
+
+		// Shows a move that is already running when this window opens, and
+		// its report when it ends.
+		followRunningMove: function (m) {
+			if (this._moveInFlight) return;
+			this._moveInFlight = true;
+			var busy = this.showBusy('Moving ' + m.total + ' ' + (m.total === 1 ? 'item' : 'items') + '…');
+			this.followMove(busy, m.id).orphan();
+		},
+
+		// Fetches the report the daemon kept for move id and shows it. lead
+		// prefixes what is shown — the move may have ended while this window
+		// was closed. A move with no id (started by an older build's page)
+		// has no report to fetch.
+		fetchMoveReport: function (id, lead) {
+			var me = this;
+			api('/move/report?id=' + encodeURIComponent(id || ''), 'GET', null, function (err, j) {
+				if (!err && j && j.found && j.report) {
+					me.presentMoveReport(j.report, lead);
+					return;
+				}
+				me.notify((lead || '') + 'The move finished on the NAS and the results were refreshed. Its per-file report is in the daemon log (dupfinder.log).');
+			});
+		},
+
+		// Shows what a move did — the per-file issues when any entry did not
+		// end clean, else the summary — and tells the daemon it was shown, so
+		// it is not offered again.
+		presentMoveReport: function (j, lead) {
+			var tool = j.tool || this.state.tool;
+			var n = (j.moved || []).length;
+			var requested = j.total || (n + (j.errors || []).length);
+			if (j.errors && j.errors.length) {
+				// A persistent dialog, never only the 3.6-second toast:
+				// among these entries may sit the one message this whole
+				// feature exists to produce — "the destination copy does
+				// not match" — and its row has just been pruned, so this
+				// listing (plus the daemon log) is the only place the
+				// user can still learn WHICH file needs their attention.
+				this.showMoveIssues(requested, n, j.errors, lead);
+				if (j.saveError) this.notify(j.saveError);
+			} else {
+				// Under preserve the files are NOT at `dest` — the daemon
+				// created a folder inside it and may have had to number
+				// it, and only the daemon knows which name it got. Report
+				// what it says, never a name derived here. A save that
+				// failed after the prune rides on the same toast: the
+				// pruned rows would be back after a restart.
+				this.notify((lead || '') + 'Moved ' + n + ' ' + itemNoun(tool, n).toLowerCase() + ' to ' + (j.folder || j.dest) +
+					(j.saveError ? ' — ' + j.saveError : ''));
+			}
+			if (j.id) api('/move/report', 'POST', { id: j.id }, function () {});
 		},
 
 		// The full per-file account of a move that did not end clean. Every
 		// entry is listed with its path — errors[0] alone cannot say which of
 		// forty files is the one whose destination copy failed verification.
-		showMoveIssues: function (requested, movedCount, errors) {
+		showMoveIssues: function (requested, movedCount, errors, lead) {
 			var me = this;
 			var rows = [];
 			Ext.each(errors, function (e) {
@@ -3751,7 +3803,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				modal: false,
 				cls: 'df-app',
 				bodyStyle: 'padding:14px;font-size:' + FSMALL + ';overflow:auto;',
-				html: '<b>' + movedCount + ' of ' + requested + ' moved · ' +
+				html: (lead ? esc(lead) + '<br/><br/>' : '') +
+					'<b>' + movedCount + ' of ' + requested + ' moved · ' +
 					errors.length + ' need' + (errors.length === 1 ? 's' : '') + ' attention.</b>' +
 					'<div style="padding-top:8px;">' + rows.join('') + '</div>',
 				buttons: [new UxButton({ btnStyle: 'blue', text: 'OK', handler: function () { win.close(); } })]

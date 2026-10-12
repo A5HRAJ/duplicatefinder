@@ -37,6 +37,9 @@ type MoveReq struct {
 	// verification — their move is a single rename and their contents are the
 	// junk the tools exist to shed.
 	Verify bool `json:"verify"`
+	// ID names the request so its report can be fetched after its own
+	// answer is lost (movereport.go). Chosen by the app; optional.
+	ID string `json:"id"`
 }
 
 func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
@@ -131,6 +134,9 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	// poll that lands early sees 0-of-N rather than "no move running", and
 	// cleared on every exit path — including a panic, which would otherwise
 	// leave the UI showing a move that is no longer happening.
+	s.mu.Lock()
+	s.move.ID = req.ID
+	s.mu.Unlock()
 	s.setMoveProgress(true, 0, len(req.Files), "")
 	defer s.setMoveProgress(false, 0, 0, "")
 
@@ -257,13 +263,11 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			s.noteSaveError(err)
 		}
 	}
-	out := map[string]any{"moved": moved, "errors": errs}
+	rep := &moveReport{ID: req.ID, Tool: req.Tool, Dest: req.Dest, Total: len(req.Files), Moved: moved, Errors: errs}
 	s.mu.Lock()
-	if s.saveErr != "" {
-		// The prune above could not be saved: the moved rows would be back
-		// after a restart, and the app tells the user so.
-		out["saveError"] = s.saveErr
-	}
+	// The prune above could not be saved: the moved rows would be back after
+	// a restart, and the app tells the user so.
+	rep.SaveError = s.saveErr
 	s.mu.Unlock()
 	if batch != nil && batch.name != "" {
 		// Name the folder the files actually landed in: under preserve they
@@ -271,9 +275,15 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		// which " (n)" variant it ended up allocating. Reported in the same
 		// namespace as the request's own paths. Absent when nothing was
 		// created — an all-refused request or a failed allocation.
-		out["folder"] = filepath.Join(req.Dest, batch.name)
+		rep.Folder = filepath.Join(req.Dest, batch.name)
 	}
-	writeJSON(w, 200, out)
+	// Kept before it is sent, and before the deferred progress reset tells a
+	// poller the move is over: a poller that sees "no move running" must
+	// find the report already waiting.
+	if req.ID != "" {
+		s.publishMoveReport(rep)
+	}
+	writeJSON(w, 200, rep)
 }
 
 // decodeMoveRequest reads and vets the body of POST /api/move as far as it
@@ -574,7 +584,11 @@ func (s *Server) moveOne(v *moveVet, batch func() (string, error), sess *fsSessi
 func (s *Server) setMoveProgress(running bool, done, total int, name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.move = moveState{Running: running, Done: done, Total: total, Name: name}
+	id := s.move.ID
+	if !running {
+		id = ""
+	}
+	s.move = moveState{Running: running, Done: done, Total: total, Name: name, ID: id}
 }
 
 // entIdent is what a scan recorded about a result entry: enough identity

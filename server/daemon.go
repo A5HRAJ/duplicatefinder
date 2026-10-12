@@ -69,6 +69,11 @@ type Server struct {
 	// mu — written by handleMove under moveMu — so a reader holds the map
 	// it read without a lock.
 	moveOut moveOutSet
+	// lastMove is the report of the most recent move (movereport.go), kept
+	// until the app has shown it. Replaced, never mutated, under mu;
+	// reportMu orders its replacements and their writes to disk.
+	lastMove *moveReport
+	reportMu sync.Mutex
 	// stopping is set when the daemon has been asked to stop (SIGTERM from
 	// the package's stop script, DSM shutting down, a package upgrade). A
 	// move batch in progress finishes the file it is on, reports the rest as
@@ -138,6 +143,7 @@ type moveState struct {
 	Done    int    `json:"done"`  // files fully dealt with, moved or refused
 	Total   int    `json:"total"` // files this request was asked to move
 	Name    string `json:"name"`  // basename of the file currently in flight
+	ID      string `json:"id"`    // the request's id, under which its report is kept
 }
 
 // scanEnd records how the most recent scan run ended, whatever the outcome.
@@ -235,6 +241,7 @@ func runDaemon(port int, varDir string) {
 	mux.HandleFunc("/api/cancel", s.handleCancel)
 	mux.HandleFunc("/api/results", s.handleResults)
 	mux.HandleFunc("/api/move", s.handleMove)
+	mux.HandleFunc("/api/move/report", s.handleMoveReport)
 	mux.HandleFunc("/api/export", s.handleExport)
 
 	// devServeUI is the identity function in release builds and wraps the API
@@ -278,6 +285,7 @@ func runDaemon(port int, varDir string) {
 	// left behind means a scan died with the daemon; /api/state reports it
 	// so the UI can offer a resume.
 	s.loadState()
+	s.loadMoveReport()
 	s.interrupted = s.loadMarker()
 	log.Printf("Duplicate Finder %s listening on %s", appVersion, addr)
 	srv := newHTTPServer(handler)
