@@ -33,9 +33,10 @@ type MoveReq struct {
 	// scan's recorded hash where one exists), and the destination is read
 	// back and hashed after it. The dialog sends it explicitly (checked by
 	// default); absent means false, so a caller that does not know the field
-	// gets an unverified move. Directories are moved without content
-	// verification — their move is a single rename and their contents are the
-	// junk the tools exist to shed.
+	// gets an unverified move. Onto another filesystem a verified move copies
+	// first and removes the original only once the copy matches (transit.go),
+	// and a folder's every entry is checked there; on one filesystem a folder
+	// moves as a single rename, with nothing in transit to check.
 	Verify bool `json:"verify"`
 	// ID names the request so its report can be fetched after its own
 	// answer is lost (movereport.go). Chosen by the app; optional.
