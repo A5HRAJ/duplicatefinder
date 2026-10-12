@@ -24,10 +24,23 @@ type moveVerifyFake struct {
 	root      string            // real path of the "Backups" share
 	afterMove func(dest string) // called with the real destination path after a rename
 	created   []string          // CreateFolder calls, share-space
-	// breakStatus makes the NEXT CopyMove status reply die on the wire after
-	// the move itself really happened — the lost-answer case the staging
-	// safety guards exist for.
+	// breakStatus makes EVERY CopyMove status reply die on the wire after the
+	// move itself really happened — DSM that never answers again, the
+	// lost-answer case the staging safety guards exist for.
 	breakStatus bool
+	// lostStatus kills only the next N status replies: a web server that
+	// drops a few answers while File Station carries on.
+	lostStatus int
+	// slowMove holds each started move back until the first status poll that
+	// gets through: a task still running when its progress cannot be read.
+	slowMove bool
+	pending  [][2]string // started but not yet performed: {src, dst}
+	// lostStart kills the reply to the next CopyMove start after the task has
+	// been accepted; with slowMove the move then lands only after
+	// landAfterInfo more getinfo calls — a long copy whose start was never
+	// acknowledged.
+	lostStart     bool
+	landAfterInfo int
 	// leaveInStaging makes File Station report the move OUT of a staging
 	// folder finished while the file is still in it (copied, not moved): the
 	// case where deleting the staging folder afterwards would delete a file.
@@ -56,6 +69,14 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 					{"name": "Backups", "additional": map[string]any{"real_path": f.root}},
 				}})
 			case "getinfo":
+				if len(f.pending) > 0 && f.landAfterInfo > 0 {
+					if f.landAfterInfo--; f.landAfterInfo == 0 {
+						for _, mv := range f.pending {
+							os.Rename(mv[0], mv[1])
+						}
+						f.pending = nil
+					}
+				}
 				var paths []string
 				json.Unmarshal([]byte(r.FormValue("path")), &paths)
 				files := make([]map[string]any, 0, len(paths))
@@ -107,6 +128,10 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 				}
 				for _, sp := range srcs {
 					dst := f.real(destDir + "/" + filepath.Base(sp))
+					if f.slowMove {
+						f.pending = append(f.pending, [2]string{f.real(sp), dst})
+						continue
+					}
 					if f.leaveInStaging && strings.Contains(sp, ".dupfinder-tmp-") {
 						b, _ := os.ReadFile(f.real(sp))
 						os.WriteFile(dst, b, 0o644)
@@ -120,11 +145,22 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 						f.afterMove(dst)
 					}
 				}
+				if f.lostStart {
+					f.lostStart = false
+					if hj, ok := w.(http.Hijacker); ok {
+						if conn, _, err := hj.Hijack(); err == nil {
+							conn.Close() // accepted, but the answer never arrives
+							return
+						}
+					}
+				}
 				fakeEnv(w, 0, map[string]string{"taskid": "t1"})
 				return
 			}
-			if f.breakStatus {
-				f.breakStatus = false
+			if f.breakStatus || f.lostStatus > 0 {
+				if f.lostStatus > 0 {
+					f.lostStatus--
+				}
 				if hj, ok := w.(http.Hijacker); ok {
 					if conn, _, err := hj.Hijack(); err == nil {
 						conn.Close() // the reply dies on the wire
@@ -132,6 +168,10 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 					}
 				}
 			}
+			for _, mv := range f.pending {
+				os.Rename(mv[0], mv[1])
+			}
+			f.pending = nil
 			fakeEnv(w, 0, map[string]any{"finished": true})
 		case "SYNO.FileStation.Rename":
 			var ps, ns []string
@@ -397,8 +437,11 @@ func TestStagedMoveLostReplyParksInsteadOfDeleting(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.root, "dest", "a.bin"), []byte("squatter"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// …and kill the staging hop's status reply after the rename lands.
+	// …and kill the staging hop's status replies after the rename lands, for
+	// good: DSM never answers again within the give-up window.
 	f.breakStatus = true
+	defer func(d time.Duration) { statusGiveUp = d }(statusGiveUp)
+	statusGiveUp = 300 * time.Millisecond
 	err := execMoveFS(sess, p, p, "/Backups/dest", filepath.Join(f.root, "dest"),
 		[]entIdent{want}, nil, true, nil)
 	var mbe movedButError
@@ -503,5 +546,65 @@ func TestMoveVerifyReadsBackInsideTheBatchFolder(t *testing.T) {
 	got, rerr := os.ReadFile(final)
 	if rerr != nil || !bytes.Equal(got, body) {
 		t.Fatalf("file not intact inside the batch tree at %s: %v", final, rerr)
+	}
+}
+
+// A progress reply lost while File Station is still moving the file is not
+// the end of the move. Giving up there reported a failure for a file that
+// then arrived anyway — never verified though verification was asked for,
+// its row left listed, and the copy never recorded as one the app moved, so
+// a later Keep Newest could take it for an original and send the real
+// original after it. The poll keeps asking until DSM answers again.
+func TestLostProgressReplyDoesNotAbandonARunningMove(t *testing.T) {
+	f, sess := newMoveVerifyFake(t)
+	os.Mkdir(filepath.Join(f.root, "dest"), 0o755)
+	p, want, body := mkMoveFile(t, f, "a.bin")
+	f.slowMove = true
+	f.lostStatus = 2
+	at, err := execMoveFSAt(sess, p, p, "/Backups/dest", filepath.Join(f.root, "dest"),
+		[]entIdent{want}, nil, true, nil)
+	if err != nil {
+		t.Fatalf("a move whose progress replies were briefly lost must still complete and verify, got %v", err)
+	}
+	if got, rerr := os.ReadFile(at); rerr != nil || !bytes.Equal(got, body) {
+		t.Fatalf("the moved file must be at %s with its content (%v)", at, rerr)
+	}
+}
+
+// The same, one step earlier: the answer to the request that STARTS the move
+// is lost, and File Station is already copying. The source is still in
+// place while a copy to another volume runs, so it reads as "nothing
+// happened" — and the move was reported failed while the file went on to
+// arrive, unverified and unrecorded. The source is watched until it goes.
+func TestLostStartReplyFollowsTheMoveThatDidStart(t *testing.T) {
+	f, sess := newMoveVerifyFake(t)
+	os.Mkdir(filepath.Join(f.root, "dest"), 0o755)
+	p, want, body := mkMoveFile(t, f, "a.bin")
+	f.slowMove, f.lostStart, f.landAfterInfo = true, true, 3
+	at, err := execMoveFSAt(sess, p, p, "/Backups/dest", filepath.Join(f.root, "dest"),
+		[]entIdent{want}, nil, true, nil)
+	if err != nil {
+		t.Fatalf("a move that started although its start was never acknowledged must be followed to the end, got %v", err)
+	}
+	if got, rerr := os.ReadFile(at); rerr != nil || !bytes.Equal(got, body) {
+		t.Fatalf("the moved file must be at %s with its content (%v)", at, rerr)
+	}
+}
+
+// And when nothing started at all, the failure is still reported — after the
+// wait, with the source exactly where it was.
+func TestLostStartReplyWithNoMoveReportsFailure(t *testing.T) {
+	f, sess := newMoveVerifyFake(t)
+	os.Mkdir(filepath.Join(f.root, "dest"), 0o755)
+	p, want, body := mkMoveFile(t, f, "a.bin")
+	defer func(d time.Duration) { statusGiveUp = d }(statusGiveUp)
+	statusGiveUp = 300 * time.Millisecond
+	f.slowMove, f.lostStart = true, true // landAfterInfo 0: it never lands
+	if _, err := execMoveFSAt(sess, p, p, "/Backups/dest", filepath.Join(f.root, "dest"),
+		[]entIdent{want}, nil, true, nil); err == nil {
+		t.Fatal("a move that never happened must be reported as failed")
+	}
+	if got, rerr := os.ReadFile(p); rerr != nil || !bytes.Equal(got, body) {
+		t.Fatalf("the source must be untouched (%v)", rerr)
 	}
 }

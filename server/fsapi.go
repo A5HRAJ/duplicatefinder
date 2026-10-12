@@ -388,18 +388,40 @@ func (s *fsSession) copyMoveOnce(srcShare, destShare string) error {
 	// moving files, and report as failed a move that then completed. A task
 	// DSM never finishes holds this request until the package is restarted,
 	// which is visible in the app's move progress and, hourly, in the log.
+	//
+	// A poll that gets NO answer is not the task's answer. DSM's web server
+	// drops the odd request under load (a 502 page, a closed connection) while
+	// File Station carries on moving, and abandoning the poll there reported a
+	// failure for a file that then arrived anyway — unverified, its row still
+	// listed, never recorded as a copy this app moved. So the poll keeps
+	// asking through statusGiveUp of silence, and only then reports the lost
+	// answer (which moveViaFS settles by looking where the file is).
 	delay := 200 * time.Millisecond
 	startedAt := time.Now()
 	nextLog := time.Hour
+	var silentSince time.Time
 	for {
 		var st struct {
 			Finished bool `json:"finished"`
 		}
 		err := s.call("SYNO.FileStation.CopyMove", "status",
 			url.Values{"taskid": {started.TaskID}}, &st)
+		if err != nil && moveOutcomeUnknown(err) {
+			if silentSince.IsZero() {
+				silentSince = time.Now()
+			}
+			if time.Since(silentSince) < statusGiveUp {
+				time.Sleep(delay)
+				if delay < 2*time.Second {
+					delay *= 2
+				}
+				continue
+			}
+		}
 		if err != nil {
 			return err // task failure surfaces here with its error code
 		}
+		silentSince = time.Time{}
 		if st.Finished {
 			return nil
 		}
@@ -499,6 +521,11 @@ func (e parkedError) Error() string {
 	return fmt.Sprintf("%v — the file is parked in %s", e.cause, e.tmpShare)
 }
 
+// statusGiveUp is how long copyMoveOnce keeps polling a task whose progress
+// requests get no answer at all before it reports the answer lost. A
+// variable only so the tests can shorten it.
+var statusGiveUp = 2 * time.Minute
+
 // nameClaimTries bounds every probe-then-claim loop over File Station's
 // " (n)" names (moveViaFS's final hop, allocBatchFolder): a name that keeps
 // being taken between the probe and the claim is another writer winning a
@@ -553,10 +580,8 @@ func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, 
 		// source gone and the name present at the destination means the move
 		// SUCCEEDED and must be reported as such, or the caller tells the
 		// user a completed move failed (and never verifies it).
-		if moveOutcomeUnknown(err) {
-			if srcThere, _, serr := s.statShare(srcShare); serr == nil && !srcThere {
-				return s.arrived(outShare+"/"+base, base, want)
-			}
+		if moveOutcomeUnknown(err) && s.sourceLeaves(srcShare) {
+			return s.arrived(outShare+"/"+base, base, want)
 		}
 		if !worthStaging(err) {
 			return "", err
@@ -654,6 +679,31 @@ func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, 
 		}
 	}
 	return "", parkedError{tmpShare: tmpShare, name: cur, cause: fmt.Errorf("could not find a free name for %s", base)}
+}
+
+// sourceLeaves settles where a move whose answer was lost stands, from the
+// source's side: it reports true once File Station says the source is gone.
+// A source still in place is not proof that nothing happened — a move to
+// another volume copies first and removes the source only at the end, so a
+// lost answer to the request that STARTED it leaves the source in place
+// while the copy runs. So the source is watched through statusGiveUp before
+// the move is called failed; a move that really never started costs that
+// wait and nothing else.
+func (s *fsSession) sourceLeaves(srcShare string) bool {
+	deadline := time.Now().Add(statusGiveUp)
+	delay := 200 * time.Millisecond
+	for {
+		if there, _, err := s.statShare(srcShare); err == nil && !there {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(delay)
+		if delay < 2*time.Second {
+			delay *= 2
+		}
+	}
 }
 
 // arrived settles a move whose answer was lost, once the source is known to
