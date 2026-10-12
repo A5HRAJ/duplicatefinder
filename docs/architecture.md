@@ -78,8 +78,18 @@ names. Content reads (hashing, EXIF) open files through the pinned root with
 `O_NOFOLLOW` on every path component (`openrel.go` in that package), which works on
 DSM's 3.10 kernels without `openat2`.
 
-Each entry's device and inode are recorded as well, so hard links — several
-names for one file — can be told from copies. Unreadable locations are
+Only regular files and directories are entries at all: named pipes, sockets
+and device nodes are skipped (`scannable` in `walk.go`), since they have no
+content to compare and opening one to read it can block forever — a FIFO with
+no writer never returns from `open(2)`. The content openers (`dirhandle.OpenRel`
+and `dirhandle.OpenFile`) enforce the same rule on their own, opening with
+`O_NONBLOCK`, checking the descriptor is a regular file, and clearing the
+flag again before use, so a row that became a pipe after the scan is a read
+error at move time rather than a move that never returns. Each entry's device
+and inode are recorded as well, so hard links — several names for one file —
+can be told from copies, and so is what the file occupies on disk (`physOf`:
+`st_blocks`, never more than its size), which is what removing it would
+actually free. Unreadable locations are
 collected into the scan's error list, bounded at 20,000 entries (the figure
 the flat tools' lists use) plus a line saying how many more there were; the
 app lists every one.
@@ -111,7 +121,12 @@ app lists every one.
    exceed that budget either. Anything dropped is counted into a truncation
    report the UI shows. Reclaimable space — in the ranking, the totals and
    the group header — is measured in physical copies: names sharing an inode
-   count once, and such rows are labelled as hard links.
+   count once, and such rows are labelled as hard links; and in bytes held on
+   disk: a sparse or compressed copy frees only what it occupies (rows carry
+   `alloc` when that is less than the size), and a group's figure is what
+   removing every copy but the largest on disk would free, so it never
+   promises more than a move can deliver. The daemon sends each page group's
+   figure (`reclaim`) so the header and the toolbar total cannot disagree.
 
 Created dates, when matching on them, are fetched from File Station per
 window; a file File Station cannot answer for gets a per-path sentinel key and
@@ -212,6 +227,20 @@ advanced-search options, match refinement and column sorting are all applied
 by the daemon over the whole result set, so totals and order are correct even
 though the client holds one page. A page also carries a row budget, so one
 enormous group arrives trimmed and labelled with its true size.
+
+File names are bytes to the filesystem and Unicode to JSON. The daemon keeps
+every path as the bytes it read and converts only at its JSON boundaries
+(`server/bytesafe.go`): each byte that is not part of valid UTF-8 travels as
+a private-use character (U+10FF80–U+10FFFF) and comes back as the byte, in
+every message in both directions — responses, request bodies, the state
+file, the scan marker and File Station's replies. The app carries these
+characters unchanged and draws each as � where it shows a name, so a
+Latin-1 or Shift-JIS name is listed, searched, exported and told apart from
+its neighbours like any other, and survives a restart, instead of arriving as
+a name that no longer names the file. Such a row is marked unmovable at scan
+time with the reason (`fsCannotAddressPath`): File Station cannot address
+the name, and the honest answer is to say so rather than to fail the move
+with "no such file".
 
 Reference-folder protection is decided by the daemon per page, on canonical
 paths, from its one reference list — the same list the move refuses with —
@@ -327,7 +356,11 @@ times and the volume overview. Kept native deliberately: content hashing (no
 API exists), scan enumeration (`Search` reports no per-path errors and no
 symlink indicator, so it would break the empty-folder gate and fabricate
 duplicate pairs), hard-link identity (device and inode, which no API
-reports), the second reading of a candidate empty folder (so the gate does
+reports), on-disk size (`st_blocks`, likewise unreported, and what a sparse
+file frees), the file-type check that keeps pipes, sockets and devices out
+of the scan and out of the content readers (a listing reports none of it,
+and the open that would find out is the one that hangs), the second reading
+of a candidate empty folder (so the gate does
 not depend on what the listing chooses to show), EXIF capture dates, the
 canonical-path containment checks (a security boundary must describe the
 filesystem the daemon actually walks) and volume-root discovery (the

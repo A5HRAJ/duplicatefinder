@@ -26,6 +26,20 @@ import (
 // figure as the flat tools' row lists; the overflow is reported as a count.
 const walkErrCap = 20000
 
+// scannable reports whether an entry is something a scan can reason about: a
+// regular file or a directory. Symlinks are left alone because the pinned
+// root is the vetted tree. Named pipes, sockets and device nodes are left
+// alone because they have no content to compare and reading one is not safe
+// to attempt: a FIFO with no writer never returns from open(2), so a move
+// that verified one held the move lock forever and refused every scan and
+// move after it until the package was restarted. To stat they look like
+// 0-byte files, so without this they were listed as Empty Files and offered
+// for deletion — a live socket among them.
+func scannable(d fs.DirEntry) bool {
+	t := d.Type()
+	return t.IsRegular() || t.IsDir()
+}
+
 func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan struct{}, visit func(rootIdx int, f fEnt), unreadable func(path string)) (errs []string, handles []*dirhandle.Handle, rootOf []string) {
 	count := 0
 	// The error list is bounded — at the same figure as the flat tools' row
@@ -66,7 +80,7 @@ func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan 
 		}
 		visit(rootIdx, fEnt{
 			path: path, name: d.Name(), dir: filepath.Dir(path),
-			size: info.Size(), mod: info.ModTime(),
+			size: info.Size(), holes: info.Size() - physOf(info), mod: info.ModTime(),
 			isDir: d.IsDir(), rel: rel, rh: rh,
 			link: linkOf(info),
 		})
@@ -123,7 +137,7 @@ func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan 
 				continue
 			}
 			for _, e := range ents {
-				if e.Type()&fs.ModeSymlink != 0 {
+				if !scannable(e) {
 					continue
 				}
 				if e.IsDir() {
@@ -151,7 +165,7 @@ func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan 
 				noteUnreadable(display)
 				return nil
 			}
-			if d.Type()&fs.ModeSymlink != 0 {
+			if !scannable(d) {
 				return nil
 			}
 			if d.IsDir() {

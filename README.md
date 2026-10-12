@@ -24,7 +24,9 @@ Files you select are **moved, never deleted**, into a folder you choose, and
   created date) narrow the groups. At least one copy of every group always
   stays where it is. Hard links to one file are labelled as such and count as
   one copy when reclaimable space is measured, because removing one name of a
-  file frees nothing while another remains.
+  file frees nothing while another remains; and reclaimable space is measured
+  in bytes held on disk, so a sparse or compressed copy — a virtual machine
+  disk, a preallocated download — counts for what it occupies, not its size.
 - **Conflicting Files.** Files with the same size and the same modified time
   but different content. Ordinary edits move the modified time, so a
   difference underneath an unchanged one points at bit rot, a bad sector or
@@ -44,7 +46,9 @@ Files you select are **moved, never deleted**, into a folder you choose, and
   Synology's `@eaDir` thumbnail cache. A folder whose only content is a
   hidden folder such as `.git` is never reported.
 - **Empty Files** and **Temporary Files.** Zero-byte files, and cache, backup
-  and editor droppings such as `*.tmp`, `*.bak` and `desktop.ini`.
+  and editor droppings such as `*.tmp`, `*.bak` and `desktop.ini`. Named
+  pipes, sockets and device nodes are never listed: they look like empty
+  files, and are not files at all.
 - **Reference folders.** Folders you mark read-only are scanned but their
   files can never be selected or moved. Use them for the master copy of a
   photo library or a backup. The list is one setting shared by every tool

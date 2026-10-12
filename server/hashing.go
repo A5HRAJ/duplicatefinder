@@ -3,6 +3,7 @@
 package main
 
 import (
+	"dupfinder/internal/dirhandle"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -65,7 +66,7 @@ func contentPrefixUnchanged(cp, want string) bool {
 	if want == "" {
 		return true
 	}
-	h, err := hashFile(func() (*os.File, error) { return os.Open(cp) }, 64*1024, nil)
+	h, err := hashFile(func() (*os.File, error) { return dirhandle.OpenFile(cp) }, 64*1024, nil)
 	if err != nil || len(h) < len(want) {
 		return false
 	}

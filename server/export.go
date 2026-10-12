@@ -5,7 +5,6 @@ package main
 import (
 	"bytes"
 	"encoding/csv"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -23,7 +22,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req ExportReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBytesafe(r.Body, &req); err != nil {
 		writeErr(w, 400, "bad request body")
 		return
 	}

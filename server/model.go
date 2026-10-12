@@ -83,6 +83,12 @@ type FileEnt struct {
 	// ordinary file.
 	Links int    `json:"links,omitempty"`
 	Ino   string `json:"ino,omitempty"`
+	// Alloc is what the file occupies on disk when that is LESS than its size
+	// — a sparse or compressed file — and is what removing it frees. Absent
+	// for a file that occupies its full size, and so for every row an older
+	// build wrote, which is read as dense. A pointer because zero is a real
+	// value here: a wholly sparse file occupies nothing.
+	Alloc *int64 `json:"alloc,omitempty"`
 	// Prot marks a read-only reference copy. Decided by the daemon per page
 	// (results.go) on CANONICAL paths — the same comparison the move refuses
 	// with — so the padlock the grid draws and the refusal the move issues
@@ -120,6 +126,12 @@ type Group struct {
 	// and overstates what a move could free. Duplicates only, and omitted
 	// when no reference folder is set.
 	Prot int `json:"prot,omitempty"`
+	// Reclaim is what moving every copy but the kept ones frees, decided by
+	// the daemon per page from each copy's on-disk size (groupReclaim), so
+	// the header the app draws and the toolbar total it fetches agree, and
+	// neither counts blocks a sparse file never held. Set on served pages
+	// only; the stored group carries zero.
+	Reclaim int64 `json:"reclaim"`
 }
 
 // MatchOpts are the optional extra duplicate criteria. When set they join

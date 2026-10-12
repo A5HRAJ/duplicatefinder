@@ -13,7 +13,6 @@ package main
 
 import (
 	"compress/gzip"
-	"encoding/json"
 	"errors"
 	"log"
 	"os"
@@ -208,7 +207,11 @@ func (s *Server) saveState() error {
 	path := filepath.Join(dir, stateFile)
 	err := writeAtomic(path, 0o600, false, func(tmp *os.File) error {
 		zw, _ := gzip.NewWriterLevel(tmp, gzip.BestSpeed)
-		if err := json.NewEncoder(zw).Encode(&ps); err != nil {
+		b, err := marshalBytesafe(&ps)
+		if err != nil {
+			return err
+		}
+		if _, err := zw.Write(b); err != nil {
 			return err
 		}
 		return zw.Close()
@@ -266,7 +269,7 @@ func (s *Server) loadState() {
 	}
 	defer zr.Close()
 	var ps persistedState
-	if err := json.NewDecoder(zr).Decode(&ps); err != nil || ps.Schema != 1 {
+	if err := decodeBytesafe(zr, &ps); err != nil || ps.Schema != 1 {
 		log.Printf("state load skipped: schema/parse (%v)", err)
 		return
 	}
@@ -351,7 +354,7 @@ func (s *Server) writeMarker(req *ScanReq, gen uint32) {
 		return
 	}
 	tools, _ := req.toolList()
-	b, _ := json.Marshal(scanMarker{Tool: req.openTool(tools), Tools: tools, Gen: gen,
+	b, _ := marshalBytesafe(scanMarker{Tool: req.openTool(tools), Tools: tools, Gen: gen,
 		Dirs: normPaths(req.Dirs), RefDirs: normPaths(req.RefDirs),
 		Recurse: req.Recurse, Match: req.Match,
 		StartedAt: time.Now().Format(time.RFC3339)})
@@ -395,7 +398,7 @@ func (s *Server) loadMarker() *scanMarker {
 		return nil
 	}
 	var m scanMarker
-	if json.Unmarshal(b, &m) != nil || m.Tool == "" {
+	if unmarshalBytesafe(b, &m) != nil || m.Tool == "" {
 		return nil
 	}
 	return &m

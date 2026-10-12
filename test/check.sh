@@ -10,6 +10,9 @@
 #                       release that supports the module's Go version
 #   4. go test -race  — the unit tests under the race detector
 #   5. test/run.sh    — packaging check plus the full headless UI/API suite
+#   6. test/audit.sh  — the real daemon against what a filesystem can hand it:
+#                       named pipes and sockets, sparse files, names outside
+#                       UTF-8, Stop, a full destination volume, SIGTERM
 #
 # Requires: Go 1.20+, Node 18+, Python 3, and network on the first run
 # (staticcheck is fetched into the module cache; run.sh fetches ExtJS and
@@ -61,6 +64,9 @@ echo "== go test -race"
 
 echo "== packaging check and headless suite"
 test/run.sh
+
+echo "== filesystem edge cases against the real daemon"
+test/audit.sh
 
 echo
 echo "ALL CHECKS PASSED"

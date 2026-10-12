@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -138,7 +139,10 @@ func mockEnv(w http.ResponseWriter, code int, data any) {
 	if data != nil {
 		resp["data"] = data
 	}
-	json.NewEncoder(w).Encode(resp)
+	// A name outside UTF-8 goes out as the bytes it holds, the way a C JSON
+	// writer passes them: the daemon's reader is what has to cope.
+	b, _ := marshalBytesafe(resp)
+	w.Write([]byte(unescapeBytes(string(b))))
 }
 
 func mockCopyMove(srcShare, dstShare string) int {
@@ -262,6 +266,13 @@ func mockWebAPI(w http.ResponseWriter, r *http.Request) {
 			var total, used int64
 			if roots := devVolumeRoots(); len(roots) > 0 {
 				total, used = diskUsage(roots[0])
+			}
+			// DUPFINDER_DEV_FREESPACE pins every volume's free space, so the
+			// suite can stage a destination that is nearly full.
+			if fs := os.Getenv("DUPFINDER_DEV_FREESPACE"); fs != "" {
+				if n, err := strconv.ParseInt(fs, 10, 64); err == nil && n <= total {
+					used = total - n
+				}
 			}
 			for _, e := range devShareTable() {
 				shares = append(shares, map[string]any{
