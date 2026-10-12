@@ -4,6 +4,29 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
+## [1.1.4] - 2026-10-12
+
+### Fixed
+- Empty Folders showed every folder's size as "Empty", even a folder that
+  still held files. A folder counts as empty when everything left in it has
+  a temporary-file name, and those names include *.bak and *.old, which are
+  also common names for real backups. Such a folder now shows the total size
+  of what it holds, and its tooltip names the files, so a folder of backups
+  cannot pass as a bare one.
+- Removing the app's own temporary and batch folders after a move could have
+  deleted anything still inside them. They are now removed only when empty:
+  DSM itself refuses to delete one that still holds a file, and the folder
+  stays where you can see it.
+- A copy Duplicate Finder had already moved could count as "the copy that
+  stays". When the move destination is inside the scanned folders, the next
+  scan pairs each moved copy with its original, and Keep Newest / Keep Oldest
+  could keep the moved copy and tick the original — so every copy ended up
+  in folders meant to be emptied. The app now remembers where it moves
+  things (and recognises its older "Duplicates/volume1/…" folders); while an
+  original exists, one original always stays in place, moved copies are
+  never the one kept and are not ticked to move again, and their location
+  says Duplicate Finder moved them there.
+
 ## [1.1.3] - 2026-10-11
 
 ### Fixed
