@@ -4,6 +4,30 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
+## [1.1.6] - 2026-10-12
+
+### Fixed
+- A verified move onto another volume, a USB disk or another shared folder
+  could leave only a damaged copy. File Station moves across filesystems by
+  copying and then deleting the original, and verification ran afterwards,
+  so a copy damaged on the way was found only once the original was gone.
+  The app now copies first, reads the copy back, and removes the original
+  only when the copy matches; a damaged copy is discarded and the original
+  is left untouched. The files inside a nearly empty folder are checked the
+  same way. Moves within one volume, and unverified moves, are unchanged.
+- Renaming or reorganising the folder Duplicate Finder had moved copies
+  into made those copies look like originals again, so a later Keep Newest
+  or move could send the real original into a second cleanup folder. Moved
+  copies are now recognised by the file itself, wherever they go within
+  their shared folder; a moved file put back where it came from is an
+  original again.
+- When the connection to a long move dropped, or the app was closed during
+  one, its per-file report reached only the daemon log, so a warning such
+  as "the copy does not match" could go unseen. The NAS now keeps the
+  report of the latest move until the app has shown it: the app shows it
+  when the move finishes, follows a move already running when it opens, and
+  shows a report nobody has seen the next time it opens.
+
 ## [1.1.5] - 2026-10-12
 
 ### Fixed
