@@ -64,6 +64,11 @@ type Server struct {
 	// endMove, so it brackets vet -> execute -> prune -> save entirely.
 	moveActive bool
 	keepers    map[string]bool
+	// moveOut records where moves put things (moveout.go), so a moved copy
+	// is never taken for the copy that stays. Replaced, never mutated, under
+	// mu — written by handleMove under moveMu — so a reader holds the map
+	// it read without a lock.
+	moveOut moveOutSet
 	// stopping is set when the daemon has been asked to stop (SIGTERM from
 	// the package's stop script, DSM shutting down, a package upgrade). A
 	// move batch in progress finishes the file it is on, reports the rest as

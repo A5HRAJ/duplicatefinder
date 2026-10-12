@@ -280,7 +280,7 @@ func TestSortFilesFieldsAndTies(t *testing.T) {
 	before := append([]FileEnt{}, files...)
 	sortFiles(files, "nonsense", "ASC")
 	for i := range files {
-		if files[i] != before[i] {
+		if files[i].Dir+"/"+files[i].Name != before[i].Dir+"/"+before[i].Name {
 			t.Fatal("unknown sort field must keep the stored order")
 		}
 	}

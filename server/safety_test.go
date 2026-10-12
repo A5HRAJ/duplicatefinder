@@ -440,36 +440,36 @@ func TestKeepOneDrops(t *testing.T) {
 	all := map[string]bool{"/v/a/f": true, "/v/b/f": true}
 	bothExist := map[string]bool{"/v/a/f": true, "/v/b/f": true}
 
-	drops := keepOneDrops([]Group{g}, all, nil, newDirResolver(), bothExist)
+	drops := keepOneDrops([]Group{g}, all, nil, newDirResolver(), bothExist, nil)
 	if len(drops) != 1 || !drops["/v/b/f"] {
 		t.Fatalf("whole group requested: want the last file held back, got %v", drops)
 	}
-	if d := keepOneDrops([]Group{g}, map[string]bool{"/v/a/f": true}, nil, newDirResolver(), bothExist); len(d) != 0 {
+	if d := keepOneDrops([]Group{g}, map[string]bool{"/v/a/f": true}, nil, newDirResolver(), bothExist, nil); len(d) != 0 {
 		t.Fatalf("one unrequested peer survives, nothing to hold back: got %v", d)
 	}
 	// A protected reference file cannot move, so it always survives.
-	if d := keepOneDrops([]Group{g}, all, []string{"/v/a"}, newDirResolver(), bothExist); len(d) != 0 {
+	if d := keepOneDrops([]Group{g}, all, []string{"/v/a"}, newDirResolver(), bothExist, nil); len(d) != 0 {
 		t.Fatalf("reference file survives, nothing to hold back: got %v", d)
 	}
 	// Files outside any group are never affected.
-	if d := keepOneDrops(nil, all, nil, newDirResolver(), bothExist); len(d) != 0 {
+	if d := keepOneDrops(nil, all, nil, newDirResolver(), bothExist, nil); len(d) != 0 {
 		t.Fatalf("no groups: got %v", d)
 	}
 
 	// Staleness: an unrequested peer that vanished since the scan is no
 	// survivor — the requested copy must be held back.
 	onlyA := map[string]bool{"/v/a/f": true}
-	if d := keepOneDrops([]Group{g}, onlyA, nil, newDirResolver(), onlyA); len(d) != 1 || !d["/v/a/f"] {
+	if d := keepOneDrops([]Group{g}, onlyA, nil, newDirResolver(), onlyA, nil); len(d) != 1 || !d["/v/a/f"] {
 		t.Fatalf("vanished peer: want the requested copy held back, got %v", d)
 	}
 	// Whole group requested but one copy vanished: hold back the copy that
 	// still exists, never the missing one.
-	if d := keepOneDrops([]Group{g}, all, nil, newDirResolver(), onlyA); len(d) != 1 || !d["/v/a/f"] {
+	if d := keepOneDrops([]Group{g}, all, nil, newDirResolver(), onlyA, nil); len(d) != 1 || !d["/v/a/f"] {
 		t.Fatalf("half-vanished group: want the existing copy held back, got %v", d)
 	}
 	// File Station unavailable (empty exists map): fail closed — hold one
 	// back rather than trusting the stale snapshot.
-	if d := keepOneDrops([]Group{g}, all, nil, newDirResolver(), map[string]bool{}); len(d) != 1 {
+	if d := keepOneDrops([]Group{g}, all, nil, newDirResolver(), map[string]bool{}, nil); len(d) != 1 {
 		t.Fatalf("unknown existence: want one held back, got %v", d)
 	}
 }
@@ -550,7 +550,7 @@ func TestKeepOneDropsAlias(t *testing.T) {
 		canon.path(filepath.Join(realA, "f")): true,
 		canon.path(filepath.Join(realB, "f")): true,
 	}
-	drops := keepOneDrops([]Group{g}, requested, nil, canon, exists)
+	drops := keepOneDrops([]Group{g}, requested, nil, canon, exists, nil)
 	if len(drops) != 1 || !drops[canon.path(filepath.Join(realB, "f"))] {
 		t.Fatalf("aliased group drain: want the last file held back, got %v", drops)
 	}

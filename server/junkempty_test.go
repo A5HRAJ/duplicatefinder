@@ -200,3 +200,44 @@ func TestPruneMovedDropsRowsUnderAMovedFolder(t *testing.T) {
 		t.Fatalf("the moved folder's own row must prune, kept %v", efLeft)
 	}
 }
+
+// A folder offered as empty because everything in it has a junk name must
+// say what it holds: junk is decided by NAME, so "accounts.bak" qualifies
+// whatever its size, and a row reading "Empty" would invite the user to
+// delete a database backup. Size is the junk's total bytes, Junk the count,
+// JunkEx a few names; a nested junk-only folder's junk counts toward the
+// topmost folder that supersedes it. A truly empty folder reports nothing.
+func TestEmptyFolderRowReportsTheJunkItHolds(t *testing.T) {
+	sized := func(p string, n int64) fEnt { f := efFile(p); f.size = n; return f }
+	sc := newEmptyFolderScan()
+	for _, f := range []fEnt{
+		efDir("/r/backups"),
+		sized("/r/backups/accounts.bak", 4<<30),
+		efDir("/r/backups/old"),
+		sized("/r/backups/old/settings.old", 100),
+		efDir("/r/bare"),
+		efDir("/r/mixed"),
+		sized("/r/mixed/a.bak", 7),
+		efFile("/r/mixed/keep.txt"),
+	} {
+		sc.visit(0, f)
+	}
+	files, _, _ := sc.finish(&Server{}, nil, func(string) (bool, error) { return true, nil })
+	got := map[string]FileEnt{}
+	for _, f := range files {
+		got[f.Dir+"/"+f.Name] = f
+	}
+	if len(got) != 2 {
+		t.Fatalf("want /r/backups and /r/bare, got %v", got)
+	}
+	b := got["/r/backups"]
+	if b.Size != 4<<30+100 || b.Junk != 2 {
+		t.Fatalf("backups row: size %d junk %d, want %d and 2", b.Size, b.Junk, int64(4<<30+100))
+	}
+	if len(b.JunkEx) != 2 || b.JunkEx[0] != "accounts.bak" || b.JunkEx[1] != "settings.old" {
+		t.Fatalf("backups row names: %v", b.JunkEx)
+	}
+	if e := got["/r/bare"]; e.Size != 0 || e.Junk != 0 || e.JunkEx != nil {
+		t.Fatalf("a bare folder must report nothing inside it: %+v", e)
+	}
+}

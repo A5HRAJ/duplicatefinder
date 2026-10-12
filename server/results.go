@@ -489,6 +489,7 @@ func (s *Server) handlePagedResults(w http.ResponseWriter, r *http.Request) {
 	// view it feeds is cached until the results — and with them s.refDirs —
 	// change.
 	refs := newRefMatcher(s.refDirs, res.Roots)
+	moveOut, roots := s.moveOut, res.Roots
 	if view == nil || view.key != key {
 		view = buildView(res, &q, key, refs)
 		s.view = view
@@ -522,6 +523,7 @@ func (s *Server) handlePagedResults(w http.ResponseWriter, r *http.Request) {
 		// Before trimming, while the group is still whole.
 		if q.Tool == "duplicates" {
 			markGroupProt(page, refs)
+			markGroupOut(page, moveOut, roots)
 			markGroupReclaim(page)
 		}
 		resp["groups"] = trimGroupRows(page)

@@ -28,6 +28,13 @@ type moveVerifyFake struct {
 	// the move itself really happened — the lost-answer case the staging
 	// safety guards exist for.
 	breakStatus bool
+	// leaveInStaging makes File Station report the move OUT of a staging
+	// folder finished while the file is still in it (copied, not moved): the
+	// case where deleting the staging folder afterwards would delete a file.
+	leaveInStaging bool
+	// recursiveDeletes counts Delete calls that did not ask for
+	// recursive=false.
+	recursiveDeletes int
 }
 
 func (f *moveVerifyFake) real(share string) string {
@@ -100,6 +107,11 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 				}
 				for _, sp := range srcs {
 					dst := f.real(destDir + "/" + filepath.Base(sp))
+					if f.leaveInStaging && strings.Contains(sp, ".dupfinder-tmp-") {
+						b, _ := os.ReadFile(f.real(sp))
+						os.WriteFile(dst, b, 0o644)
+						continue
+					}
 					if err := os.Rename(f.real(sp), dst); err != nil {
 						fakeEnv(w, 1001, nil)
 						return
@@ -132,8 +144,19 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 		case "SYNO.FileStation.Delete":
 			var dp []string
 			json.Unmarshal([]byte(r.FormValue("path")), &dp)
+			if r.FormValue("recursive") != "false" {
+				f.recursiveDeletes++
+			}
 			for _, p := range dp {
-				os.RemoveAll(f.real(p))
+				// Real DSM semantics: recursive=false refuses a non-empty folder.
+				rm := os.RemoveAll
+				if r.FormValue("recursive") == "false" {
+					rm = os.Remove
+				}
+				if err := rm(f.real(p)); err != nil {
+					fakeEnv(w, 900, nil)
+					return
+				}
 			}
 			fakeEnv(w, 0, map[string]any{"finished": true})
 		default:
@@ -401,6 +424,40 @@ func TestStagedMoveLostReplyParksInsteadOfDeleting(t *testing.T) {
 	}
 	if _, serr := os.Stat(p); serr == nil {
 		t.Fatal("the source should be gone — the staging move really happened")
+	}
+}
+
+// File Station reports the final hop out of the staging folder finished, but
+// the file is still in there. The tidy-up that follows must not take it with
+// the folder: the delete is non-recursive, so DSM refuses a folder that is
+// not empty, and the file survives where it was parked.
+func TestStagingCleanupNeverDeletesAFileLeftBehind(t *testing.T) {
+	f, sess := newMoveVerifyFake(t)
+	os.Mkdir(filepath.Join(f.root, "dest"), 0o755)
+	_, want, body := mkMoveFile(t, f, "a.bin")
+	if err := os.WriteFile(filepath.Join(f.root, "dest", "a.bin"), []byte("squatter"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.leaveInStaging = true
+	if _, err := moveViaFS(sess, "/Backups/a.bin", "/Backups/dest", want); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	if f.recursiveDeletes != 0 {
+		t.Fatalf("%d recursive deletes sent — every folder removal must be recursive=false", f.recursiveDeletes)
+	}
+	ents, _ := os.ReadDir(filepath.Join(f.root, "dest"))
+	found := false
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), ".dupfinder-tmp-") {
+			// Renamed to its free " (n)" name inside staging before the hop.
+			got, rerr := os.ReadFile(filepath.Join(f.root, "dest", e.Name(), "a (1).bin"))
+			if rerr == nil && bytes.Equal(got, body) {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("the staging folder was deleted with a file still in it — that is data loss")
 	}
 }
 

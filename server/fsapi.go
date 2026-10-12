@@ -429,10 +429,20 @@ func (s *fsSession) createFolder(parentShare, name string, forceParent bool) err
 	}, nil)
 }
 
-func (s *fsSession) deletePath(pathShare string) error {
-	// The blocking variant: fine for the small temp folders this deletes.
-	return s.call("SYNO.FileStation.Delete", "delete",
-		url.Values{"path": {jsonArr(pathShare)}}, nil)
+// removeEmptyFolder deletes a share-space folder ONLY if it holds nothing.
+// Every folder this package removes is one it created itself — a staging
+// folder or a batch folder — and is expected to be empty by then.
+// recursive=false makes DSM refuse a folder that is not, so a file still
+// inside — one File Station reported moved but left behind, or one another
+// writer put there a moment ago — can never be deleted with it. A refusal
+// leaves the folder in place, visible. There is deliberately no recursive
+// delete anywhere in this package.
+func (s *fsSession) removeEmptyFolder(pathShare string) error {
+	// The blocking variant: fine for a single empty folder.
+	return s.call("SYNO.FileStation.Delete", "delete", url.Values{
+		"path":      {jsonArr(pathShare)},
+		"recursive": {"false"},
+	}, nil)
 }
 
 // upload writes content as a new file in destShare. Like the moves, the
@@ -592,7 +602,7 @@ func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, 
 		if there, _, serr := s.statShare(tmpShare + "/" + base); serr != nil || there {
 			return "", parkedError{tmpShare: tmpShare, name: base, cause: err}
 		}
-		s.deletePath(tmpShare)
+		s.removeEmptyFolder(tmpShare)
 		return "", err
 	}
 	cur := base
@@ -614,7 +624,7 @@ func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, 
 			// returned as an error it would make handleMove leave the row
 			// unpruned and tell the user a completed move had failed. Log and
 			// move on.
-			if derr := s.deletePath(tmpShare); derr != nil {
+			if derr := s.removeEmptyFolder(tmpShare); derr != nil {
 				log.Printf("move staging folder %s could not be removed: %v", tmpShare, derr)
 			}
 			return cur, nil
@@ -627,7 +637,7 @@ func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, 
 			if inTmp, _, terr := s.statShare(tmpShare + "/" + cur); terr == nil && !inTmp {
 				name, aerr := s.arrived(outShare+"/"+cur, cur, want)
 				if aerr == nil {
-					if derr := s.deletePath(tmpShare); derr != nil {
+					if derr := s.removeEmptyFolder(tmpShare); derr != nil {
 						log.Printf("move staging folder %s could not be removed: %v", tmpShare, derr)
 					}
 				}

@@ -327,7 +327,11 @@ func mockWebAPI(w http.ResponseWriter, r *http.Request) {
 			mockEnv(w, 900, nil)
 			return
 		}
-		if err := os.RemoveAll(p); err != nil {
+		rm := os.RemoveAll
+		if r.FormValue("recursive") == "false" {
+			rm = os.Remove // DSM refuses a non-empty folder
+		}
+		if err := rm(p); err != nil {
 			mockEnv(w, 900, nil)
 			return
 		}

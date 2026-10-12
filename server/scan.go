@@ -33,6 +33,43 @@ type fEnt struct {
 	rel          string            // path relative to the pinned root
 	rh           *dirhandle.Handle // pinned root; nil only for hand-built test entries
 	link         fileLink          // the data behind the name, for hard-link detection
+	// junk is what an empty-folder candidate holds; nil for every other
+	// entry and for a folder with nothing in it at all.
+	junk *junkInfo
+}
+
+// junkInfo is the junk an "empty" folder still holds: how many files, their
+// total bytes, and the first few names. A folder holding nothing but junk is
+// offered as empty, and junk is decided by NAME — so a folder of database
+// backups called *.bak qualifies. What it holds is reported with it, so a
+// folder with real weight in it cannot pass as a bare one.
+type junkInfo struct {
+	n     int
+	bytes int64
+	ex    []string // up to junkExamples names
+}
+
+const junkExamples = 3
+
+// add counts one junk file.
+func (j *junkInfo) add(name string, size int64) {
+	j.n++
+	j.bytes += size
+	if len(j.ex) < junkExamples {
+		j.ex = append(j.ex, name)
+	}
+}
+
+// merge folds a child folder's junk into this one.
+func (j *junkInfo) merge(c *junkInfo) {
+	j.n += c.n
+	j.bytes += c.bytes
+	for _, name := range c.ex {
+		if len(j.ex) >= junkExamples {
+			break
+		}
+		j.ex = append(j.ex, name)
+	}
 }
 
 // fileLink identifies the data a name refers to. Names sharing a device and
@@ -70,8 +107,8 @@ func physicalCopies(files []fEnt) int {
 // — costs several times as much for data that scan never reads.
 type dirEnt struct {
 	path string
-	size int64
 	mod  time.Time
+	junk *junkInfo // nil when the folder holds nothing at all
 }
 
 // openContent opens the entry for reading through its pinned root handle,

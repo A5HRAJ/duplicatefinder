@@ -89,6 +89,18 @@ type FileEnt struct {
 	// build wrote, which is read as dense. A pointer because zero is a real
 	// value here: a wholly sparse file occupies nothing.
 	Alloc *int64 `json:"alloc,omitempty"`
+	// Junk is, on an empty-folder row, how many junk files the folder still
+	// holds (they move with it), and Size is their total bytes — zero for a
+	// folder with nothing in it. JunkEx names up to three of them. A folder
+	// offered as empty because everything in it has a junk NAME may still
+	// hold gigabytes of *.bak backups, and the row must say so.
+	Junk   int      `json:"junk,omitempty"`
+	JunkEx []string `json:"junkEx,omitempty"`
+	// Out marks, on a served duplicates page, a copy Duplicate Finder itself
+	// moved (moveout.go): the grid's Keep Newest / Keep Oldest never keeps one
+	// over an original, and does not tick it to move again. Decided per page,
+	// never stored.
+	Out bool `json:"out,omitempty"`
 	// Prot marks a read-only reference copy. Decided by the daemon per page
 	// (results.go) on CANONICAL paths — the same comparison the move refuses
 	// with — so the padlock the grid draws and the refusal the move issues
