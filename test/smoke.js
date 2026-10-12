@@ -353,6 +353,17 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   const sel1 = win.sm.getSelections().length;
   check('keep-newest selected rows (' + sel1 + ')', sel1 >= 2);
   check('move button enabled with selection', !win.moveBtn.disabled);
+  // The footer adds up what the selection frees. The daemon sends alloc only
+  // for a file that occupies less than its size, so an ordinary row's record
+  // holds '' there — and the footer once read "0 B reclaimable" for every
+  // selection because of it.
+  {
+    const recs = win.sm.getSelections();
+    const footer = win.selText.el ? win.selText.el.dom.innerHTML : '';
+    check('the selection includes an ordinary row without alloc', recs.some((r) => r.get('alloc') === ''));
+    check('selection footer counts the selected bytes',
+      recs.some((r) => r.get('size') > 0) && /reclaimable/.test(footer) && !/ 0 B reclaimable/.test(footer));
+  }
   win.sm.clearSelections();
   check('deselect clears', win.sm.getSelections().length === 0);
   check('move button disabled without selection', win.moveBtn.disabled);
@@ -2085,6 +2096,19 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   check('an emptied result set is [] and not null', Array.isArray(tempAfterJunkMv.files));
   check('temp rows under the moved folder are pruned',
     (tempAfterJunkMv.files || []).every((f) => (f.path || '').indexOf('/junkonly') < 0));
+
+  // A reference folder is walked by every tool, so the flat tools list rows
+  // inside one. Each must carry the read-only flag the duplicates rows get,
+  // or the grid offers a checkbox for a move the daemon refuses.
+  await api('/scan', { tool: 'empty_folders', dirs: [vol + '/photo'], refDirs: [vol + '/photo/eadironly'], recurse: true, match: {} });
+  for (let i = 0; i < 40; i++) { st = await api('/state'); if (!st.running) break; await sleep(250); }
+  {
+    const efRows = (await api('/results', { tool: 'empty_folders', offset: 0, limit: 100 })).files || [];
+    const refRow = efRows.find((f) => f.name === 'eadironly');
+    const freeRow = efRows.find((f) => f.name === 'dsonly');
+    check('an empty folder inside a reference folder is flagged read-only', !!refRow && refRow.prot === true);
+    check('an empty folder outside it is not', !!freeRow && !freeRow.prot);
+  }
 
   // R6 — an aliased scope must not fabricate phantom duplicate pairs: Balias
   // resolves inside Backups, so the walk de-overlaps it (a walker visiting the

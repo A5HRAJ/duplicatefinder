@@ -526,9 +526,28 @@ func (s *Server) handlePagedResults(w http.ResponseWriter, r *http.Request) {
 		}
 		resp["groups"] = trimGroupRows(page)
 	} else {
-		resp["files"] = slicePage(view.files, off, lim)
+		files := slicePage(view.files, off, lim)
+		markFileProt(files, refs)
+		resp["files"] = files
 	}
 	writeJSON(w, 200, resp)
+}
+
+// markFileProt flags each row of a flat tool's page that lies under a
+// reference folder, so the grid draws the padlock there too. The scan walks
+// the reference folders for every tool (they are part of the roots), so an
+// empty folder or a temp file inside one is listed like any other — and the
+// move refuses it, so without the flag the row offers a checkbox for a move
+// that can only fail. Safe to mutate: slicePage returned a fresh copy.
+func markFileProt(files []FileEnt, m *refMatcher) {
+	if m.empty() {
+		return
+	}
+	for i := range files {
+		if m.protects(files[i].Dir, files[i].Name) {
+			files[i].Prot = true
+		}
+	}
 }
 
 // buildView derives the filtered/refined/sorted view for one parameter set.
