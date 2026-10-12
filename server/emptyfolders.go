@@ -109,8 +109,8 @@ type emptyFolderScan struct {
 // empty — it only ever holds what was seen before the first file.
 type efFrame struct {
 	path    string
-	size    int64
 	mod     time.Time
+	junk    *junkInfo // junk files anywhere below; nil while there are none
 	isRoot  bool
 	hasFile bool
 	empties []dirEnt
@@ -124,10 +124,19 @@ func newEmptyFolderScan() *emptyFolderScan {
 	}
 }
 
+// junkBytes is the folder row's size: the bytes of junk it holds, which move
+// with it.
+func (d dirEnt) junkBytes() int64 {
+	if d.junk == nil {
+		return 0
+	}
+	return d.junk.bytes
+}
+
 func (e *emptyFolderScan) emit(d dirEnt) {
 	e.top.add(fEnt{
 		path: d.path, name: filepath.Base(d.path), dir: filepath.Dir(d.path),
-		size: d.size, mod: d.mod, isDir: true,
+		mod: d.mod, isDir: true, size: d.junkBytes(), junk: d.junk,
 	})
 }
 
@@ -192,7 +201,15 @@ func (e *emptyFolderScan) pop() {
 	// Nothing but (possibly) empty directories below: this one supersedes
 	// them as the topmost empty folder, and they are dropped with it.
 	if parent != nil {
-		e.addEmpty(parent, dirEnt{path: f.path, size: f.size, mod: f.mod})
+		e.addEmpty(parent, dirEnt{path: f.path, mod: f.mod, junk: f.junk})
+		// A parent that also holds no real file supersedes this folder, and
+		// then this folder's junk is part of what the parent's row reports.
+		if f.junk != nil && !parent.hasFile {
+			if parent.junk == nil {
+				parent.junk = &junkInfo{}
+			}
+			parent.junk.merge(f.junk)
+		}
 	}
 }
 
@@ -221,7 +238,7 @@ func (e *emptyFolderScan) visit(rootIdx int, f fEnt) {
 		e.stack = append(e.stack, efFrame{path: filepath.Dir(f.path), isRoot: true})
 	}
 	if f.isDir {
-		e.stack = append(e.stack, efFrame{path: f.path, size: f.size, mod: f.mod})
+		e.stack = append(e.stack, efFrame{path: f.path, mod: f.mod})
 		return
 	}
 	// A junk file does not make its folder non-empty: a folder holding
@@ -236,6 +253,13 @@ func (e *emptyFolderScan) visit(rootIdx int, f fEnt) {
 	// zero-byte placeholder someone created is theirs — the Empty Files tool
 	// lists those individually instead.
 	if isTempName(f.name) {
+		top := &e.stack[len(e.stack)-1]
+		if !top.hasFile {
+			if top.junk == nil {
+				top.junk = &junkInfo{}
+			}
+			top.junk.add(f.name, f.size)
+		}
 		return
 	}
 	e.markHasFile(&e.stack[len(e.stack)-1])
@@ -301,6 +325,10 @@ func (e *emptyFolderScan) finish(s *Server, cancel chan struct{}, confirm func(s
 		fe := s.fileEnt(c)
 		fe.IsDir = true
 		fe.Ext = "DIR"
+		if c.junk != nil {
+			fe.Junk = c.junk.n
+			fe.JunkEx = c.junk.ex
+		}
 		out = append(out, fe)
 	}
 	var errs []string

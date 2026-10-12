@@ -16,6 +16,10 @@
 #   Stop            /api/cancel ends a running scan
 #   free space      a move onto a volume that cannot hold the files is refused
 #                   before anything is created; a move within the volume is not
+#   moved copies    a copy the app moved, rescanned beside its original, is
+#                   flagged as moved and never lets the original follow it —
+#                   recorded for a flat move, recognised by layout for an
+#                   older "keep folder structure" move, and kept across a restart
 #   SIGTERM         the daemon stops cleanly, inside the package's stop window
 #
 # Requires: Go 1.20+, Python 3, curl. No Node, no network. check.sh runs it.
@@ -198,6 +202,40 @@ pass "a move onto a volume that cannot hold the files is refused: $(echo "$r" | 
 r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/b.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":true,\"preserve\":false}")
 echo "$r" | grep -q '"moved":\["' || fail "a move within the volume was refused: $r"
 pass "a move within the volume is not held to another volume's space"
+
+echo "== moved copies"
+# b.txt now sits in $SHARE/dest, inside the scanned share, beside its original
+# a.txt. An older preserve-mode move is recreated by hand: the daemon never
+# recorded it, so only the batch folder's layout can identify the copy.
+printf 'legacy content' > "$SHARE/x.txt"
+mkdir -p "$SHARE/Old/Duplicates (2)/volume1/share"
+cp -p "$SHARE/x.txt" "$SHARE/Old/Duplicates (2)/volume1/share/x.txt"
+moved_check() { # moved_check <label>
+	scan '["duplicates"]'
+	api POST /api/results '{"tool":"duplicates","offset":0,"limit":100}' | python3 -c '
+import json,sys
+share=sys.argv[1]
+out={f["path"]+"/"+f["name"]: f.get("out",False) for g in json.load(sys.stdin)["groups"] for f in g["files"]}
+want={share+"/a.txt":False, share+"/dest/b.txt":True, share+"/x.txt":False,
+      share+"/Old/Duplicates (2)/volume1/share/x.txt":True}
+bad={p:(out.get(p),w) for p,w in want.items() if out.get(p)!=w}
+if bad: sys.exit("moved-copy flags wrong (got, want): %r — all rows: %r" % (bad, out))' "$SHARE" || fail "$1: rows not flagged correctly"
+	for orig in a.txt x.txt; do
+		r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/$orig\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")
+		echo "$r" | grep -q 'already moved' || fail "$1: moving the original $orig past its moved copy was not refused: $r"
+		[ -f "$SHARE/$orig" ] || fail "$1: the original $orig moved despite the refusal"
+	done
+}
+moved_check "before a restart"
+pass "a moved copy is flagged (flat move recorded, older batch folder recognised), and moving its original is refused"
+stop_daemon
+FREESPACE=1000 start_daemon "$WORK/daemon3.log"
+moved_check "after a restart"
+pass "the record of moved copies survives a restart"
+# The moved copy itself may still move: it is the original that must stay.
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/dest/b.txt\"],\"dest\":\"$USB/usbshare\",\"verify\":true,\"preserve\":false}")
+echo "$r" | grep -q '"moved":\["' || fail "moving the moved copy on was refused: $r"
+pass "a moved copy can still be moved on"
 
 echo "== SIGTERM"
 kill -TERM "$DPID"

@@ -35,6 +35,7 @@ type persistedState struct {
 	Results  map[string]*toolResult `json:"results"`
 	RefDirs  []string               `json:"refDirs"`
 	Keepers  []string               `json:"keepers"`
+	MoveOut  []string               `json:"moveOut,omitempty"`
 	LastTool string                 `json:"lastTool"`
 	NextID   int                    `json:"nextID"`
 	SavedAt  string                 `json:"savedAt"`
@@ -199,6 +200,9 @@ func (s *Server) saveState() error {
 	for p := range s.keepers {
 		ps.Keepers = append(ps.Keepers, p)
 	}
+	for p := range s.moveOut {
+		ps.MoveOut = append(ps.MoveOut, p)
+	}
 	s.mu.Unlock()
 
 	// One writer at a time; the snapshot above is already consistent.
@@ -315,6 +319,9 @@ func (s *Server) loadState() {
 	}
 	if ps.NextID > s.nextID {
 		s.nextID = ps.NextID
+	}
+	if len(ps.MoveOut) > 0 {
+		s.moveOut = moveOutSet{}.with(ps.MoveOut)
 	}
 	if len(ps.Keepers) > 0 {
 		s.keepers = map[string]bool{}

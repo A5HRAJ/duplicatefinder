@@ -135,7 +135,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	defer s.setMoveProgress(false, 0, 0, "")
 
 	moved := []string{}
-	var movedCanon, movedDirs []string
+	var movedCanon, movedDirs, landed []string
 	errs := []map[string]string{}
 	for i, src := range req.Files {
 		src = filepath.Clean(src)
@@ -155,7 +155,10 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			s.setMoveProgress(true, i, len(req.Files), base+stage)
 		}
 		note("")
-		cp, gone, err := s.moveOne(v, batchFn, sess, destShare, destCanon, req.Verify, note, src)
+		cp, at, gone, err := s.moveOne(v, batchFn, sess, destShare, destCanon, req.Verify, note, src)
+		if at != "" && batch == nil {
+			landed = append(landed, at) // a flat move: record the entry itself
+		}
 		if gone {
 			movedCanon = append(movedCanon, cp)
 			// A moved DIRECTORY takes everything under it (a junk-only "empty"
@@ -206,7 +209,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	if batch != nil && batch.name != "" && len(movedCanon) == 0 {
 		share := batch.destShare + "/" + batch.name
 		if empty, err := sess.folderIsEmpty(share); err == nil && empty {
-			if derr := sess.deletePath(share); derr == nil {
+			if derr := sess.removeEmptyFolder(share); derr == nil {
 				batch.name = "" // nothing was created that the response should name
 			} else {
 				log.Printf("empty batch folder %s could not be removed: %v", share, derr)
@@ -215,6 +218,19 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(movedCanon) > 0 {
+		// Record where this request put things, so the next duplicates scan's
+		// pairing of each moved copy with its original can never make the
+		// moved copy the one that stays (moveout.go). Preserve mode records
+		// its one batch folder; a flat move records each entry it landed,
+		// never the whole destination, which may hold the user's own files.
+		if batch != nil && batch.name != "" {
+			landed = append(landed, filepath.Join(destCanon, batch.name))
+		}
+		if len(landed) > 0 {
+			s.mu.Lock()
+			s.moveOut = s.moveOut.with(landed)
+			s.mu.Unlock()
+		}
 		s.pruneMoved(movedCanon, movedDirs, v.canon)
 		// Pruned rows and new keep-one survivors must survive a restart too,
 		// or a reboot would resurrect moved rows and forget protections.
@@ -299,14 +315,19 @@ type moveVet struct {
 	idents    map[string][]entIdent
 	keepers   map[string]bool
 	drops     map[string]bool
-	vols      []string
+	// outHeld marks the drops held back only because every other copy left
+	// in place is one Duplicate Finder moved there itself.
+	outHeld map[string]bool
+	vols    []string
 }
 
 // newMoveVet snapshots the stored results and derives the vetting sets.
 func (s *Server) newMoveVet(req MoveReq, sess *fsSession) *moveVet {
+	var moveOut moveOutSet
 	refDirs, groups, keepers, cachedEnts := func() ([]string, []Group, map[string]bool, []FileEnt) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		moveOut = s.moveOut
 		k := make(map[string]bool, len(s.keepers))
 		for p := range s.keepers {
 			k[p] = true
@@ -387,6 +408,7 @@ func (s *Server) newMoveVet(req MoveReq, sess *fsSession) *moveVet {
 	// group's CONTENT either — so File Station is asked which members of
 	// the touched groups still exist as recorded.
 	exists := groupExistence(sess, groups, requested, canon)
+	drops, outHeld := keepOneDropsWhy(groups, requested, canonRefs, canon, exists, moveOut.isOut)
 	return &moveVet{
 		tool:      req.Tool,
 		canon:     canon,
@@ -394,7 +416,8 @@ func (s *Server) newMoveVet(req MoveReq, sess *fsSession) *moveVet {
 		allowed:   allowed,
 		idents:    idents,
 		keepers:   keepers,
-		drops:     keepOneDrops(groups, requested, canonRefs, canon, exists),
+		drops:     drops,
+		outHeld:   outHeld,
 		vols:      volumeRootsResolved(),
 	}
 }
@@ -418,6 +441,8 @@ func (v *moveVet) refuse(cp string) error {
 	// drops: this request would take a group's last unrequested copy.
 	// keepers: an earlier request already dissolved the group — its
 	// survivor stays held back until the next duplicates scan.
+	case v.outHeld[cp]:
+		return errors.New("keeping this copy in place — the other copies are ones Duplicate Finder already moved, and one copy must stay where it was")
 	case v.drops[cp] || v.keepers[cp]:
 		return errors.New("keeping one copy of this duplicate group")
 	case isDirIdent(v.idents[cp]) && (holdsUnder(cp, v.drops) || holdsUnder(cp, v.keepers)):
@@ -478,9 +503,10 @@ func (b *batchFolder) share() (string, error) {
 // applies the request-level refusals and hands the rest to execMoveFS. gone
 // reports that the source left its place — a clean move, or a failure after
 // File Station had already moved it — so the caller prunes the row either way.
-func (s *Server) moveOne(v *moveVet, batch func() (string, error), sess *fsSession, destShare, destCanon string, verify bool, note func(string), src string) (cp string, gone bool, err error) {
+// at is where the entry landed (canonical), when that is known.
+func (s *Server) moveOne(v *moveVet, batch func() (string, error), sess *fsSession, destShare, destCanon string, verify bool, note func(string), src string) (cp, at string, gone bool, err error) {
 	if !allowedPath(src) {
-		return "", false, errors.New("outside allowed volumes")
+		return "", "", false, errors.New("outside allowed volumes")
 	}
 	// Pin the source's parent (src itself may be a symlink; the move takes
 	// the link, never what it points at) and derive the canonical path from
@@ -493,16 +519,16 @@ func (s *Server) moveOne(v *moveVet, batch func() (string, error), sess *fsSessi
 	// strongest available guarantee.)
 	parentH, err := dirhandle.Open(filepath.Dir(src))
 	if err != nil {
-		return "", false, errors.New("cannot resolve path")
+		return "", "", false, errors.New("cannot resolve path")
 	}
 	defer parentH.Close()
 	pCanon, err := parentH.Canon()
 	if err != nil {
-		return "", false, errors.New("cannot resolve path")
+		return "", "", false, errors.New("cannot resolve path")
 	}
 	cp = filepath.Join(pCanon, filepath.Base(src))
 	if err := v.refuse(cp); err != nil {
-		return cp, false, err
+		return cp, "", false, err
 	}
 	// An empty-folder row is a claim about the folder's CONTENTS, and the
 	// identity check in execMoveFS sees only its type and modified time. Ask
@@ -511,16 +537,16 @@ func (s *Server) moveOne(v *moveVet, batch func() (string, error), sess *fsSessi
 	if v.tool == "empty_folders" && isDirIdent(v.idents[cp]) {
 		empty, cerr := confirmEmpty(cp, sess)
 		if cerr != nil {
-			return cp, false, errors.New("could not confirm the folder is still empty — " + cerr.Error())
+			return cp, "", false, errors.New("could not confirm the folder is still empty — " + cerr.Error())
 		}
 		if !empty {
-			return cp, false, errors.New("the folder is no longer empty — rescan and try again")
+			return cp, "", false, errors.New("the folder is no longer empty — rescan and try again")
 		}
 	}
-	err = execMoveFS(sess, src, cp, destShare, destCanon, v.idents[cp], batch, verify, note)
+	at, err = execMoveFSAt(sess, src, cp, destShare, destCanon, v.idents[cp], batch, verify, note)
 	var mbe movedButError
 	gone = err == nil || errors.As(err, &mbe)
-	return cp, gone, err
+	return cp, at, gone, err
 }
 
 // setMoveProgress publishes how far the move in flight has got. It takes mu
@@ -648,25 +674,34 @@ func verifyRead(p string) (string, error) {
 // note lets the per-file progress line say when the time is going into
 // verification rather than the move itself; nil means no verification.
 func execMoveFS(sess *fsSession, src, cp, destShare, destCanon string, wants []entIdent, batch func() (string, error), verify bool, note func(string)) error {
+	_, err := execMoveFSAt(sess, src, cp, destShare, destCanon, wants, batch, verify, note)
+	return err
+}
+
+// execMoveFSAt is execMoveFS that also reports where the entry landed — its
+// canonical path at the destination — whenever File Station put it in place,
+// including a move whose verification then failed. A file left parked in a
+// staging folder reports "": that folder is hidden and never scanned.
+func execMoveFSAt(sess *fsSession, src, cp, destShare, destCanon string, wants []entIdent, batch func() (string, error), verify bool, note func(string)) (string, error) {
 	srcShare, err := sess.shareSpacePath(cp)
 	if err != nil {
-		return errors.New("outside allowed volumes")
+		return "", errors.New("outside allowed volumes")
 	}
 	info, err := sess.getInfo([]string{srcShare}, []string{"size", "time"})
 	if err != nil {
 		var fe *fsError
 		if errors.As(err, &fe) && fe.hasCode(408) {
-			return errors.New("no such file or folder")
+			return "", errors.New("no such file or folder")
 		}
-		return err
+		return "", err
 	}
 	e, ok := info[srcShare]
 	if !ok || !e.exists() {
-		return errors.New("no such file or folder")
+		return "", errors.New("no such file or folder")
 	}
 	want, ok2 := identMatches(e, wants)
 	if !ok2 {
-		return errors.New("file changed since the scan — rescan and try again")
+		return "", errors.New("file changed since the scan — rescan and try again")
 	}
 	// File Station has confirmed the type, size and modification time still
 	// agree with the scan. That still leaves a file rewritten in place with
@@ -677,10 +712,10 @@ func execMoveFS(sess *fsSession, src, cp, destShare, destCanon string, wants []e
 	// insist it still matches. Any error is a refusal: this gate exists to
 	// say no.
 	if want.pfx != "" && !contentPrefixUnchanged(cp, want.pfx) {
-		return errors.New("file contents changed since the scan — rescan and try again")
+		return "", errors.New("file contents changed since the scan — rescan and try again")
 	}
 	if e.IsDir && (destCanon == cp || strings.HasPrefix(destCanon+"/", cp+"/")) {
-		return errors.New("destination is inside the folder being moved")
+		return "", errors.New("destination is inside the folder being moved")
 	}
 	// Hoisted above the allocation below, so that no purely LOCAL refusal can
 	// happen after something has been created at the destination. The check
@@ -689,7 +724,7 @@ func execMoveFS(sess *fsSession, src, cp, destShare, destCanon string, wants []e
 	// EARLIER batch's mirrored tree now moves into the new batch rather than
 	// being refused — which is what "batches never merge" means.
 	if batch == nil && filepath.Dir(srcShare) == destShare {
-		return errors.New("file is already in the destination")
+		return "", errors.New("file is already in the destination")
 	}
 	// Directories are never content-verified: their move is a rename, and
 	// there is no single content to hash. Placed above batch() with every
@@ -697,27 +732,32 @@ func execMoveFS(sess *fsSession, src, cp, destShare, destCanon string, wants []e
 	preHash := ""
 	if verify && !e.IsDir {
 		if preHash, err = preMoveHash(cp, want, note); err != nil {
-			return err
+			return "", err
 		}
 	}
 	outShare := destShare
 	if batch != nil {
 		if outShare, err = batchTarget(sess, batch, src); err != nil {
-			return err
+			return "", err
 		}
 	}
 	finalName, err := moveViaFS(sess, srcShare, outShare, want)
 	if err != nil {
 		var pe parkedError
 		if errors.As(err, &pe) {
-			return parkedOutcome(pe, destShare, destCanon, preHash)
+			return "", parkedOutcome(pe, destShare, destCanon, preHash)
 		}
-		return err
+		return "", err
 	}
+	// Where File Station put the entry. Derived, never guessed: outShare
+	// always extends destShare, so grafting that extension onto the picker's
+	// canonical folder, plus the name moveViaFS reports (a collision may have
+	// forced a " (n)" variant), is exactly the landing path.
+	at := filepath.Join(destCanon, strings.TrimPrefix(outShare, destShare), finalName)
 	if verify && !e.IsDir {
-		return verifyMoved(destCanon, destShare, outShare, finalName, preHash, note)
+		return at, verifyMoved(at, preHash, note)
 	}
-	return nil
+	return at, nil
 }
 
 // preMoveHash is verification's first half: prove the SOURCE is still exactly
@@ -791,11 +831,8 @@ func parkedOutcome(pe parkedError, destShare, destCanon, preHash string) movedBu
 // verifyMoved is verification's second half: read the DESTINATION back and
 // require the exact content that left. Within one volume a move is a rename
 // of pointers and this re-reads the same blocks; across volumes or onto a
-// remote mount it is the only proof the data survived the transit. The
-// destination path is derived, never guessed: outShare always extends
-// destShare, so grafting that extension onto the picker's canonical folder
-// plus the name moveViaFS reports (a collision may have forced a " (n)"
-// variant) is exactly where File Station put the file.
+// remote mount it is the only proof the data survived the transit. destFS is
+// the landing path execMoveFSAt derived.
 //
 // Both failure modes happen AFTER the move — the source is gone — so they are
 // reported as movedButError: the row prunes, the message carries the truth.
@@ -803,11 +840,10 @@ func parkedOutcome(pe parkedError, destShare, destCanon, preHash string) movedBu
 // is almost always the package user lacking read access to the destination
 // share, and telling the user their data was damaged when the daemon merely
 // could not look would be a false alarm with real consequences.
-func verifyMoved(destCanon, destShare, outShare, finalName, preHash string, note func(string)) error {
+func verifyMoved(destFS, preHash string, note func(string)) error {
 	if note != nil {
 		note(" — verifying the moved copy")
 	}
-	destFS := filepath.Join(destCanon, strings.TrimPrefix(outShare, destShare), finalName)
 	h, herr := verifyRead(destFS)
 	if herr != nil {
 		return movedButError{"moved, but the copy could not be read back to verify it — grant the package user read access to the destination share, or compare the copies yourself before deleting anything"}
@@ -984,43 +1020,87 @@ func groupExistence(sess *fsSession, groups []Group, requested map[string]bool, 
 // disk: an unrequested member only counts as a survivor if it still exists,
 // and the held-back copy is chosen among existing members when possible.
 // The returned drop keys are canonical too.
-func keepOneDrops(groups []Group, requested map[string]bool, refDirs []string, canon *dirResolver, exists map[string]bool) map[string]bool {
-	drops := map[string]bool{}
+//
+// isOut (nil: none) names the copies Duplicate Finder itself moved. While a
+// group still has an ORIGINAL on disk, only originals count as the copy that
+// stays: a moved copy sits in a folder that exists to be emptied, and
+// counting it would let the last original follow it there.
+func keepOneDrops(groups []Group, requested map[string]bool, refDirs []string, canon *dirResolver, exists map[string]bool, isOut func(string) bool) map[string]bool {
+	drops, _ := keepOneDropsWhy(groups, requested, refDirs, canon, exists, isOut)
+	return drops
+}
+
+// keepOneDropsWhy is keepOneDrops that also reports which drops were held
+// back only because the copies left in place are moved copies — so the
+// refusal can say so rather than name a group the user sees two copies of.
+func keepOneDropsWhy(groups []Group, requested map[string]bool, refDirs []string, canon *dirResolver, exists map[string]bool, isOut func(string) bool) (drops, outHeld map[string]bool) {
+	drops, outHeld = map[string]bool{}, map[string]bool{}
+	original := func(p string) bool { return isOut == nil || !isOut(p) }
 	for _, g := range groups {
-		survivors := 0
-		last, lastExisting := "", ""
-		for _, f := range g.Files {
-			p := canon.path(filepath.Join(f.Dir, f.Name))
+		paths := make([]string, len(g.Files))
+		anyOriginal := false
+		for i, f := range g.Files {
+			paths[i] = canon.path(filepath.Join(f.Dir, f.Name))
+			if exists[paths[i]] && original(paths[i]) {
+				anyOriginal = true
+			}
+		}
+		// With no original left on disk, every copy counts as before.
+		counts := func(p string) bool { return !anyOriginal || original(p) }
+		survivors, outSurvivors := 0, 0
+		// The copy to hold back, best first: an existing original, any
+		// existing copy, an original, any copy.
+		var pick [4]string
+		for _, p := range paths {
 			if !requested[p] || isUnder(p, refDirs) {
 				if exists[p] {
-					survivors++
+					if counts(p) {
+						survivors++
+					} else {
+						outSurvivors++
+					}
 				}
 				continue
 			}
-			last = p
-			if exists[p] {
-				lastExisting = p
+			if !counts(p) {
+				continue // a moved copy may move again; it is never the keeper
 			}
+			if exists[p] && original(p) {
+				pick[0] = p
+			}
+			if exists[p] {
+				pick[1] = p
+			}
+			if original(p) {
+				pick[2] = p
+			}
+			pick[3] = p
 		}
-		if survivors == 0 {
-			if lastExisting != "" {
-				drops[lastExisting] = true
-			} else if last != "" {
-				drops[last] = true
+		if survivors > 0 {
+			continue
+		}
+		for _, p := range pick {
+			if p != "" {
+				drops[p] = true
+				if outSurvivors > 0 {
+					outHeld[p] = true
+				}
+				break
 			}
 		}
 	}
-	return drops
+	return drops, outHeld
 }
 
 // crossVolumeNeed sums the sizes of the request's files that would have to be
 // COPIED to reach dest: File Station moves a file to another volume by
 // copying it there and deleting the source, so the destination's volume must
 // hold every such byte, while a move within one volume needs none. Sizes are
-// the scan's own record of each file — the identity the move is vetted
-// against; directories, and paths no scan listed, contribute nothing here,
-// the vetting refuses those on its own. A sparse file counts at its full
-// size: a copy of one cannot be assumed to stay sparse.
+// the scan's own record of each entry — the identity the move is vetted
+// against. A junk-only folder's size is the junk it carries with it; paths no
+// scan listed contribute nothing here, the vetting refuses those on its own.
+// A sparse file counts at its full size: a copy of one cannot be assumed to
+// stay sparse.
 func (v *moveVet) crossVolumeNeed(files []string, destCanon string) int64 {
 	destVol := volumeOf(destCanon, v.vols)
 	var need int64
@@ -1029,11 +1109,8 @@ func (v *moveVet) crossVolumeNeed(files []string, destCanon string) int64 {
 		if destVol == "" || volumeOf(cp, v.vols) == destVol {
 			continue
 		}
-		for _, id := range v.idents[cp] {
-			if !id.isDir {
-				need += id.size
-				break
-			}
+		if ids := v.idents[cp]; len(ids) > 0 {
+			need += ids[0].size
 		}
 	}
 	return need

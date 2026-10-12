@@ -368,6 +368,30 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   check('deselect clears', win.sm.getSelections().length === 0);
   check('move button disabled without selection', win.moveBtn.disabled);
 
+  // A copy Duplicate Finder already moved ('out', flagged by the daemon) is
+  // never kept over an original and never ticked to move again. Made the
+  // NEWEST copy of its group here, so the old rule would have kept it and
+  // ticked every original — the case that let all copies end up in folders
+  // made to be emptied.
+  {
+    const byG = {};
+    win.store.each((r) => { (byG[r.get('gidx')] = byG[r.get('gidx')] || []).push(r); });
+    const grp = Object.values(byG).find((rs) => rs.length >= 2 && rs.every((r) => !r.get('prot')));
+    const moved = grp[grp.length - 1];
+    moved.set('out', true);
+    moved.set('date', '2099-01-01 00:00:00');
+    win.autoSelect('newest');
+    const sel = new Set(win.sm.getSelections().map((r) => r.id));
+    const keptOriginals = grp.filter((r) => r !== moved && !sel.has(r.id)).length;
+    check('Keep Newest never keeps or ticks a moved copy', !sel.has(moved.id) && keptOriginals === 1);
+    const row = win.grid.getView().getRow(win.store.indexOf(moved));
+    const loc = row && row.querySelector('.df-loc');
+    check('a moved copy says so on its location',
+      !!loc && /moved this copy here/.test(loc.getAttribute('ext:qtip') || ''));
+    moved.reject();
+    win.sm.clearSelections();
+  }
+
   // The search box must be DSM's SearchField, and must NOT pass its own
   // emptyText — SearchField installs a localized "Search" placeholder that our
   // hardcoded English string would silently overwrite.

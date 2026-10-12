@@ -1385,11 +1385,26 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 						if (!v) return '<span class="df-dim">no evidence either way</span>';
 						return '<span ext:qtip="' + qtipText(v) + '">' + esc(v) + '</span>';
 					} },
-					{ header: 'Location', dataIndex: 'path', width: 260, sortable: true, renderer: function (v) {
-						return '<span class="df-loc" ext:qtip="Open in File Station">' + esc(v) + '</span>';
+					{ header: 'Location', dataIndex: 'path', width: 260, sortable: true, renderer: function (v, m, r) {
+						var tip = r.get('out') ?
+							'Duplicate Finder moved this copy here. Keep Newest and Keep Oldest keep an original instead. Click to open in File Station' :
+							'Open in File Station';
+						return '<span class="df-loc" ext:qtip="' + qtipText(tip) + '">' + esc(v) + '</span>';
 					} },
 					{ header: 'Size', dataIndex: 'size', width: 90, align: 'right', sortable: true, renderer: function (v, m, r) {
-						return r.get('isDir') ? 'Empty' : fmtBytes(v);
+						if (!r.get('isDir')) return fmtBytes(v);
+						// An "empty" folder may still hold files with junk NAMES —
+						// *.bak, *.old — which can be real backups of any size.
+						// Such a folder shows their size, never "Empty", and the
+						// tooltip names what is inside.
+						var n = r.get('junk');
+						if (!n) return 'Empty';
+						var ex = r.get('junkEx') || [], more = n - ex.length;
+						m.attr = 'ext:qtip="' + qtipText('Not completely empty: holds ' + fmtNum(n) +
+							(n === 1 ? ' temporary file' : ' temporary files') + ' (' + fmtBytes(v) + ') — ' +
+							ex.join(', ') + (more > 0 ? ' and ' + fmtNum(more) + ' more' : '') +
+							'. They move with the folder; check them before deleting it.') + '"';
+						return fmtBytes(v);
 					} },
 					{ header: 'Created Date', dataIndex: 'created', width: 160, sortable: true, hidden: false, renderer: fmtDate },
 					{ header: 'Modified Date', dataIndex: 'date', width: 160, sortable: true, renderer: fmtDate },
@@ -1531,7 +1546,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					// which reads exactly like a backend bug.
 					'id', 'name', 'path', 'size', 'date', 'created', 'captured',
 					'hash', 'ext', 'prot', 'isDir', 'gidx', 'grpLabel', 'ord',
-					'verdict', 'evidence', 'nomove', 'links', 'alloc'
+					'verdict', 'evidence', 'nomove', 'links', 'alloc', 'junk', 'junkEx', 'out'
 				]),
 				paramNames: { start: 'offset', limit: 'limit', sort: 'sort', dir: 'dir' },
 				groupField: 'gidx',
@@ -2881,8 +2896,16 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			});
 			for (var i = 0; i < order.length; i++) {
 				k = order[i];
-				var recs = groups[k], movable = [], prot = 0;
+				var recs = groups[k], movable = [], prot = 0, originals = [];
 				Ext.each(recs, function (r) {
+					if (!r.get('out')) originals.push(r);
+				});
+				// A copy Duplicate Finder already moved ('out') is never the one
+				// kept while an original exists — it sits in a folder that is
+				// there to be emptied — and it is not ticked to move again.
+				// With no original left, every copy is a candidate as before.
+				var cands = originals.length ? originals : recs;
+				Ext.each(cands, function (r) {
 					if (r.get('prot')) prot++;
 					else movable.push(r);
 				});
@@ -2890,11 +2913,11 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					// a protected master survives, every movable copy may go
 					Ext.each(movable, function (r) { wanted[r.id] = true; });
 				} else {
-					var keep = recs[0];
-					Ext.each(recs, function (r) {
+					var keep = cands[0];
+					Ext.each(cands, function (r) {
 						if (mode === 'newest' ? r.get('date') > keep.get('date') : r.get('date') < keep.get('date')) keep = r;
 					});
-					Ext.each(recs, function (r) { if (r.id !== keep.id) wanted[r.id] = true; });
+					Ext.each(cands, function (r) { if (r.id !== keep.id) wanted[r.id] = true; });
 				}
 			}
 			var sel = [];
