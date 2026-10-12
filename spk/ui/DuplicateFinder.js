@@ -2784,10 +2784,12 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			if (this._bulkSelecting) return;
 			var recs = this.sm.getSelections(), bytes = 0;
 			// What a row frees is what it holds on disk (alloc, when the scan
-			// recorded less than its size), not its apparent size.
+			// recorded less than its size), not its apparent size. Only a
+			// number counts: the daemon omits alloc for an ordinary file, and
+			// the record then holds '' — which is not null, and adds nothing.
 			Ext.each(recs, function (r) {
 				var a = r.get('alloc');
-				bytes += (a != null ? a : r.get('size')) || 0;
+				bytes += (typeof a === 'number' ? a : r.get('size')) || 0;
 			});
 			if (isReadOnly(this.state.tool)) {
 				// Says what to do next instead of offering an action the tool

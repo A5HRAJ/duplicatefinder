@@ -449,6 +449,55 @@ func TestPagedResultsFlatSort(t *testing.T) {
 	}
 }
 
+// The reference folders are walked by every tool, so a flat tool's page lists
+// rows inside them — and each must carry the padlock flag the duplicates page
+// gets, or the grid offers a checkbox for a move the daemon will refuse. The
+// flag is per page: the cached result and view stay unflagged.
+func TestPagedResultsFlatRowsUnderReferenceAreProtected(t *testing.T) {
+	files := []FileEnt{
+		{ID: "1", Name: "Ref", Dir: "/v/share", IsDir: true},         // the reference folder itself
+		{ID: "2", Name: "Old", Dir: "/v/share/Ref/sub", IsDir: true}, // inside it
+		{ID: "3", Name: "Empty", Dir: "/v/share/Other", IsDir: true}, // outside it
+		{ID: "4", Name: "Refuge", Dir: "/v/share", IsDir: true},      // a name prefix is not containment
+	}
+	s := &Server{
+		results: map[string]*toolResult{
+			"empty_folders": {Tool: "empty_folders", Files: files, Scanned: "now"},
+		},
+		refDirs: []string{"/v/share/Ref"},
+	}
+	out := pagedReq(t, s, resultsQuery{Tool: "empty_folders", Sort: "name", Dir: "ASC", Limit: 10})
+	prot := map[string]bool{}
+	for _, f := range out["files"].([]any) {
+		row := f.(map[string]any)
+		prot[row["name"].(string)] = row["prot"] == true
+	}
+	want := map[string]bool{"Ref": true, "Old": true, "Empty": false, "Refuge": false}
+	for name, p := range want {
+		if prot[name] != p {
+			t.Fatalf("%s: prot = %v, want %v (page %+v)", name, prot[name], p, out["files"])
+		}
+	}
+	for _, f := range s.results["empty_folders"].Files {
+		if f.Prot {
+			t.Fatalf("stored result mutated: %+v", f)
+		}
+	}
+	for _, f := range s.view.files {
+		if f.Prot {
+			t.Fatalf("cached view mutated: %+v", f)
+		}
+	}
+	// Without reference folders nothing is flagged.
+	s.refDirs = nil
+	out = pagedReq(t, s, resultsQuery{Tool: "empty_folders", Limit: 10})
+	for _, f := range out["files"].([]any) {
+		if f.(map[string]any)["prot"] == true {
+			t.Fatalf("row protected with no reference folders: %+v", f)
+		}
+	}
+}
+
 func TestPagedResultsViewCacheInvalidation(t *testing.T) {
 	s := testServerWithDuplicates(3)
 	pagedReq(t, s, resultsQuery{Tool: "duplicates", Limit: 10})
