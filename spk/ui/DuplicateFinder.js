@@ -3751,7 +3751,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					me.presentMoveReport(j.report, lead);
 					return;
 				}
-				me.notify((lead || '') + 'The move finished on the NAS and the results were refreshed. Its per-file report is in the daemon log (dupfinder.log).');
+				me.notify((lead || '') + 'The move has ended on the NAS and the results were refreshed, but its report could not be fetched — check the destination folder; the daemon log (dupfinder.log) has the per-file details.');
 			});
 		},
 
