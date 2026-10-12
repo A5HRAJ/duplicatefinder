@@ -4,7 +4,7 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
-## [Unreleased]
+## [1.1.2] - 2026-10-11
 
 ### Fixed
 - A named pipe or a socket in the scan scope (a Docker container's socket, a
