@@ -4,6 +4,28 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
+## [1.1.5] - 2026-10-12
+
+### Fixed
+- Empty Folders could list a folder that was not empty. A hidden subfolder
+  named like a temporary file (".DS_Store", "._photos") was taken for junk,
+  and File Station's own listing hides such names, so a folder holding one —
+  with real files inside — was shown as empty and offered for moving. Any
+  subfolder other than Synology's thumbnail cache now means the folder is
+  not empty.
+- A file whose name contains one of a small range of rare private-use
+  characters could not be moved: the app read its name back as a different
+  name and refused it as "not valid Unicode text". Such names now come back
+  exactly as they are.
+- A move could be abandoned while File Station was still carrying it out.
+  If DSM's web server dropped a single reply — to the request starting the
+  move, or to one of the progress checks during a long copy to another
+  volume — the app reported the file as failed although it went on to
+  arrive: never verified even with verification on, still listed in the
+  results, and not remembered as a copy the app had moved, so a later
+  Keep Newest could take it for an original. The app now keeps checking
+  through up to two minutes of silence and follows the move to its end.
+
 ## [1.1.4] - 2026-10-12
 
 ### Fixed
