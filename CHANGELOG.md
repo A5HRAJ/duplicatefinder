@@ -4,6 +4,19 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
+## [1.1.3] - 2026-10-11
+
+### Fixed
+- The footer read "0 B reclaimable" for almost every selection, whatever
+  was ticked: a file that occupies its full size carries no separate on-disk
+  figure, and the footer counted that missing figure as zero. It now adds up
+  what the selected files actually hold.
+- Inside a read-only reference folder, only Duplicate Files showed the
+  padlock. Empty Folders, Empty Files and Temporary Files listed the same
+  folder's contents with an ordinary checkbox, and moving them could only be
+  refused. Those rows now show the padlock and cannot be selected, in every
+  view.
+
 ## [1.1.2] - 2026-10-11
 
 ### Fixed
