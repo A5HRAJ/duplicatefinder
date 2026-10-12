@@ -2236,6 +2236,32 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
       if (st && st.running === false) break;
       await sleep(100);
     }
+    // Onto another volume a verified move COPIES first and checks the copy:
+    // the same damage is caught while the original still exists, so the
+    // original stays exactly where it was and nothing is left at the far end.
+    const mv3 = await api('/move', { files: [ctA], dest: usbReal, preserve: false, tool: 'duplicates', verify: true });
+    check('a copy damaged on its way to another volume is refused (' + JSON.stringify(mv3.errors) + ')',
+      mv3.errors.length === 1 && /damaged in transit/.test(mv3.errors[0].error) &&
+      /the original is untouched/.test(mv3.errors[0].error) && mv3.moved.length === 0);
+    check('the original is still in place, byte for byte',
+      fsm.existsSync(ctA) && fsm.readFileSync(ctA).equals(ctBody));
+    check('nothing damaged was left on the other volume',
+      fsm.readdirSync(usbReal).filter((n) => /corrupt-transit|^\.dupfinder-/.test(n)).length === 0);
+    const post3 = await api('/results?tool=duplicates');
+    check('the row stays listed — nothing moved',
+      JSON.stringify(post3.groups).indexOf('corrupt-transit') >= 0);
+    // And an undamaged file crosses: copied, checked, original removed.
+    const mv4 = await api('/move', { files: [ctB], dest: usbReal, preserve: false, tool: 'duplicates', verify: true });
+    check('a verified move onto another volume completes (' + JSON.stringify(mv4.errors) + ')',
+      mv4.errors.length === 0 && mv4.moved.length === 1 && !fsm.existsSync(ctB) &&
+      fsm.readFileSync(usbReal + '/keep.bin').equals(ctBody));
+    fsm.renameSync(usbReal + '/keep.bin', ctB);
+    await api('/scan', { tool: 'duplicates', dirs: [vol + '/spare/ct-src'], refDirs: [], recurse: true, match: {} });
+    for (let i = 0; i < 100; i++) {
+      const st = await api('/state');
+      if (st && st.running === false) break;
+      await sleep(100);
+    }
   }
 
   console.log(failures ? failures + ' FAILURES' : 'ALL PASSED');

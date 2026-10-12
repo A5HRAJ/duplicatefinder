@@ -366,6 +366,18 @@ func (s *fsSession) do(req *http.Request, api string, out any) error {
 // The overwrite parameter is deliberately never sent: a name collision
 // fails with 1003/1004 instead of overwriting or skipping.
 func (s *fsSession) copyMoveOnce(srcShare, destShare string) error {
+	return s.copyMoveTask(srcShare, destShare, true)
+}
+
+// copyOnce COPIES one path into destShare, leaving the source in place —
+// measured on DSM 7.4 across volumes: the copy keeps the file's modified
+// time, and a folder's hidden .DS_Store travels with it. Same polling and
+// same never-overwrite rule as copyMoveOnce.
+func (s *fsSession) copyOnce(srcShare, destShare string) error {
+	return s.copyMoveTask(srcShare, destShare, false)
+}
+
+func (s *fsSession) copyMoveTask(srcShare, destShare string, removeSrc bool) error {
 	var started struct {
 		TaskID string `json:"taskid"`
 	}
@@ -375,7 +387,7 @@ func (s *fsSession) copyMoveOnce(srcShare, destShare string) error {
 	err := s.call("SYNO.FileStation.CopyMove", "start", url.Values{
 		"path":              {jsonArr(srcShare)},
 		"dest_folder_path":  {string(destJSON)},
-		"remove_src":        {"true"},
+		"remove_src":        {strconv.FormatBool(removeSrc)},
 		"accurate_progress": {"false"},
 	}, &started)
 	if err != nil {
@@ -452,19 +464,73 @@ func (s *fsSession) createFolder(parentShare, name string, forceParent bool) err
 }
 
 // removeEmptyFolder deletes a share-space folder ONLY if it holds nothing.
-// Every folder this package removes is one it created itself — a staging
-// folder or a batch folder — and is expected to be empty by then.
+// Every folder this package removes this way is one it created itself — a
+// staging folder or a batch folder — and is expected to be empty by then.
 // recursive=false makes DSM refuse a folder that is not, so a file still
 // inside — one File Station reported moved but left behind, or one another
 // writer put there a moment ago — can never be deleted with it. A refusal
-// leaves the folder in place, visible. There is deliberately no recursive
-// delete anywhere in this package.
+// leaves the folder in place, visible. On a single FILE the same call
+// deletes the file (measured on DSM 7.4), which is how removeEntry uses it.
 func (s *fsSession) removeEmptyFolder(pathShare string) error {
-	// The blocking variant: fine for a single empty folder.
+	// The blocking variant: fine for a single empty folder or one file.
 	return s.call("SYNO.FileStation.Delete", "delete", url.Values{
 		"path":      {jsonArr(pathShare)},
 		"recursive": {"false"},
 	}, nil)
+}
+
+// removeTree deletes a share-space folder AND EVERYTHING IN IT. It exists
+// for exactly two callers in transit.go, and both have proven, just before
+// calling, that nothing irreplaceable is inside: a staging folder holding
+// nothing but a copy whose original is confirmed still in place, and an
+// original folder that was renamed out of everyone's reach and re-checked
+// entry by entry against a copy already verified at the destination. Every
+// other removal in this package is recursive=false. Run as a task and polled
+// like a move, because a folder holding thousands of entries outlasts one
+// request.
+func (s *fsSession) removeTree(pathShare string) error {
+	var started struct {
+		TaskID string `json:"taskid"`
+	}
+	if err := s.call("SYNO.FileStation.Delete", "start", url.Values{
+		"path":              {jsonArr(pathShare)},
+		"recursive":         {"true"},
+		"accurate_progress": {"false"},
+	}, &started); err != nil {
+		return err
+	}
+	delay := 200 * time.Millisecond
+	var silentSince time.Time
+	for {
+		var st struct {
+			Finished bool `json:"finished"`
+		}
+		err := s.call("SYNO.FileStation.Delete", "status",
+			url.Values{"taskid": {started.TaskID}}, &st)
+		if err != nil && moveOutcomeUnknown(err) {
+			if silentSince.IsZero() {
+				silentSince = time.Now()
+			}
+			if time.Since(silentSince) < statusGiveUp {
+				time.Sleep(delay)
+				if delay < 2*time.Second {
+					delay *= 2
+				}
+				continue
+			}
+		}
+		if err != nil {
+			return err
+		}
+		silentSince = time.Time{}
+		if st.Finished {
+			return nil
+		}
+		time.Sleep(delay)
+		if delay < 2*time.Second {
+			delay *= 2
+		}
+	}
 }
 
 // upload writes content as a new file in destShare. Like the moves, the
@@ -630,6 +696,19 @@ func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, 
 		s.removeEmptyFolder(tmpShare)
 		return "", err
 	}
+	return s.claimFromStaging(tmpShare, base, outShare, want)
+}
+
+// claimFromStaging is a staged move's final hop: the entry named base waits
+// in tmpShare (a staging folder inside outShare, so the hop is a rename on
+// one filesystem), and is renamed to the first free name in outShare —
+// base itself or a " (n)" variant — then moved there, retrying when another
+// writer takes the name between the probe and the claim. It returns the name
+// the entry landed under. Any failure leaves the entry parked in tmpShare and
+// says so (parkedError); the staging folder is removed only once it is empty.
+// want decides, when File Station's answer is lost, whether the entry found
+// at the destination is this one (arrived).
+func (s *fsSession) claimFromStaging(tmpShare, base, outShare string, want entIdent) (string, error) {
 	cur := base
 	for tries := 0; tries < nameClaimTries; tries++ {
 		free, err := s.firstFreeName(outShare, base)

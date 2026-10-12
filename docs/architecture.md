@@ -329,6 +329,25 @@ path, and with verification on the parked copy is verified there. Failures
 that happen after the source is gone still prune the row, so it can never
 linger as a phantom survivor.
 
+A verified move that leaves one filesystem for another — another volume, a
+USB disk, a remote folder mounted in a share, or another shared folder on
+Btrfs, where each is its own subvolume (`server/transit.go`) — does not use
+`remove_src`, because File Station's move there is copy-then-delete and a
+check run afterwards could only report damage once the original was gone.
+Instead the entry is copied into a staging folder at the destination, the
+copy is read back and must reproduce the content that left (a file's hash; a
+junk-only folder's every entry), and only then is it put in place and the
+original retired: renamed to a hidden name beside itself — one atomic step
+that takes it out of reach of anything still writing to its path — re-checked
+against what was verified, and deleted. A copy that does not match is
+discarded and the original is untouched; an original that changed meanwhile
+is put back under its own name and both copies are reported. The one
+recursive delete in the package belongs to this flow and only ever removes a
+staging folder whose original is confirmed in place, or a retired original
+folder that has just been compared entry by entry with its verified copy.
+Unverified moves, and verified moves within one filesystem, stay a single
+File Station move: no byte of the latter travels.
+
 In preserve mode the batch's tool folder is allocated lazily, once per
 request, after the first file has cleared every check, so an all-refused
 request creates nothing, and a batch whose every file then fails has its
@@ -361,7 +380,10 @@ file frees), the file-type check that keeps pipes, sockets and devices out
 of the scan and out of the content readers (a listing reports none of it,
 and the open that would find out is the one that hangs), the second reading
 of a candidate empty folder (so the gate does
-not depend on what the listing chooses to show), EXIF capture dates, the
+not depend on what the listing chooses to show), whether a move crosses
+filesystems (the device number, which no API reports) and the reading of a
+moved folder's entries for verification (the same native view the empty-folder
+gate uses, so `.DS_Store` and its kind are checked too), EXIF capture dates, the
 canonical-path containment checks (a security boundary must describe the
 filesystem the daemon actually walks) and volume-root discovery (the
 `/volume*`, `/volumeUSB*` and `/volumeSATA*` globs that define those walls).

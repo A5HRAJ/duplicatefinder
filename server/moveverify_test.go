@@ -48,6 +48,41 @@ type moveVerifyFake struct {
 	// recursiveDeletes counts Delete calls that did not ask for
 	// recursive=false.
 	recursiveDeletes int
+	// copies counts CopyMove starts with remove_src=false; afterCopy is
+	// called with the real path of each copy once it lands.
+	copies    int
+	afterCopy func(dest string)
+	// deleted records every path a Delete removed, share-space.
+	deleted []string
+}
+
+// copyTree copies a file or folder with its modified times, as File
+// Station's copy does.
+func copyTree(src, dst string) error {
+	fi, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if fi.IsDir() {
+		if err := os.Mkdir(dst, 0o755); err != nil {
+			return err
+		}
+		ents, _ := os.ReadDir(src)
+		for _, e := range ents {
+			if err := copyTree(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(dst, b, 0o644); err != nil {
+		return err
+	}
+	return os.Chtimes(dst, fi.ModTime(), fi.ModTime())
 }
 
 func (f *moveVerifyFake) real(share string) string {
@@ -128,6 +163,17 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 				}
 				for _, sp := range srcs {
 					dst := f.real(destDir + "/" + filepath.Base(sp))
+					if r.FormValue("remove_src") == "false" {
+						f.copies++
+						if err := copyTree(f.real(sp), dst); err != nil {
+							fakeEnv(w, 1001, nil)
+							return
+						}
+						if f.afterCopy != nil {
+							f.afterCopy(dst)
+						}
+						continue
+					}
 					if f.slowMove {
 						f.pending = append(f.pending, [2]string{f.real(sp), dst})
 						continue
@@ -182,6 +228,10 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 			}
 			fakeEnv(w, 0, nil)
 		case "SYNO.FileStation.Delete":
+			if r.FormValue("method") == "status" {
+				fakeEnv(w, 0, map[string]any{"finished": true})
+				return
+			}
 			var dp []string
 			json.Unmarshal([]byte(r.FormValue("path")), &dp)
 			if r.FormValue("recursive") != "false" {
@@ -197,6 +247,11 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 					fakeEnv(w, 900, nil)
 					return
 				}
+				f.deleted = append(f.deleted, p)
+			}
+			if r.FormValue("method") == "start" {
+				fakeEnv(w, 0, map[string]any{"taskid": "d1"})
+				return
 			}
 			fakeEnv(w, 0, map[string]any{"finished": true})
 		default:
