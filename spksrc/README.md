@@ -104,7 +104,7 @@ the next it is an ordinary DSM upgrade, and the var dir stays (the
 - **Icons.** `tools/make_icons.py` runs inside the cross package and its
   `icon_*.png` land in `ui/images/`, so `ui/config`'s `images/icon_{0}.png`
   keeps resolving. `PACKAGE_ICON*.PNG` come from `SPK_ICON`
-  (`src/duplicatefinder.png`, the same 256 px render).
+  (`src/duplicatefinder.png`, the same drawing rendered at the 512 px spksrc asks for).
 - **Privilege.** `run-as: package` is exactly what spksrc generates for
   DSM 7, so `spk/conf/privilege` is not carried over.
 - **No `SERVICE_PORT`.** The daemon listens on 127.0.0.1:9807 and is only
