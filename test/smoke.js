@@ -66,7 +66,34 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   // over. Anything that then acts on the daemon (a move, an export, another
   // scan) has to wait for the whole run: the progress dialog goes when the
   // poller sees running=false. Generous, because the ARM runner emulates.
-  const scanDone = async () => { for (let i = 0; i < 3000 && win.progressWin; i++) await sleep(200); };
+  //
+  // "Over" is the DAEMON's word, not the dialog's: a result is published, and
+  // reaches the grid, before the daemon has saved it and released the job, and
+  // a scan started inside that window is refused as "a scan is running". So
+  // this also waits for /api/state to report nothing running.
+  const daemonIdle = async () => {
+    try {
+      const st = await (await fetch('http://localhost:' + PORT + '/api/state')).json();
+      return !st.running;
+    } catch (e) { return false; }
+  };
+  const scanDone = async () => {
+    for (let i = 0; i < 3000; i++) {
+      if (!win.progressWin && await daemonIdle()) return;
+      await sleep(200);
+    }
+  };
+  // Clicks Scan and waits until the daemon has ACCEPTED the scan. Until its
+  // answer arrives there is no progress dialog yet, so a scanDone() straight
+  // after win.startScan() could return before the scan had even begun.
+  win.__scansStarted = 0;
+  const attach = win.attachProgress;
+  win.attachProgress = function () { win.__scansStarted++; return attach.apply(this, arguments); };
+  const startScan = async () => {
+    const n = win.__scansStarted;
+    win.startScan();
+    for (let i = 0; i < 100 && win.__scansStarted === n; i++) await sleep(100);
+  };
   // Which tools a Scan runs. The first scan below runs (nearly) all of them,
   // proving the shared walk; every later scan is scoped to the tool its section
   // is about, so the suite does not hash the whole fixture five times over —
@@ -198,7 +225,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   // unscanned for the idle-card check further down.
   win.state.tools.temp_files = false;
   const dupSeq = win.__loads;
-  win.startScan();
+  await startScan();
   for (let i = 0; i < 40 && !win.state.scanned.duplicates; i++) await sleep(300);
   check('scan completed and results stored', !!win.state.scanned.duplicates);
   await scanDone();
@@ -1023,7 +1050,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   {
     onlyTool('duplicates');
     const seq = win.__loads;
-    win.startScan();
+    await startScan();
     await scanDone();
     for (let i = 0; i < 100; i++) {
       let n = 0;
@@ -1079,7 +1106,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   {
     onlyTool('duplicates');
     const seq = win.__loads;
-    win.startScan();
+    await startScan();
     await scanDone();
     for (let i = 0; i < 100; i++) {
       let n = 0;
@@ -1110,7 +1137,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   win.setTool('empty_folders');
   onlyTool('empty_folders');
   const efSeq = win.__loads;
-  win.startScan();
+  await startScan();
   for (let i = 0; i < 40 && !win.state.scanned.empty_folders; i++) await sleep(300);
   check('empty-folder scan completed', !!win.state.scanned.empty_folders);
   await scanDone();
@@ -1127,7 +1154,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     const tfSeq = win.__loads;
     win.setTool('temp_files');
     onlyTool('temp_files');
-    win.startScan();
+    await startScan();
     for (let i = 0; i < 40 && !win.state.scanned.temp_files; i++) await sleep(300);
     await scanDone();
     await waitForLoadAfter(win, tfSeq, 1);
@@ -1176,7 +1203,7 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   win.setTool('empty_files');
   onlyTool('empty_files');
   const emSeq = win.__loads;
-  win.startScan();
+  await startScan();
   for (let i = 0; i < 40 && !win.state.scanned.empty_files; i++) await sleep(300);
   check('empty-files scan completed', !!win.state.scanned.empty_files);
   await scanDone();
