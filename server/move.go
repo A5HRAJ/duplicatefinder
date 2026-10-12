@@ -136,6 +136,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 
 	moved := []string{}
 	var movedCanon, movedDirs, landed []string
+	anyLanded := false
 	errs := []map[string]string{}
 	for i, src := range req.Files {
 		src = filepath.Clean(src)
@@ -156,8 +157,15 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		}
 		note("")
 		cp, at, gone, err := s.moveOne(v, batchFn, sess, destShare, destCanon, req.Verify, note, src)
-		if at != "" && batch == nil {
-			landed = append(landed, at) // a flat move: record the entry itself
+		if at != "" {
+			// Something now sits at the destination because of this request
+			// — moved, or a verified copy whose original stayed put — and it
+			// must never count as the copy that stays. A flat move records the
+			// entry itself; preserve mode records its batch folder below.
+			anyLanded = true
+			if batch == nil {
+				landed = append(landed, at)
+			}
 		}
 		if gone {
 			movedCanon = append(movedCanon, cp)
@@ -206,7 +214,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	// visible rather than judged. (A folder-creation reply lost in transit is
 	// the one case this cannot tidy: the daemon cannot prove it created the
 	// folder it would be deleting, so that folder stays, visible and empty.)
-	if batch != nil && batch.name != "" && len(movedCanon) == 0 {
+	if batch != nil && batch.name != "" && !anyLanded {
 		share := batch.destShare + "/" + batch.name
 		if empty, err := sess.folderIsEmpty(share); err == nil && empty {
 			if derr := sess.removeEmptyFolder(share); derr == nil {
@@ -217,7 +225,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if len(movedCanon) > 0 {
+	if anyLanded {
 		// Record where this request put things, so the next duplicates scan's
 		// pairing of each moved copy with its original can never make the
 		// moved copy the one that stays (moveout.go). Preserve mode records
@@ -231,9 +239,14 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			s.moveOut = s.moveOut.with(landed)
 			s.mu.Unlock()
 		}
+	}
+	if len(movedCanon) > 0 {
 		s.pruneMoved(movedCanon, movedDirs, v.canon)
-		// Pruned rows and new keep-one survivors must survive a restart too,
-		// or a reboot would resurrect moved rows and forget protections.
+	}
+	if anyLanded || len(movedCanon) > 0 {
+		// Pruned rows, new keep-one survivors and the record of moved copies
+		// must survive a restart too, or a reboot would resurrect moved rows
+		// and forget protections.
 		if err := s.saveState(); err != nil {
 			s.noteSaveError(err)
 		}
@@ -726,20 +739,43 @@ func execMoveFSAt(sess *fsSession, src, cp, destShare, destCanon string, wants [
 	if batch == nil && filepath.Dir(srcShare) == destShare {
 		return "", errors.New("file is already in the destination")
 	}
-	// Directories are never content-verified: their move is a rename, and
-	// there is no single content to hash. Placed above batch() with every
-	// other refusal, so a verify refusal creates nothing.
+	// A file's content is hashed before it moves. Placed above batch() with
+	// every other refusal, so a verify refusal creates nothing.
 	preHash := ""
 	if verify && !e.IsDir {
 		if preHash, err = preMoveHash(cp, want, note); err != nil {
 			return "", err
 		}
 	}
+	// Across filesystems File Station's move is copy-then-delete, so a
+	// verified move there copies, checks the copy, and only then removes the
+	// original (transit.go). A folder is verified only on that path: on one
+	// filesystem its move is a rename and no byte of it travels.
+	transit := verify && crossesFS(filepath.Dir(cp), destCanon)
+	ref := transitRef{hash: preHash}
+	if transit && e.IsDir {
+		if note != nil {
+			note(" — verifying")
+		}
+		man, merr := takeManifest(cp, true)
+		if merr != nil {
+			return "", errors.New("could not read what the folder holds to verify it (" + merr.Error() + ") — nothing was moved")
+		}
+		ref = transitRef{isDir: true, man: man}
+	}
 	outShare := destShare
 	if batch != nil {
 		if outShare, err = batchTarget(sess, batch, src); err != nil {
 			return "", err
 		}
+	}
+	if transit {
+		outFS := filepath.Join(destCanon, strings.TrimPrefix(outShare, destShare))
+		name, terr := transitViaFS(sess, cp, srcShare, outShare, outFS, want, ref, note)
+		if name == "" {
+			return "", terr
+		}
+		return filepath.Join(outFS, name), terr
 	}
 	finalName, err := moveViaFS(sess, srcShare, outShare, want)
 	if err != nil {

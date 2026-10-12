@@ -145,7 +145,46 @@ func mockEnv(w http.ResponseWriter, code int, data any) {
 	w.Write([]byte(unescapeBytes(string(b))))
 }
 
-func mockCopyMove(srcShare, dstShare string) int {
+// mockCopy copies src to target the way File Station's copy does: content
+// and modified times, a folder with everything in it.
+func mockCopy(src, target string) error {
+	fi, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if fi.IsDir() {
+		if err := os.Mkdir(target, 0o755); err != nil {
+			return err
+		}
+		ents, err := os.ReadDir(src)
+		if err != nil {
+			return err
+		}
+		for _, e := range ents {
+			if err := mockCopy(filepath.Join(src, e.Name()), filepath.Join(target, e.Name())); err != nil {
+				return err
+			}
+		}
+		return os.Chtimes(target, fi.ModTime(), fi.ModTime())
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		l, err := os.Readlink(src)
+		if err != nil {
+			return err
+		}
+		return os.Symlink(l, target)
+	}
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(target, b, fi.Mode().Perm()); err != nil {
+		return err
+	}
+	return os.Chtimes(target, fi.ModTime(), fi.ModTime())
+}
+
+func mockCopyMove(srcShare, dstShare string, removeSrc bool) int {
 	src, err := devShareToPath(srcShare)
 	if err != nil {
 		return 1001
@@ -161,11 +200,15 @@ func mockCopyMove(srcShare, dstShare string) int {
 	if _, err := os.Lstat(target); err == nil {
 		return 1001 // collision — reported like live DSM: the generic code
 	}
-	if err := os.Rename(src, target); err != nil {
+	if removeSrc {
+		if err := os.Rename(src, target); err != nil {
+			return 1001
+		}
+	} else if err := mockCopy(src, target); err != nil {
 		return 1001
 	}
 	// Test hook: a file whose NAME carries this marker is corrupted after the
-	// move lands, simulating damage in transit — the one case move-time
+	// move or copy lands, simulating damage in transit — the one case move-time
 	// verification exists to catch and the only way the smoke suite can
 	// exercise the moved-but-failed-verification contract end to end. Dev
 	// builds only (this whole file is behind the dev tag), and inert for any
@@ -200,7 +243,7 @@ func mockWebAPI(w http.ResponseWriter, r *http.Request) {
 	case "SYNO.FileStation.CopyMove":
 		switch method {
 		case "start":
-			code := mockCopyMove(parseArr(r.FormValue("path"))[0], parseArr(r.FormValue("dest_folder_path"))[0])
+			code := mockCopyMove(parseArr(r.FormValue("path"))[0], parseArr(r.FormValue("dest_folder_path"))[0], r.FormValue("remove_src") != "false")
 			id := fmt.Sprintf("t%d", time.Now().UnixNano())
 			mockTaskMu.Lock()
 			mockTasks[id] = code
@@ -322,6 +365,17 @@ func mockWebAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		mockEnv(w, 0, nil)
 	case "SYNO.FileStation.Delete":
+		if method == "status" { // start ran to completion; see below
+			mockTaskMu.Lock()
+			code := mockTasks[r.FormValue("taskid")]
+			mockTaskMu.Unlock()
+			if code != 0 {
+				mockEnv(w, code, nil)
+				return
+			}
+			mockEnv(w, 0, map[string]any{"finished": true})
+			return
+		}
 		p, err := devShareToPath(parseArr(r.FormValue("path"))[0])
 		if err != nil {
 			mockEnv(w, 900, nil)
@@ -331,11 +385,19 @@ func mockWebAPI(w http.ResponseWriter, r *http.Request) {
 		if r.FormValue("recursive") == "false" {
 			rm = os.Remove // DSM refuses a non-empty folder
 		}
+		code := 0
 		if err := rm(p); err != nil {
-			mockEnv(w, 900, nil)
+			code = 900
+		}
+		if method == "start" { // a task: the outcome is the status reply's
+			id := fmt.Sprintf("d%d", time.Now().UnixNano())
+			mockTaskMu.Lock()
+			mockTasks[id] = code
+			mockTaskMu.Unlock()
+			mockEnv(w, 0, map[string]string{"taskid": id})
 			return
 		}
-		mockEnv(w, 0, nil)
+		mockEnv(w, code, nil)
 	case "SYNO.FileStation.Upload":
 		f, hdr, err := r.FormFile("file")
 		if err != nil {
