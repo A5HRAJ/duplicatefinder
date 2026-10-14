@@ -652,3 +652,25 @@ func TestLoadStateDropsRetiredTools(t *testing.T) {
 		t.Errorf("lastTool still names a retired tool (%q) — the UI would open on a tool that no longer exists", s2.lastTool)
 	}
 }
+
+// Results an older build saved can list backup names as temporary files.
+// They are dropped on load: neither shown nor offered for moving on the
+// strength of a rule this build no longer applies. Real junk stays.
+func TestLoadStateDropsTempRowsNoLongerJunk(t *testing.T) {
+	dir := t.TempDir()
+	s := &Server{varDir: dir, results: map[string]*toolResult{
+		"temp_files": {Tool: "temp_files", Scanned: "then", Files: []FileEnt{
+			{ID: "f1", Name: "accounts.bak", Dir: "/v/x", Size: 1 << 20},
+			{ID: "f2", Name: "Thumbs.db", Dir: "/v/x", Size: 10},
+			{ID: "f3", Name: "notes.txt~", Dir: "/v/y", Size: 5},
+		}},
+	}}
+	s.saveState()
+
+	s2 := &Server{varDir: dir, results: map[string]*toolResult{}}
+	s2.loadState()
+	tf := s2.results["temp_files"]
+	if tf == nil || len(tf.Files) != 1 || tf.Files[0].Name != "Thumbs.db" {
+		t.Fatalf("want only Thumbs.db left, got %+v", tf)
+	}
+}

@@ -726,7 +726,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		duplicates: 'Find byte-for-byte identical files across your shared folders and reclaim wasted space. Matches are grouped so you can keep one copy and move the rest.',
 		empty_folders: 'Locate folders that contain no files — or nothing but temporary junk like Thumbs.db — so you can tidy up the directory tree on your DiskStation.',
 		empty_files: 'Find zero-byte files that serve no purpose and clutter your shared folders.',
-		temp_files: 'Detect cache, backup and system junk such as Thumbs.db, desktop.ini, *.tmp and *.bak files.',
+		temp_files: 'Detect cache and system junk such as Thumbs.db, desktop.ini, *.tmp files and unfinished downloads.',
 		corrupted_files: 'Find files that claim to be the same file — identical size and modified time — but hold different content. ' +
 			'Nothing that edits a file leaves both of those untouched, so a difference underneath them points to bit rot, a bad sector ' +
 			'or an interrupted copy. Where the evidence allows, each copy is marked Corrupted or Intact. Filled in by the Duplicate Files scan.'
@@ -1394,9 +1394,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					{ header: 'Size', dataIndex: 'size', width: 90, align: 'right', sortable: true, renderer: function (v, m, r) {
 						if (!r.get('isDir')) return fmtBytes(v);
 						// An "empty" folder may still hold files with junk NAMES —
-						// *.bak, *.old — which can be real backups of any size.
-						// Such a folder shows their size, never "Empty", and the
-						// tooltip names what is inside.
+						// *.tmp, an unfinished download — which can be of any
+						// size. Such a folder shows their size, never "Empty",
+						// and the tooltip names what is inside.
 						var n = r.get('junk');
 						if (!n) return 'Empty';
 						var ex = r.get('junkEx') || [], more = n - ex.length;

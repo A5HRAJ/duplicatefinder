@@ -4,6 +4,30 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
+## [Unreleased]
+
+### Fixed
+- A move whose start File Station never confirmed — the reply lost on the
+  way back, as DSM's web server sometimes drops one when busy — was treated
+  as never begun once the original was still in place two minutes later.
+  A move to another volume or a USB disk that takes longer than that keeps
+  the original in place until the very end, so it was reported as failed
+  while File Station went on to finish it. The file then arrived without
+  being recorded as a copy this app moved, and a later scan could take it
+  for an original and let the last original follow it into the same
+  folder. The app now asks File Station's own task list whether the move is
+  running and follows it to the end. If File Station cannot say, the move
+  is reported as unsettled, and the place the file would land is treated as
+  holding a copy this app moved, so the copy left behind stays protected.
+
+### Changed
+- Names that may be the only copy of something are no longer counted as
+  junk: backups (`*.bak`, `*.old`, an editor's `name~` copy) and editor swap
+  files (`*.swp`, `*.swo`). The Temporary Files tool no longer lists them,
+  and a folder holding one is no longer reported as an empty folder.
+  Results saved by an earlier version drop such rows when the package
+  starts, and a move of one is refused.
+
 ## [1.1.8] - 2026-10-14
 
 ### Fixed
