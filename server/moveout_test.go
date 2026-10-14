@@ -40,7 +40,7 @@ func TestKeepOneNeverLetsTheLastOriginalFollowItsMovedCopy(t *testing.T) {
 	both := map[string]bool{"/v/a/f": true, "/v/out/f": true}
 	orig := map[string]bool{"/v/a/f": true}
 
-	drops, why := keepOneDropsWhy([]Group{g}, orig, nil, newDirResolver(), both, isOut)
+	drops, why, _ := keepOneDropsWhy([]Group{g}, orig, nil, newDirResolver(), both, isOut, nil)
 	if !drops["/v/a/f"] || !why["/v/a/f"] {
 		t.Fatalf("the original must be held back, with the moved-copy reason: %v %v", drops, why)
 	}
@@ -131,4 +131,73 @@ func TestLandedDataCoversAMovedFolder(t *testing.T) {
 	if !m.isOut(filepath.Join(root, "elsewhere", "b.bak")) || !m.isOut(filepath.Join(root, "elsewhere", "a.tmp")) {
 		t.Fatal("the files of a moved folder must stay recognised after the folder is renamed")
 	}
+}
+
+// With verification on, a copy that stays counts only once it has been read
+// and still holds the group's content: one damaged since the scan, with its
+// size and modified time standing, must not be what is left behind while
+// the good copy moves.
+func TestKeepOneReadsTheCopyThatStays(t *testing.T) {
+	g := Group{Hash: "H", Files: []FileEnt{{Dir: "/v/a", Name: "f"}, {Dir: "/v/b", Name: "f"}, {Dir: "/v/c", Name: "f"}}}
+	all := map[string]bool{"/v/a/f": true, "/v/b/f": true, "/v/c/f": true}
+	reads := map[string]int{}
+	intactExcept := func(bad ...string) func(p, hash string) bool {
+		return func(p, hash string) bool {
+			reads[p]++
+			if hash != "H" {
+				t.Fatalf("read %s against hash %q, want the group's", p, hash)
+			}
+			for _, b := range bad {
+				if p == b {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	keep := func(req map[string]bool, intact func(p, hash string) bool) (map[string]bool, map[string]bool) {
+		reads = map[string]int{}
+		d, _, stale := keepOneDropsWhy([]Group{g}, req, nil, newDirResolver(), all, nil, intact)
+		return d, stale
+	}
+
+	// One copy left unselected and intact: nothing is held back, at the cost
+	// of reading that one copy.
+	if d, _ := keep(map[string]bool{"/v/a/f": true, "/v/b/f": true}, intactExcept()); len(d) != 0 || len(reads) != 1 || reads["/v/c/f"] != 1 {
+		t.Fatalf("an intact staying copy must let the rest move after one read: drops %v, reads %v", d, reads)
+	}
+	// The one copy left unselected has changed: one requested copy stays
+	// instead, with the reason that says so.
+	d, stale := keep(map[string]bool{"/v/a/f": true, "/v/b/f": true}, intactExcept("/v/c/f"))
+	if len(d) != 1 || len(stale) != 1 || !stale[firstKey(d)] {
+		t.Fatalf("a changed staying copy must hold back one requested copy, marked stale: drops %v, stale %v", d, stale)
+	}
+	// ...and the one held back is a copy that still holds the content.
+	d, _ = keep(map[string]bool{"/v/a/f": true, "/v/b/f": true}, intactExcept("/v/c/f", "/v/b/f"))
+	if !d["/v/a/f"] || len(d) != 1 {
+		t.Fatalf("the copy held back must be one that still matches: %v", d)
+	}
+	// Two copies stay and the first read fails: the second is read and
+	// counts.
+	if d, _ := keep(map[string]bool{"/v/a/f": true}, intactExcept("/v/b/f")); len(d) != 0 || reads["/v/c/f"] != 1 {
+		t.Fatalf("a second intact staying copy must count: drops %v, reads %v", d, reads)
+	}
+	// Without verification nothing is read and the plain rule applies.
+	if d := keepOneDrops([]Group{g}, map[string]bool{"/v/a/f": true, "/v/b/f": true}, nil, newDirResolver(), all, nil); len(d) != 0 {
+		t.Fatalf("without the check an existing staying copy counts as before: %v", d)
+	}
+	// A group the request does not touch is never read.
+	other := Group{Hash: "H", Files: []FileEnt{{Dir: "/w/a", Name: "f"}, {Dir: "/w/b", Name: "f"}}}
+	reads = map[string]int{}
+	keepOneDropsWhy([]Group{g, other}, map[string]bool{"/v/a/f": true}, nil, newDirResolver(), all, nil, intactExcept())
+	if reads["/w/a/f"]+reads["/w/b/f"] != 0 {
+		t.Fatalf("an untouched group was read: %v", reads)
+	}
+}
+
+func firstKey(m map[string]bool) string {
+	for k := range m {
+		return k
+	}
+	return ""
 }

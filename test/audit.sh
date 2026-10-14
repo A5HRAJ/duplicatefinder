@@ -20,6 +20,9 @@
 #                   flagged as moved and never lets the original follow it —
 #                   recorded for a flat move, recognised by layout for an
 #                   older "keep folder structure" move, and kept across a restart
+#   staying copy    with verification on, the copy a move would leave behind is
+#                   read too: one changed since the scan (size and modified time
+#                   standing) keeps its twin in place
 #   SIGTERM         the daemon stops cleanly, inside the package's stop window
 #
 # Requires: Go 1.20+, Python 3, curl. No Node, no network. check.sh runs it.
@@ -259,6 +262,24 @@ r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/y1.txt\"],\
 echo "$r" | grep -q 'already moved' || fail "moving the original past its renamed-folder copy was not refused: $r"
 [ -f "$SHARE/y1.txt" ] || fail "the original moved despite the refusal"
 pass "a moved copy stays a moved copy after its folder is renamed, and its original stays put"
+
+echo "== a changed copy that would stay"
+# Two identical files; after the scan one is altered in place with its size
+# and modified time put back — what File Station checks cannot tell. Moving
+# the OTHER one with verification on must keep it where it is: it is the
+# only copy that still holds what the scan found.
+python3 -c 'import sys; open(sys.argv[1],"wb").write(bytes(range(256))*400)' "$SHARE/s1.bin"
+cp -p "$SHARE/s1.bin" "$SHARE/s2.bin"
+scan '["duplicates"]'
+python3 -c '
+import os,sys
+p=sys.argv[1]; st=os.stat(p)
+with open(p,"r+b") as f: f.seek(90000); b=f.read(1); f.seek(90000); f.write(bytes([b[0]^1]))
+os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))' "$SHARE/s2.bin"
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/s1.bin\"],\"dest\":\"$SHARE/dest\",\"verify\":true,\"preserve\":false}")
+echo "$r" | grep -q 'would have stayed no longer matches' || fail "moving the good copy past a changed twin was not refused: $r"
+[ -f "$SHARE/s1.bin" ] || fail "the good copy moved despite the refusal"
+pass "with verification on, a copy that changed since the scan never stays in place of its good twin"
 
 echo "== SIGTERM"
 kill -TERM "$DPID"
