@@ -4,6 +4,19 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
+## [1.1.8] - 2026-10-14
+
+### Fixed
+- A shared folder of this same NAS mounted into another one as a remote
+  folder made every file in it look like its own duplicate. File Station
+  refuses the NAS's own addresses for Mount Remote Folder, but accepts a
+  name that resolves to one. Moving either path then took the other with
+  it, so the copy meant to stay in place went too. The app now recognises
+  such mounts: it skips them when scanning and lists them among the scan
+  issues, refuses to move files out of or into them, and never counts a
+  copy seen through one as the copy that stays. Remote folders on other
+  servers are unaffected.
+
 ## [1.1.7] - 2026-10-13
 
 ### Fixed
