@@ -20,6 +20,14 @@ package versions shown in Package Center.
   is reported as unsettled, and the place the file would land is treated as
   holding a copy this app moved, so the copy left behind stays protected.
 
+- The record of which copies the app moved lived only inside the results
+  file. Had that file ever become unreadable, the app would have started
+  fresh and its next save would have overwritten it, silently forgetting
+  which copies it had moved. The record now also has a small file of its
+  own, with the previous version kept beside it; a file that cannot be read
+  is set aside rather than overwritten; and if no readable copy survives,
+  the app says so in a Move Records dialog that stays until you press OK.
+
 ### Changed
 - Names that may be the only copy of something are no longer counted as
   junk: backups (`*.bak`, `*.old`, an editor's `name~` copy) and editor swap

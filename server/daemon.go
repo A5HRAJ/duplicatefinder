@@ -35,10 +35,13 @@ type Server struct {
 	lastTool  string                 // tool whose scan finished (and stored) last
 	lastEnd   scanEnd                // how the most recent scan run ended, completed or not
 	saveErr   string                 // the last failed state save, for /api/state; cleared by a successful save
-	bandLo    float64                // the progress band the running pass reports into (setBand)
-	bandHi    float64
-	nextID    int
-	authToken string // shared secret required on /api/*; "" disables (dev/tests)
+	// recordsWarn says earlier move records could not be read back (records.go);
+	// shown until the user acknowledges it, and persisted until then.
+	recordsWarn string
+	bandLo      float64 // the progress band the running pass reports into (setBand)
+	bandHi      float64
+	nextID      int
+	authToken   string // shared secret required on /api/*; "" disables (dev/tests)
 
 	varDir      string      // package var dir; with devStateDir, where persistence lives
 	persistMu   sync.Mutex  // serializes state-file writes (persist.go)
@@ -242,6 +245,7 @@ func runDaemon(port int, varDir string) {
 	mux.HandleFunc("/api/results", s.handleResults)
 	mux.HandleFunc("/api/move", s.handleMove)
 	mux.HandleFunc("/api/move/report", s.handleMoveReport)
+	mux.HandleFunc("/api/records/ack", s.handleRecordsAck)
 	mux.HandleFunc("/api/export", s.handleExport)
 
 	// devServeUI is the identity function in release builds and wraps the API

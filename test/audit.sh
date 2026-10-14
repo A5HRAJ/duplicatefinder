@@ -26,6 +26,9 @@
 #   self-mount      a shared folder of this NAS mounted back into itself is not
 #                   scanned, never moved out of or into, and a copy seen through
 #                   it never counts as the copy that stays
+#   move records    a damaged record of moved copies is set aside and rebuilt
+#                   from the results file; with every copy unreadable the loss
+#                   is announced, across restarts, until it is acknowledged
 #   SIGTERM         the daemon stops cleanly, inside the package's stop window
 #
 # Requires: Go 1.20+, Python 3, curl. No Node, no network. check.sh runs it.
@@ -239,6 +242,13 @@ stop_daemon
 FREESPACE=1000 start_daemon "$WORK/daemon3.log"
 moved_check "after a restart"
 pass "the record of moved copies survives a restart"
+stop_daemon
+printf 'not json' > "$STATE/moves.json"
+FREESPACE=1000 start_daemon "$WORK/daemon3.log"
+[ -f "$STATE/moves.json.damaged" ] || fail "the unreadable move record was not set aside"
+[ -z "$(api GET /api/state | field recordsWarning)" ] || fail "a record the results file could rebuild was announced as lost"
+moved_check "with the move record damaged"
+pass "a damaged move record is set aside and rebuilt from the results file"
 # The moved copy itself may still move: it is the original that must stay.
 r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/dest/b.txt\"],\"dest\":\"$USB/usbshare\",\"verify\":true,\"preserve\":false}")
 echo "$r" | grep -q '"moved":\["' || fail "moving the moved copy on was refused: $r"
@@ -313,6 +323,21 @@ echo "$res" | grep -q 'not scanned' || fail "the skipped mount is not reported: 
 api POST /api/results '{"tool":"empty_folders","offset":0,"limit":100}' | grep -q '"name":"mnt"' && fail "the mount point is offered as an empty folder"
 : > "$WORK/mounts"
 pass "a mount of this NAS's own folder is not scanned, not moved out of or into, and never the copy that stays"
+
+echo "== move records lost"
+stop_daemon
+for f in moves.json moves.json.prev results.json.gz; do printf 'not json' > "$STATE/$f"; done
+FREESPACE=1000 start_daemon "$WORK/daemon3.log"
+api GET /api/state | field recordsWarning | grep -q 'could not read' || fail "a lost move record was not announced: $(api GET /api/state)"
+stop_daemon
+FREESPACE=1000 start_daemon "$WORK/daemon3.log"
+[ -n "$(api GET /api/state | field recordsWarning)" ] || fail "the announcement did not survive a restart"
+api POST /api/records/ack '{}' | grep -q '"ok":true' || fail "the acknowledgement was refused"
+[ -z "$(api GET /api/state | field recordsWarning)" ] || fail "the acknowledged announcement is still shown"
+stop_daemon
+FREESPACE=1000 start_daemon "$WORK/daemon3.log"
+[ -z "$(api GET /api/state | field recordsWarning)" ] || fail "the acknowledged announcement came back after a restart"
+pass "a lost move record is announced, across restarts, until acknowledged"
 
 echo "== SIGTERM"
 kill -TERM "$DPID"

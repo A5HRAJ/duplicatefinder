@@ -188,7 +188,7 @@ func (s *Server) saveState() error {
 		RefDirs:  append([]string{}, s.refDirs...),
 		LastTool: s.lastTool,
 		NextID:   s.nextID,
-		SavedAt:  time.Now().Format(time.RFC3339),
+		SavedAt:  nowStamp(),
 	}
 	for tool := range s.results {
 		cp := *s.results[tool]
@@ -203,11 +203,21 @@ func (s *Server) saveState() error {
 	for p := range s.moveOut {
 		ps.MoveOut = append(ps.MoveOut, p)
 	}
+	rec := &persistedRecords{Schema: 1, Keepers: ps.Keepers, MoveOut: ps.MoveOut,
+		Warning: s.recordsWarn, SavedAt: ps.SavedAt}
 	s.mu.Unlock()
 
 	// One writer at a time; the snapshot above is already consistent.
 	s.persistMu.Lock()
 	defer s.persistMu.Unlock()
+	// The move records first, in their own small file: they cannot be rebuilt
+	// by scanning, and the results file below carries them again — saved
+	// after, so whichever of the two is read back is at least as current as
+	// the other (records.go).
+	if err := saveRecords(dir, rec); err != nil {
+		log.Printf("move records save failed: %v", err)
+		return err
+	}
 	path := filepath.Join(dir, stateFile)
 	err := writeAtomic(path, 0o600, false, func(tmp *os.File) error {
 		zw, _ := gzip.NewWriterLevel(tmp, gzip.BestSpeed)
@@ -252,33 +262,85 @@ func lacksFingerprints(res *toolResult) bool {
 	return false
 }
 
-// loadState restores the persisted results at daemon start. Anything wrong
-// with the file (missing, corrupt, unknown schema) means starting empty —
-// stale-looking data is worse than no data, and every move is re-verified
-// against File Station at move time anyway.
+// loadState restores the persisted results and move records at daemon start.
+// A results file that cannot be read means starting without results — stale-
+// looking data is worse than no data, every move is re-verified against File
+// Station at move time anyway, and a scan rebuilds them — but the file is set
+// aside rather than left for the next save to overwrite. The move records
+// cannot be rebuilt, so they are settled from every copy there is
+// (loadRecords), and a loss the user must hear about is kept until they have.
 func (s *Server) loadState() {
 	dir := s.stateDir()
 	if dir == "" {
 		return
 	}
-	f, err := os.Open(filepath.Join(dir, stateFile))
+	path := filepath.Join(dir, stateFile)
+	ps, damaged := readStateFile(path)
+	if damaged {
+		setAside(path)
+	}
+	var fromResults *persistedRecords
+	if ps != nil {
+		fromResults = &persistedRecords{Keepers: ps.Keepers, MoveOut: ps.MoveOut}
+	}
+	rec, warning, mustSave := loadRecords(dir, fromResults, damaged)
+	s.mu.Lock()
+	if ps != nil {
+		s.applyStateLocked(ps)
+	}
+	if len(rec.MoveOut) > 0 {
+		s.moveOut = moveOutSet{}.with(rec.MoveOut)
+	}
+	if len(rec.Keepers) > 0 {
+		s.keepers = map[string]bool{}
+		for _, p := range rec.Keepers {
+			s.keepers[p] = true
+		}
+	}
+	s.recordsWarn = warning
+	s.mu.Unlock()
+	if warning != "" {
+		log.Printf("move records: %s", warning)
+	}
+	// Whatever was set aside or recovered is made durable now: left to the
+	// next move or scan, a restart before then would find the damaged files
+	// gone and nothing to say a loss ever happened.
+	if mustSave || damaged {
+		if err := s.saveState(); err != nil {
+			s.noteSaveError(err)
+		}
+	}
+}
+
+// readStateFile reads the results file. damaged reports a file that exists
+// but cannot be read as one.
+func readStateFile(path string) (ps *persistedState, damaged bool) {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false
+	}
 	if err != nil {
-		return
+		log.Printf("state load skipped: %v", err)
+		return nil, true
 	}
 	defer f.Close()
 	zr, err := gzip.NewReader(f)
 	if err != nil {
 		log.Printf("state load skipped: %v", err)
-		return
+		return nil, true
 	}
 	defer zr.Close()
-	var ps persistedState
-	if err := decodeBytesafe(zr, &ps); err != nil || ps.Schema != 1 {
+	var st persistedState
+	if err := decodeBytesafe(zr, &st); err != nil || st.Schema != 1 {
 		log.Printf("state load skipped: schema/parse (%v)", err)
-		return
+		return nil, true
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	return &st, false
+}
+
+// applyStateLocked installs a read results file's results and settings; the
+// move records it carries are loadRecords' to settle. s.mu is held.
+func (s *Server) applyStateLocked(ps *persistedState) {
 	if ps.Results != nil {
 		// Drop results for tools this build no longer has. A state file
 		// written by an older build carries them, and they are not inert:
@@ -331,15 +393,6 @@ func (s *Server) loadState() {
 	}
 	if ps.NextID > s.nextID {
 		s.nextID = ps.NextID
-	}
-	if len(ps.MoveOut) > 0 {
-		s.moveOut = moveOutSet{}.with(ps.MoveOut)
-	}
-	if len(ps.Keepers) > 0 {
-		s.keepers = map[string]bool{}
-		for _, p := range ps.Keepers {
-			s.keepers[p] = true
-		}
 	}
 	n := 0
 	for _, r := range s.results {
