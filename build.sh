@@ -8,7 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 PKG="DuplicateFinder"
-VERSION="${DUPFINDER_VERSION:-1.1.8-0147}"   # env override exists for test/stamp.sh only
+VERSION="${DUPFINDER_VERSION:-1.1.9-0148}"   # env override exists for test/stamp.sh only
 BUILD="build"
 export COPYFILE_DISABLE=1   # keep macOS ._* metadata out of the tars
 
