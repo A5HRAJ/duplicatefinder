@@ -312,7 +312,10 @@ symlink-resolved paths so an alias cannot slip past a prefix test:
    and each landed file's data (shared folder, inode, size, modified time),
    so a copy stays recognised after the user renames or reorganises the
    folder it was moved into, and is an original again once put back where it
-   came from.
+   came from. A path inside a network mount whose server is this NAS
+   (`server/selfmount.go`, from `/proc/mounts` and the mount's `addr=`) is
+   never a copy that stays, never moves, and is never a destination; scans
+   skip such mounts and list them as issues.
 6. Names File Station cannot address (`.DS_Store` exactly, and any `._`
    AppleDouble name) are refused with a plain explanation rather than handed
    to File Station, which would report "no such file".
