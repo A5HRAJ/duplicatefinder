@@ -158,9 +158,28 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		s.setMoveProgress(true, 0, len(req.Files), "")
 	}
 
+	// The journal records each file as it goes (journal.go): a daemon
+	// stopped before the batch ends — the stop's grace is seconds, a large
+	// file's copy or verification is minutes — would otherwise forget every
+	// file the batch had already moved. Nothing moves without it.
+	jr, jerr := openJournal(s.stateDir())
+	if jerr == nil {
+		jid := req.ID
+		if jid == "" {
+			jid = fmt.Sprintf("move-%d", time.Now().UnixNano())
+		}
+		jerr = jr.write(journalLine{Begin: &journalBegin{ID: jid, Tool: req.Tool, Dest: req.Dest, Files: req.Files}}, true)
+	}
+	if jerr != nil {
+		writeErr(w, 500, journalWriteError(jerr).Error()+" — nothing was moved")
+		return
+	}
+	saved := false
+	defer func() { jr.finish(saved) }()
+
 	moved := []string{}
-	var movedCanon, movedDirs, landed []string
-	anyLanded := false
+	var movedCanon, movedDirs, allLanded []string
+	anyLanded, batchRecorded := false, false
 	errs := []map[string]string{}
 	for i, src := range req.Files {
 		src = filepath.Clean(src)
@@ -171,6 +190,16 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			errs = append(errs, map[string]string{"path": src, "error": "not attempted — Duplicate Finder is stopping"})
 			continue
 		}
+		// A journal that can no longer be written stops the batch: nothing
+		// may move that the app could forget it moved.
+		if jerr == nil {
+			jerr = jr.write(journalLine{Start: src}, false)
+		}
+		if jerr != nil {
+			errs = append(errs, map[string]string{"path": src, "error": journalWriteError(jerr).Error()})
+			continue
+		}
+		sess.track = &fileTrack{j: jr, src: src, destShare: destShare, destCanon: destCanon}
 		// Announce the file BEFORE working on it: the whole point is to name
 		// what is currently taking the time, and a large cross-volume copy
 		// sits on this iteration for minutes. note lets the per-file step say
@@ -181,15 +210,20 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		}
 		note("")
 		cp, at, gone, err := s.moveOne(v, batchFn, sess, destShare, destCanon, req.Verify, note, src)
+		sess.track = nil
+		var landed, left, leftDirs []string
 		if at != "" {
 			// Something now sits at the destination because of this request
 			// — moved, a verified copy whose original stayed put, or a move
 			// whose outcome is unsettled and may yet land — and it must never
 			// count as the copy that stays. A flat move records the
-			// entry itself; preserve mode records its batch folder below.
+			// entry itself; preserve mode records its batch folder, once.
 			anyLanded = true
 			if batch == nil {
 				landed = append(landed, at)
+			} else if !batchRecorded && batch.name != "" {
+				landed = append(landed, filepath.Join(destCanon, batch.name))
+				batchRecorded = true
 			}
 			// Every landed file is also recorded by its data, so the record
 			// survives the user renaming or reorganising the folder it is in.
@@ -202,6 +236,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		}
 		if gone {
 			movedCanon = append(movedCanon, cp)
+			left = append(left, cp, src)
 			// A moved DIRECTORY takes everything under it (a junk-only "empty"
 			// folder moves with its junk inside), so pruneMoved must also drop
 			// rows beneath it. The scan's own record says what moved: any ident
@@ -216,7 +251,24 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			// naming an alias of a real directory.
 			if isDirIdent(v.idents[cp]) {
 				movedDirs = append(movedDirs, cp, src)
+				leftDirs = append(leftDirs, cp, src)
 			}
+		}
+		// The file's outcome is on disk before the next file starts. Its
+		// records join the in-memory set once the batch ends: the set is
+		// copied on every change, and nothing reads this batch's own records
+		// before then — its vetting was settled before the first file.
+		allLanded = append(allLanded, landed...)
+		dl := journalLine{Done: src, Moved: err == nil, MoveOut: landed, Gone: left, Dirs: leftDirs}
+		if err != nil {
+			dl.Err = err.Error()
+		}
+		if batch != nil && batch.name != "" {
+			dl.Folder = filepath.Join(req.Dest, batch.name)
+		}
+		if werr := jr.write(dl, len(landed) > 0 || gone); werr != nil {
+			log.Printf("move journal: %v", werr)
+			jerr = werr
 		}
 		if err != nil {
 			errs = append(errs, map[string]string{"path": src, "error": err.Error()})
@@ -258,28 +310,28 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Record where this request put things, so the next duplicates scan's
-	// pairing of each moved copy with its original can never make the moved
-	// copy the one that stays (moveout.go). Preserve mode records its one
-	// batch folder; a flat move records each entry it landed, never the whole
-	// destination, which may hold the user's own files.
-	if anyLanded && batch != nil && batch.name != "" {
-		landed = append(landed, filepath.Join(destCanon, batch.name))
-	}
-	if len(landed) > 0 {
+	// Record where this request put things (journaled file by file above),
+	// so the next duplicates scan's pairing of each moved copy with its
+	// original can never make the moved copy the one that stays
+	// (moveout.go). Preserve mode records its one batch folder; a flat move
+	// records each entry it landed, never the whole destination, which may
+	// hold the user's own files.
+	if len(allLanded) > 0 {
 		s.mu.Lock()
-		s.moveOut = s.moveOut.with(landed)
+		s.moveOut = s.moveOut.with(allLanded)
 		s.mu.Unlock()
 	}
 	if len(movedCanon) > 0 {
 		s.pruneMoved(movedCanon, movedDirs, v.canon)
 	}
-	if len(landed) > 0 || len(movedCanon) > 0 {
+	saved = true
+	if anyLanded || len(movedCanon) > 0 {
 		// Pruned rows, new keep-one survivors and the record of moved copies
 		// must survive a restart too, or a reboot would resurrect moved rows
 		// and forget protections.
 		if err := s.saveState(); err != nil {
 			s.noteSaveError(err)
+			saved = false
 		}
 	}
 	rep := &moveReport{ID: req.ID, Tool: req.Tool, Dest: req.Dest, Total: len(req.Files), Moved: moved, Errors: errs}
@@ -642,6 +694,9 @@ func (s *Server) moveOne(v *moveVet, batch func() (string, error), sess *fsSessi
 		return "", "", false, errors.New("cannot resolve path")
 	}
 	cp = filepath.Join(pCanon, filepath.Base(src))
+	if sess.track != nil {
+		sess.track.cp = cp
+	}
 	if err := v.refuse(cp); err != nil {
 		return cp, "", false, err
 	}
@@ -904,6 +959,7 @@ func execMoveFSAt(sess *fsSession, src, cp, destShare, destCanon string, wants [
 	// forced a " (n)" variant), is exactly the landing path.
 	at := filepath.Join(destCanon, strings.TrimPrefix(outShare, destShare), finalName)
 	if verify && !e.IsDir {
+		sess.track.placed(outShare + "/" + finalName)
 		return at, verifyMoved(at, preHash, note)
 	}
 	return at, nil

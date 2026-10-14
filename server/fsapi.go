@@ -51,6 +51,10 @@ type fsSession struct {
 	shareOnce sync.Once
 	shareTab  []shareEntry
 	shareErr  error
+
+	// track journals the entry a move request is working on (journal.go);
+	// nil outside a move.
+	track *fileTrack
 }
 
 // shareEntry is one share's mapping row: File Station name, real path, and
@@ -778,6 +782,9 @@ func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, 
 		return "", err
 	}
 	if !taken {
+		if err := s.track.ahead(outShare + "/" + base); err != nil {
+			return "", err
+		}
 		err := s.copyMoveOnce(srcShare, outShare)
 		if err == nil {
 			return base, nil
@@ -830,6 +837,10 @@ func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, 
 		return "", err
 	}
 	tmpShare := outShare + "/" + tmp
+	if err := s.track.staging(tmpShare); err != nil {
+		s.removeEmptyFolder(tmpShare)
+		return "", err
+	}
 	if err := s.copyMoveOnce(srcShare, tmpShare); err != nil {
 		// The staging folder may be holding the ONLY copy — whatever the
 		// error said. A coded reply does not mean the move did not happen:
@@ -869,6 +880,9 @@ func (s *fsSession) claimFromStaging(tmpShare, base, outShare string, want entId
 				return "", parkedError{tmpShare: tmpShare, name: cur, cause: err}
 			}
 			cur = free
+		}
+		if err := s.track.ahead(outShare + "/" + cur); err != nil {
+			return "", parkedError{tmpShare: tmpShare, name: cur, cause: err}
 		}
 		err = s.copyMoveOnce(tmpShare+"/"+cur, outShare)
 		if err == nil {

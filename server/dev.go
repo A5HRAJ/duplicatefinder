@@ -63,6 +63,9 @@ func devServeUI(api http.Handler) http.Handler {
 // task-based CopyMove) against the fixture volume. The smoke suite drives
 // the real orchestration through it.
 
+// mockRunning is the task code of a move that never finishes.
+const mockRunning = -1
+
 var (
 	mockTaskMu sync.Mutex
 	mockTasks  = map[string]int{} // taskid → FS error code, 0 = success
@@ -200,6 +203,12 @@ func mockCopyMove(srcShare, dstShare string, removeSrc bool) int {
 	if _, err := os.Lstat(target); err == nil {
 		return 1001 // collision — reported like live DSM: the generic code
 	}
+	// Test hook: a file whose NAME carries this marker starts a task that
+	// never finishes — a copy that outlasts the daemon's stop, so the audit
+	// can stop the daemon in the middle of a batch.
+	if strings.Contains(filepath.Base(src), "never-lands") {
+		return mockRunning
+	}
 	if removeSrc {
 		if err := os.Rename(src, target); err != nil {
 			return 1001
@@ -253,6 +262,10 @@ func mockWebAPI(w http.ResponseWriter, r *http.Request) {
 			mockTaskMu.Lock()
 			code := mockTasks[r.FormValue("taskid")]
 			mockTaskMu.Unlock()
+			if code == mockRunning {
+				mockEnv(w, 0, map[string]any{"finished": false})
+				return
+			}
 			if code != 0 {
 				mockEnv(w, code, nil)
 				return

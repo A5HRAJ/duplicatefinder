@@ -3764,6 +3764,9 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		// end clean, else the summary — and tells the daemon it was shown, so
 		// it is not offered again.
 		presentMoveReport: function (j, lead) {
+			// A move the daemon did not live to finish — the package was
+			// stopped mid-move — says so, rather than that it finished.
+			if (j.interrupted) lead = 'Your last move was cut short when Duplicate Finder stopped. ';
 			var tool = j.tool || this.state.tool;
 			var n = (j.moved || []).length;
 			var requested = j.total || (n + (j.errors || []).length);
