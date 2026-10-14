@@ -131,15 +131,26 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		batchFn = batch.share
 	}
 
-	// Publish per-file progress for /api/state. Set before the first file so a
-	// poll that lands early sees 0-of-N rather than "no move running", and
-	// cleared on every exit path — including a panic, which would otherwise
-	// leave the UI showing a move that is no longer happening.
+	// Publish per-file progress for /api/state. Set before the first file —
+	// and before the copies that are to stay are read, which takes as long as
+	// reading them — so a poll that lands early sees 0-of-N rather than "no
+	// move running", and cleared on every exit path — including a panic, which
+	// would otherwise leave the UI showing a move that is no longer happening.
 	s.mu.Lock()
 	s.move.ID = req.ID
 	s.mu.Unlock()
 	s.setMoveProgress(true, 0, len(req.Files), "")
 	defer s.setMoveProgress(false, 0, 0, "")
+
+	// With verification on, the copies that are to stay are read before any
+	// file moves (moveVet.checkStaying). Placed after every request-level
+	// refusal, so a request refused outright reads nothing.
+	if req.Verify {
+		v.checkStaying(func() {
+			s.setMoveProgress(true, 0, len(req.Files), "checking the copies that stay")
+		})
+		s.setMoveProgress(true, 0, len(req.Files), "")
+	}
 
 	moved := []string{}
 	var movedCanon, movedDirs, landed []string
@@ -348,7 +359,15 @@ type moveVet struct {
 	// outHeld marks the drops held back only because every other copy left
 	// in place is one Duplicate Finder moved there itself.
 	outHeld map[string]bool
-	vols    []string
+	// staleHeld marks the drops held back because the copy that would have
+	// stayed no longer holds the content the scan found (checkStaying).
+	staleHeld map[string]bool
+	// What keep-one was derived from, kept for checkStaying.
+	groups    []Group
+	requested map[string]bool
+	exists    map[string]bool
+	isOut     func(string) bool
+	vols      []string
 }
 
 // newMoveVet snapshots the stored results and derives the vetting sets.
@@ -438,7 +457,7 @@ func (s *Server) newMoveVet(req MoveReq, sess *fsSession) *moveVet {
 	// group's CONTENT either — so File Station is asked which members of
 	// the touched groups still exist as recorded.
 	exists := groupExistence(sess, groups, requested, canon)
-	drops, outHeld := keepOneDropsWhy(groups, requested, canonRefs, canon, exists, moveOut.isOut)
+	drops, outHeld, _ := keepOneDropsWhy(groups, requested, canonRefs, canon, exists, moveOut.isOut, nil)
 	return &moveVet{
 		tool:      req.Tool,
 		canon:     canon,
@@ -448,8 +467,43 @@ func (s *Server) newMoveVet(req MoveReq, sess *fsSession) *moveVet {
 		keepers:   keepers,
 		drops:     drops,
 		outHeld:   outHeld,
+		staleHeld: map[string]bool{},
+		groups:    groups,
+		requested: requested,
+		exists:    exists,
+		isOut:     moveOut.isOut,
 		vols:      volumeRootsResolved(),
 	}
+}
+
+// checkStaying re-derives the keep-one drops with every copy that is to stay
+// read and matched against its group's content hash: the scan's hash is the
+// group's content, and a copy that no longer reproduces it — damaged since
+// the scan with its size and modified time standing — must not be what is
+// left behind while the good copy moves. A copy that cannot be read does not
+// count either. Only verification asks for this, and it costs a full read of
+// one staying copy per touched group (more only when one fails). checking is
+// called once, before the first read, so the progress line can say where the
+// time is going.
+func (v *moveVet) checkStaying(checking func()) {
+	memo := map[string]bool{}
+	intact := func(p, hash string) bool {
+		if hash == "" {
+			return true // no recorded content to compare against
+		}
+		if ok, seen := memo[p]; seen {
+			return ok
+		}
+		if checking != nil {
+			checking()
+			checking = nil
+		}
+		h, err := verifyRead(p)
+		ok := err == nil && h == hash
+		memo[p] = ok
+		return ok
+	}
+	v.drops, v.outHeld, v.staleHeld = keepOneDropsWhy(v.groups, v.requested, v.canonRefs, v.canon, v.exists, v.isOut, intact)
 }
 
 // holdsUnder reports whether any held-back path lies inside dir.
@@ -471,6 +525,8 @@ func (v *moveVet) refuse(cp string) error {
 	// drops: this request would take a group's last unrequested copy.
 	// keepers: an earlier request already dissolved the group — its
 	// survivor stays held back until the next duplicates scan.
+	case v.staleHeld[cp]:
+		return errors.New("keeping this copy in place — the copy of this group that would have stayed no longer matches what the scan found (it changed since the scan, or could not be read), so this one stays instead; rescan to see the group as it is now")
 	case v.outHeld[cp]:
 		return errors.New("keeping this copy in place — the other copies are ones Duplicate Finder already moved, and one copy must stay where it was")
 	case v.drops[cp] || v.keepers[cp]:
@@ -1083,22 +1139,61 @@ func groupExistence(sess *fsSession, groups []Group, requested map[string]bool, 
 // stays: a moved copy sits in a folder that exists to be emptied, and
 // counting it would let the last original follow it there.
 func keepOneDrops(groups []Group, requested map[string]bool, refDirs []string, canon *dirResolver, exists map[string]bool, isOut func(string) bool) map[string]bool {
-	drops, _ := keepOneDropsWhy(groups, requested, refDirs, canon, exists, isOut)
+	drops, _, _ := keepOneDropsWhy(groups, requested, refDirs, canon, exists, isOut, nil)
 	return drops
 }
 
-// keepOneDropsWhy is keepOneDrops that also reports which drops were held
-// back only because the copies left in place are moved copies — so the
-// refusal can say so rather than name a group the user sees two copies of.
-func keepOneDropsWhy(groups []Group, requested map[string]bool, refDirs []string, canon *dirResolver, exists map[string]bool, isOut func(string) bool) (drops, outHeld map[string]bool) {
-	drops, outHeld = map[string]bool{}, map[string]bool{}
+// keepOneDropsWhy is keepOneDrops that also reports why each drop was held
+// back when the plain reason would mislead: outHeld, because the copies left
+// in place are moved copies; staleHeld, because a copy left in place failed
+// intact — so the refusal can say so rather than name a group the user sees
+// two copies of.
+//
+// intact (nil: not checked) reads a copy and reports whether it still holds
+// the group's content, hash. With it, a copy that stays counts only once it
+// has been read and matched: existence, size and modified time are what
+// File Station can vouch for, and a copy damaged since the scan with all
+// three standing would otherwise be the one kept while the good copy moves.
+// It is asked lazily — of staying copies until one matches, and of the
+// requested copies only when one of them must be held back, to hold back one
+// that matches — so a group whose user left one copy unselected costs one
+// read.
+func keepOneDropsWhy(groups []Group, requested map[string]bool, refDirs []string, canon *dirResolver, exists map[string]bool, isOut func(string) bool, intact func(p, hash string) bool) (drops, outHeld, staleHeld map[string]bool) {
+	drops, outHeld, staleHeld = map[string]bool{}, map[string]bool{}, map[string]bool{}
 	original := func(p string) bool { return isOut == nil || !isOut(p) }
 	for _, g := range groups {
+		hash := g.Hash
+		if hash == "" && len(g.Files) > 0 {
+			hash = g.Files[0].Hash
+		}
 		paths := make([]string, len(g.Files))
-		anyOriginal := false
 		for i, f := range g.Files {
 			paths[i] = canon.path(filepath.Join(f.Dir, f.Name))
-			if exists[paths[i]] && original(paths[i]) {
+		}
+		// staying: this request leaves it where it is.
+		staying := func(p string) bool { return !requested[p] || isUnder(p, refDirs) }
+		stale := false
+		holds := func(p string) bool {
+			if intact == nil || intact(p, hash) {
+				return true
+			}
+			stale = true
+			return false
+		}
+		// Is an original still on disk? A requested one settles it without a
+		// read; a staying one must hold the content to count.
+		anyOriginal := false
+		for _, p := range paths {
+			if !staying(p) && exists[p] && original(p) {
+				anyOriginal = true
+				break
+			}
+		}
+		for _, p := range paths {
+			if anyOriginal {
+				break
+			}
+			if staying(p) && exists[p] && original(p) && holds(p) {
 				anyOriginal = true
 			}
 		}
@@ -1106,15 +1201,15 @@ func keepOneDropsWhy(groups []Group, requested map[string]bool, refDirs []string
 		counts := func(p string) bool { return !anyOriginal || original(p) }
 		survivors, outSurvivors := 0, 0
 		// The copy to hold back, best first: an existing original, any
-		// existing copy, an original, any copy.
-		var pick [4]string
+		// existing copy, an original, any copy — the last path of each kind.
+		var tiers [4][]string
 		for _, p := range paths {
-			if !requested[p] || isUnder(p, refDirs) {
+			if staying(p) {
 				if exists[p] {
-					if counts(p) {
-						survivors++
-					} else {
+					if !counts(p) {
 						outSurvivors++
+					} else if survivors == 0 && holds(p) {
+						survivors++
 					}
 				}
 				continue
@@ -1123,30 +1218,49 @@ func keepOneDropsWhy(groups []Group, requested map[string]bool, refDirs []string
 				continue // a moved copy may move again; it is never the keeper
 			}
 			if exists[p] && original(p) {
-				pick[0] = p
+				tiers[0] = append(tiers[0], p)
 			}
 			if exists[p] {
-				pick[1] = p
+				tiers[1] = append(tiers[1], p)
 			}
 			if original(p) {
-				pick[2] = p
+				tiers[2] = append(tiers[2], p)
 			}
-			pick[3] = p
+			tiers[3] = append(tiers[3], p)
 		}
 		if survivors > 0 {
 			continue
 		}
-		for _, p := range pick {
-			if p != "" {
-				drops[p] = true
-				if outSurvivors > 0 {
-					outHeld[p] = true
-				}
-				break
+		var cands []string
+		for _, t := range tiers {
+			for i := len(t) - 1; i >= 0; i-- {
+				cands = append(cands, t[i])
 			}
 		}
+		if len(cands) == 0 {
+			continue
+		}
+		keep := cands[0]
+		if intact != nil {
+			// Hold back a copy that still holds the content: holding back a
+			// damaged one would move every good copy away. When none does, the
+			// first is held all the same — one copy stays, whatever it holds.
+			for _, p := range cands {
+				if exists[p] && intact(p, hash) {
+					keep = p
+					break
+				}
+			}
+		}
+		drops[keep] = true
+		switch {
+		case stale:
+			staleHeld[keep] = true
+		case outSurvivors > 0:
+			outHeld[keep] = true
+		}
 	}
-	return drops, outHeld
+	return drops, outHeld, staleHeld
 }
 
 // crossVolumeNeed sums the sizes of the request's files that would have to be

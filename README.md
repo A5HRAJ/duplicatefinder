@@ -121,7 +121,9 @@ from a direct call to the daemon:
 - With **Verify file contents after moving** ticked (the default), every
   moved file is hashed just before the move and read back and hashed after
   it. A mismatch is reported as such, and is kept distinct from a destination
-  the package user merely cannot read.
+  the package user merely cannot read. The copy a duplicates move leaves
+  behind is read too: if it no longer holds what the scan found, a copy that
+  still does stays in its place instead.
 - A scan and a move never run at the same time, and only one move runs at a
   time.
 

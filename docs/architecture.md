@@ -300,7 +300,10 @@ symlink-resolved paths so an alias cannot slip past a prefix test:
    verification on the full hash must equal the scan's.
 5. Keep-one: for every duplicate group the request touches, File Station is
    asked which members still exist as their own group row recorded them; if
-   the request would take the last existing copy, one is held back. A
+   the request would take the last existing copy, one is held back. With
+   verification on, a copy that stays counts only once it has been read and
+   still hashes to the group's content (`moveVet.checkStaying`); otherwise a
+   requested copy that still does is held back in its place. A
    directory move counts the group members beneath it as requested.
    Survivors of dissolved groups stay protected until the next duplicates
    scan. Reference-folder files are refused. While a group still has an
