@@ -4,7 +4,7 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
-## [Unreleased]
+## [1.1.10] - 2026-10-14
 
 ### Fixed
 - Stopping the package in the middle of a move — or the NAS restarting for
