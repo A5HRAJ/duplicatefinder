@@ -161,6 +161,13 @@ names it, not only the app.
 - **Scan roots must be inside a shared folder.** Symbolic links inside the
   scope are not followed. External USB and eSATA volumes can be scanned and
   used as destinations.
+- **A remote folder mounted from this same NAS is skipped.** File Station's
+  Mount Remote Folder refuses the NAS's own addresses but accepts a name that
+  resolves to one, and every file in such a mount is a second path to a file
+  that is already there. The app does not scan it, move files out of it or
+  into it, or count a copy seen through it as the copy that stays, and lists
+  it among the scan issues. Remote folders on other servers are scanned as
+  usual.
 - **The interface is English only.**
 - **Verification is a choice, not a guess.** A move within one shared folder
   only renames directory entries, so verification there re-reads the same

@@ -469,3 +469,11 @@ func devVolumeRoots() []string {
 	}
 	return out
 }
+
+// DUPFINDER_DEV_MOUNTS stands in for /proc/mounts, so the audit can declare a
+// folder a mount of this NAS's own shared folder without mounting anything.
+func init() {
+	if p := os.Getenv("DUPFINDER_DEV_MOUNTS"); p != "" {
+		mountsFile = p
+	}
+}

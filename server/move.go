@@ -69,6 +69,12 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer destH.Close()
+	// A destination inside a mount of this NAS's own shared folder puts the
+	// files somewhere else than the path the app records for them.
+	if sm, in := findSelfMounts().under(destCanon); in {
+		writeErr(w, 400, "the destination cannot be used: "+sm.why())
+		return
+	}
 
 	// One move request at a time: the keep-one vetting below is only sound
 	// when vet → execute → prune runs as an uninterrupted critical section,
@@ -362,6 +368,9 @@ type moveVet struct {
 	// staleHeld marks the drops held back because the copy that would have
 	// stayed no longer holds the content the scan found (checkStaying).
 	staleHeld map[string]bool
+	// selfm is the shared folders of this NAS mounted back into itself: a
+	// path inside one never moves and never counts as a copy that stays.
+	selfm selfMountSet
 	// What keep-one was derived from, kept for checkStaying.
 	groups    []Group
 	requested map[string]bool
@@ -457,6 +466,16 @@ func (s *Server) newMoveVet(req MoveReq, sess *fsSession) *moveVet {
 	// group's CONTENT either — so File Station is asked which members of
 	// the touched groups still exist as recorded.
 	exists := groupExistence(sess, groups, requested, canon)
+	// A path inside a mount of this NAS's own shared folder is a second name
+	// for a file that has one already: moving that file takes it along, so it
+	// is never the copy that stays. Results scanned before such mounts were
+	// skipped can still hold one.
+	selfm := findSelfMounts()
+	for p := range exists {
+		if _, in := selfm.under(p); in {
+			delete(exists, p)
+		}
+	}
 	drops, outHeld, _ := keepOneDropsWhy(groups, requested, canonRefs, canon, exists, moveOut.isOut, nil)
 	return &moveVet{
 		tool:      req.Tool,
@@ -468,6 +487,7 @@ func (s *Server) newMoveVet(req MoveReq, sess *fsSession) *moveVet {
 		drops:     drops,
 		outHeld:   outHeld,
 		staleHeld: map[string]bool{},
+		selfm:     selfm,
 		groups:    groups,
 		requested: requested,
 		exists:    exists,
@@ -519,6 +539,9 @@ func holdsUnder(dir string, held map[string]bool) bool {
 // refuse returns why the canonical path cp may not move at all, or nil when
 // the request-level checks pass and execMoveFS's own identity checks decide.
 func (v *moveVet) refuse(cp string) error {
+	if sm, in := v.selfm.under(cp); in {
+		return errors.New("not moved — " + sm.why())
+	}
 	switch {
 	case !isUnder(cp, v.vols):
 		return errors.New("outside allowed volumes")

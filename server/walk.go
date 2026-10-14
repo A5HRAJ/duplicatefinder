@@ -95,6 +95,9 @@ func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan 
 	}
 
 	vols := volumeRootsResolved()
+	// A shared folder of this NAS mounted back into itself is never walked:
+	// its files are second paths to files that already have one (selfmount.go).
+	selfm := findSelfMounts()
 	for _, root := range roots {
 		if cancelled(cancel) {
 			break
@@ -122,6 +125,12 @@ func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan 
 			noteUnreadable(root)
 			continue
 		}
+		if sm, in := selfm.under(canon); in {
+			h.Close()
+			addErr(root + ": not scanned — " + sm.why())
+			noteUnreadable(root)
+			continue
+		}
 		// The handle stays open past enumeration: content reads (hashing,
 		// EXIF) open entries through it, so it is closed by the caller
 		// only when the whole scan is finished.
@@ -141,6 +150,10 @@ func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan 
 					continue
 				}
 				if e.IsDir() {
+					if sm, in := selfm.under(filepath.Join(canon, e.Name())); in {
+						addErr(filepath.Join(root, e.Name()) + ": not scanned — " + sm.why())
+						continue
+					}
 					if withDirs && !skipName(e.Name()) {
 						emit(idx, filepath.Join(root, e.Name()), e.Name(), h, e)
 					}
@@ -171,6 +184,16 @@ func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan 
 			if d.IsDir() {
 				if rel != "." && skipName(d.Name()) {
 					return fs.SkipDir
+				}
+				if rel != "." && len(selfm) > 0 {
+					if sm, in := selfm.under(filepath.Join(canon, rel)); in {
+						// Recorded as unreadable too, so the folders around
+						// it are never offered as empty: the mount point is
+						// not empty, it holds another folder's files.
+						addErr(display + ": not scanned — " + sm.why())
+						noteUnreadable(display)
+						return fs.SkipDir
+					}
 				}
 				if withDirs && rel != "." {
 					emit(idx, display, rel, h, d)

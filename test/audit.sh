@@ -23,6 +23,9 @@
 #   staying copy    with verification on, the copy a move would leave behind is
 #                   read too: one changed since the scan (size and modified time
 #                   standing) keeps its twin in place
+#   self-mount      a shared folder of this NAS mounted back into itself is not
+#                   scanned, never moved out of or into, and a copy seen through
+#                   it never counts as the copy that stays
 #   SIGTERM         the daemon stops cleanly, inside the package's stop window
 #
 # Requires: Go 1.20+, Python 3, curl. No Node, no network. check.sh runs it.
@@ -76,10 +79,11 @@ else
 fi
 V="$WORK/volume1"; USB="$WORK/volumeUSB1"; SHARE="$V/share"; STATE="$WORK/state"
 mkdir -p "$SHARE/dest" "$USB/usbshare" "$STATE" "$WORK/ui"
+: > "$WORK/mounts" # the stand-in for /proc/mounts: no network mounts yet
 # The daemon is kept as a child (no disown): the SIGTERM check waits on it.
 start_daemon() { # start_daemon <logfile>
 	DUPFINDER_ROOTS="$V:$USB" DUPFINDER_UI="$WORK/ui" DUPFINDER_DSM_URL="http://127.0.0.1:$PORT" \
-		DUPFINDER_STATE="$STATE" DUPFINDER_DEV_FREESPACE="${FREESPACE:-}" \
+		DUPFINDER_STATE="$STATE" DUPFINDER_DEV_FREESPACE="${FREESPACE:-}" DUPFINDER_DEV_MOUNTS="$WORK/mounts" \
 		"$WORK/dupfinder-dev" -mode daemon -port "$PORT" > "$1" 2>&1 &
 	DPID=$!
 	wait_daemon "$PORT" "$1" || exit 1
@@ -280,6 +284,35 @@ r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/s1.bin\"],\
 echo "$r" | grep -q 'would have stayed no longer matches' || fail "moving the good copy past a changed twin was not refused: $r"
 [ -f "$SHARE/s1.bin" ] || fail "the good copy moved despite the refusal"
 pass "with verification on, a copy that changed since the scan never stays in place of its good twin"
+
+echo "== a shared folder of this NAS mounted into itself"
+# $SHARE/mnt stands for a CIFS mount of this NAS's own folder (DSM refuses its
+# own addresses but not a name that resolves to one). Its m1.txt is the same
+# file as $SHARE/m1.txt: scanned before the mount was known, the two pair up.
+printf 'one file, two paths' > "$SHARE/m1.txt"
+mkdir -p "$SHARE/mnt"
+cp -p "$SHARE/m1.txt" "$SHARE/mnt/m1.txt"
+scan '["duplicates"]'
+api POST /api/results '{"tool":"duplicates","offset":0,"limit":100}' | grep -q 'mnt' || fail "fixture: the mount's copy did not pair up before the mount was known"
+printf '//nas.example.nip.io/share %s cifs rw,addr=127.0.0.1 0 0\n' "$SHARE/mnt" > "$WORK/mounts"
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/m1.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":true,\"preserve\":false}")
+echo "$r" | grep -q 'keeping one copy' || fail "the file moved although its only other copy is itself seen through the mount: $r"
+[ -f "$SHARE/m1.txt" ] || fail "the file left despite the refusal"
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/mnt/m1.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":true,\"preserve\":false}")
+echo "$r" | grep -q 'mounted from this same NAS' || fail "a path inside the mount was not refused: $r"
+[ -f "$SHARE/mnt/m1.txt" ] || fail "the mount's path moved despite the refusal"
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/s1.bin\"],\"dest\":\"$SHARE/mnt\",\"verify\":false,\"preserve\":false}")
+echo "$r" | grep -q 'destination cannot be used' || fail "a destination inside the mount was not refused: $r"
+scan '["duplicates","empty_folders"]'
+res=$(api POST /api/results '{"tool":"duplicates","offset":0,"limit":100}')
+echo "$res" | python3 -c '
+import json,sys
+rows=[f["path"] for g in json.load(sys.stdin)["groups"] for f in g["files"]]
+sys.exit(1 if any(p.endswith("/mnt") or "/mnt/" in p for p in rows) else 0)' || fail "the mount was scanned: $res"
+echo "$res" | grep -q 'not scanned' || fail "the skipped mount is not reported: $res"
+api POST /api/results '{"tool":"empty_folders","offset":0,"limit":100}' | grep -q '"name":"mnt"' && fail "the mount point is offered as an empty folder"
+: > "$WORK/mounts"
+pass "a mount of this NAS's own folder is not scanned, not moved out of or into, and never the copy that stays"
 
 echo "== SIGTERM"
 kill -TERM "$DPID"
