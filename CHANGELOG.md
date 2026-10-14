@@ -4,6 +4,17 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
+## [1.1.7] - 2026-10-13
+
+### Fixed
+- A verified duplicates move checked the copy it left behind only by its
+  size and modified time. A copy that had changed since the scan with both
+  standing — damage on a disk without checksums, or a program that restores
+  the date — could be the one kept while the good copy moved away. With
+  **Verify file contents after moving** ticked, the copy that stays is now
+  read too and must still match the scan; if it does not, a copy that still
+  matches stays in its place instead. Unverified moves are unchanged.
+
 ## [1.1.6] - 2026-10-12
 
 ### Fixed
