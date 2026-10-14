@@ -41,6 +41,14 @@ type moveVerifyFake struct {
 	// acknowledged.
 	lostStart     bool
 	landAfterInfo int
+	// dropStart kills the next CopyMove start BEFORE DSM accepts it: the
+	// answer is lost and no task exists.
+	dropStart bool
+	// tasks is File Station's background task list: every accepted CopyMove
+	// start, finished once it has landed. noTaskList makes reading the list
+	// fail, as a DSM that cannot answer it would.
+	tasks      []fakeTask
+	noTaskList bool
 	// leaveInStaging makes File Station report the move OUT of a staging
 	// folder finished while the file is still in it (copied, not moved): the
 	// case where deleting the staging folder afterwards would delete a file.
@@ -54,6 +62,24 @@ type moveVerifyFake struct {
 	afterCopy func(dest string)
 	// deleted records every path a Delete removed, share-space.
 	deleted []string
+}
+
+type fakeTask struct {
+	src, dest string
+	removeSrc bool
+	crtime    int64
+	finished  bool
+}
+
+// landPending performs every started-but-held move and marks its task done.
+func (f *moveVerifyFake) landPending() {
+	for _, mv := range f.pending {
+		os.Rename(mv[0], mv[1])
+	}
+	f.pending = nil
+	for i := range f.tasks {
+		f.tasks[i].finished = true
+	}
 }
 
 // copyTree copies a file or folder with its modified times, as File
@@ -106,10 +132,7 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 			case "getinfo":
 				if len(f.pending) > 0 && f.landAfterInfo > 0 {
 					if f.landAfterInfo--; f.landAfterInfo == 0 {
-						for _, mv := range f.pending {
-							os.Rename(mv[0], mv[1])
-						}
-						f.pending = nil
+						f.landPending()
 					}
 				}
 				var paths []string
@@ -147,8 +170,32 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 				}
 			}
 			fakeEnv(w, 0, map[string]any{"folders": []any{}})
+		case "SYNO.FileStation.BackgroundTask":
+			if f.noTaskList {
+				fakeEnv(w, 401, nil)
+				return
+			}
+			tasks := []map[string]any{}
+			for _, tk := range f.tasks {
+				tasks = append(tasks, map[string]any{
+					"api": "SYNO.FileStation.CopyMove", "method": "start", "taskid": "t1",
+					"finished": tk.finished, "crtime": tk.crtime, "path": tk.src,
+					"params": map[string]any{"path": []string{tk.src},
+						"dest_folder_path": tk.dest, "remove_src": tk.removeSrc},
+				})
+			}
+			fakeEnv(w, 0, map[string]any{"tasks": tasks, "total": len(tasks)})
 		case "SYNO.FileStation.CopyMove":
 			if r.FormValue("method") == "start" {
+				if f.dropStart {
+					f.dropStart = false
+					if hj, ok := w.(http.Hijacker); ok {
+						if conn, _, err := hj.Hijack(); err == nil {
+							conn.Close() // never reached File Station
+							return
+						}
+					}
+				}
 				var srcs []string
 				json.Unmarshal([]byte(r.FormValue("path")), &srcs)
 				// dest_folder_path arrives as a JSON-quoted string (matching
@@ -176,6 +223,7 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 					}
 					if f.slowMove {
 						f.pending = append(f.pending, [2]string{f.real(sp), dst})
+						f.tasks = append(f.tasks, fakeTask{src: sp, dest: destDir, removeSrc: true, crtime: time.Now().Unix()})
 						continue
 					}
 					if f.leaveInStaging && strings.Contains(sp, ".dupfinder-tmp-") {
@@ -214,10 +262,7 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 					}
 				}
 			}
-			for _, mv := range f.pending {
-				os.Rename(mv[0], mv[1])
-			}
-			f.pending = nil
+			f.landPending()
 			fakeEnv(w, 0, map[string]any{"finished": true})
 		case "SYNO.FileStation.Rename":
 			var ps, ns []string
@@ -654,12 +699,98 @@ func TestLostStartReplyWithNoMoveReportsFailure(t *testing.T) {
 	p, want, body := mkMoveFile(t, f, "a.bin")
 	defer func(d time.Duration) { statusGiveUp = d }(statusGiveUp)
 	statusGiveUp = 300 * time.Millisecond
-	f.slowMove, f.lostStart = true, true // landAfterInfo 0: it never lands
-	if _, err := execMoveFSAt(sess, p, p, "/Backups/dest", filepath.Join(f.root, "dest"),
-		[]entIdent{want}, nil, true, nil); err == nil {
+	f.dropStart = true
+	at, err := execMoveFSAt(sess, p, p, "/Backups/dest", filepath.Join(f.root, "dest"),
+		[]entIdent{want}, nil, true, nil)
+	if err == nil {
 		t.Fatal("a move that never happened must be reported as failed")
+	}
+	// File Station's task list said no move started: a plain failure, with
+	// nothing recorded as landed.
+	if at != "" {
+		t.Fatalf("a move known never to have started must report no landing path, got %q", at)
 	}
 	if got, rerr := os.ReadFile(p); rerr != nil || !bytes.Equal(got, body) {
 		t.Fatalf("the source must be untouched (%v)", rerr)
+	}
+}
+
+// The start's answer is lost and the move is a long one — a copy to another
+// volume that outlasts the whole wait, the source in place until the very
+// end. Watching the source alone called it "never started" and reported it
+// failed while File Station carried on: the file then arrived unverified and
+// unrecorded, and a later scan could take that copy for an original and let
+// the last original follow it. File Station's task list names the running
+// move, and it is followed to the end.
+func TestLostStartReplyOfALongMoveIsFollowed(t *testing.T) {
+	f, sess := newMoveVerifyFake(t)
+	os.Mkdir(filepath.Join(f.root, "dest"), 0o755)
+	p, want, body := mkMoveFile(t, f, "a.bin")
+	defer func(d time.Duration) { statusGiveUp = d }(statusGiveUp)
+	statusGiveUp = 300 * time.Millisecond
+	f.slowMove, f.lostStart = true, true // landAfterInfo 0: only its own task's progress poll lands it
+	at, err := execMoveFSAt(sess, p, p, "/Backups/dest", filepath.Join(f.root, "dest"),
+		[]entIdent{want}, nil, true, nil)
+	if err != nil {
+		t.Fatalf("a long move whose start was never acknowledged must be followed to the end, got %v", err)
+	}
+	if got, rerr := os.ReadFile(at); rerr != nil || !bytes.Equal(got, body) {
+		t.Fatalf("the moved file must be at %s with its content (%v)", at, rerr)
+	}
+	if _, serr := os.Stat(p); !os.IsNotExist(serr) {
+		t.Fatal("the source must be gone once the followed move finished")
+	}
+}
+
+// When the task list cannot be read either, nobody can say whether the move
+// is running. That is never reported as a plain failure: the landing path is
+// returned with the error, so the move request records it as a copy this app
+// put there, and the source — still in place — keeps its row.
+func TestLostStartReplyWithNoTaskListIsUnsettled(t *testing.T) {
+	f, sess := newMoveVerifyFake(t)
+	os.Mkdir(filepath.Join(f.root, "dest"), 0o755)
+	p, want, body := mkMoveFile(t, f, "a.bin")
+	defer func(d time.Duration) { statusGiveUp = d }(statusGiveUp)
+	statusGiveUp = 300 * time.Millisecond
+	f.slowMove, f.lostStart, f.noTaskList = true, true, true
+	at, err := execMoveFSAt(sess, p, p, "/Backups/dest", filepath.Join(f.root, "dest"),
+		[]entIdent{want}, nil, true, nil)
+	var ue unsettledError
+	if !errors.As(err, &ue) {
+		t.Fatalf("an unknowable outcome must be reported unsettled, got %v", err)
+	}
+	var mbe movedButError
+	if errors.As(err, &mbe) {
+		t.Fatal("the source is still in place: its row must not be pruned")
+	}
+	if wantAt := filepath.Join(f.root, "dest", "a.bin"); at != wantAt {
+		t.Fatalf("the landing path must be reported so it is recorded, got %q want %q", at, wantAt)
+	}
+	if got, rerr := os.ReadFile(p); rerr != nil || !bytes.Equal(got, body) {
+		t.Fatalf("the source must be untouched (%v)", rerr)
+	}
+}
+
+// The task list echoes each start's parameters in whatever form DSM parsed
+// them into; only this exact source, destination and remove_src match.
+func TestTaskParamsMatch(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want bool
+	}{
+		{`{"path":["/a/x"],"dest_folder_path":"/b","remove_src":true}`, true},
+		{`{"path":"[\"/a/x\"]","dest_folder_path":"\"/b\"","remove_src":"true"}`, true},
+		{`{"path":"/a/x","dest_folder_path":["/b"],"remove_src":true}`, true},
+		{`{"path":["/a/x"],"dest_folder_path":"/b","remove_src":false}`, false},
+		{`{"path":["/a/x","/a/y"],"dest_folder_path":"/b","remove_src":true}`, false},
+		{`{"path":["/a/y"],"dest_folder_path":"/b","remove_src":true}`, false},
+		{`{"path":["/a/x"],"dest_folder_path":"/c","remove_src":true}`, false},
+		{`{"path":["/a/x"],"dest_folder_path":"/b"}`, false},
+		{`not json`, false},
+	}
+	for _, c := range cases {
+		if got := taskParamsMatch(json.RawMessage(c.raw), "/a/x", "/b", true); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.raw, got, c.want)
+		}
 	}
 }

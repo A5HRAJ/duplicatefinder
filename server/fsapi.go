@@ -236,12 +236,13 @@ var (
 // this client calls — the fallback when SYNO.API.Info discovery is
 // unavailable, since version 1 would fail every call with error 104.
 var docMinVersions = map[string]int{
-	"SYNO.FileStation.CopyMove":     3,
-	"SYNO.FileStation.Rename":       2,
-	"SYNO.FileStation.CreateFolder": 2,
-	"SYNO.FileStation.Delete":       2,
-	"SYNO.FileStation.Upload":       2,
-	"SYNO.FileStation.List":         2,
+	"SYNO.FileStation.CopyMove":       3,
+	"SYNO.FileStation.Rename":         2,
+	"SYNO.FileStation.CreateFolder":   2,
+	"SYNO.FileStation.Delete":         2,
+	"SYNO.FileStation.Upload":         2,
+	"SYNO.FileStation.List":           2,
+	"SYNO.FileStation.BackgroundTask": 3,
 }
 
 // version resolves the API version to call: SYNO.API.Info is queried once
@@ -257,7 +258,7 @@ func (s *fsSession) version(api string) int {
 		var data map[string]apiInfo
 		p := url.Values{"query": {"SYNO.FileStation.CopyMove,SYNO.FileStation.Rename," +
 			"SYNO.FileStation.CreateFolder,SYNO.FileStation.Delete,SYNO.FileStation.Upload," +
-			"SYNO.FileStation.List"}}
+			"SYNO.FileStation.List,SYNO.FileStation.BackgroundTask"}}
 		// The guide's guaranteed home for SYNO.API.Info is query.cgi (the
 		// per-API entry.cgi dispatch is only documented for the APIs it
 		// itself lists).
@@ -384,6 +385,7 @@ func (s *fsSession) copyMoveTask(srcShare, destShare string, removeSrc bool) err
 	// dest_folder_path is documented as a singular String (unlike path);
 	// send it JSON-quoted, matching the guide's own example.
 	destJSON := []byte(jsonQuote(destShare))
+	startedAt := time.Now()
 	err := s.call("SYNO.FileStation.CopyMove", "start", url.Values{
 		"path":              {jsonArr(srcShare)},
 		"dest_folder_path":  {string(destJSON)},
@@ -391,7 +393,24 @@ func (s *fsSession) copyMoveTask(srcShare, destShare string, removeSrc bool) err
 		"accurate_progress": {"false"},
 	}, &started)
 	if err != nil {
-		return err
+		if !moveOutcomeUnknown(err) {
+			return err
+		}
+		// The answer to the start was lost, and DSM may have accepted the task
+		// all the same — a copy to another volume then runs for as long as the
+		// data takes, with the source in place until the very end, so nothing
+		// on disk can tell "running" from "never started". File Station's own
+		// task list can: a task for this exact source and destination is
+		// adopted and followed like one this call started.
+		id, listed := s.findCopyMoveTask(srcShare, destShare, removeSrc, startedAt)
+		switch {
+		case id != "":
+			started.TaskID = id
+		case listed:
+			return notStartedError{err}
+		default:
+			return err
+		}
 	}
 	// Polled until File Station answers "finished" or stops answering. There
 	// is deliberately no deadline: a move across volumes or onto a slow
@@ -409,7 +428,6 @@ func (s *fsSession) copyMoveTask(srcShare, destShare string, removeSrc bool) err
 	// asking through statusGiveUp of silence, and only then reports the lost
 	// answer (which moveViaFS settles by looking where the file is).
 	delay := 200 * time.Millisecond
-	startedAt := time.Now()
 	nextLog := time.Hour
 	var silentSince time.Time
 	for {
@@ -446,6 +464,117 @@ func (s *fsSession) copyMoveTask(srcShare, destShare string, removeSrc bool) err
 			delay *= 2
 		}
 	}
+}
+
+// notStartedError is a start whose answer was lost while File Station's task
+// list, read afterwards, holds no such task: nothing was started, which is an
+// answer — moveOutcomeUnknown is false for it.
+type notStartedError struct{ cause error }
+
+func (e notStartedError) Error() string { return e.cause.Error() }
+
+// findCopyMoveTask looks in File Station's background task list for the
+// CopyMove task a start whose answer was lost would have created: this source,
+// this destination folder, this remove_src, begun no earlier than since. An
+// unfinished match wins over a finished one (newest first among each);
+// a finished match is still returned, so its status poll reports how it
+// ended. listed reports that the list was read, so an empty id then means
+// no such task exists.
+func (s *fsSession) findCopyMoveTask(srcShare, destShare string, removeSrc bool, since time.Time) (id string, listed bool) {
+	var data struct {
+		Tasks []struct {
+			API      string          `json:"api"`
+			TaskID   string          `json:"taskid"`
+			Finished bool            `json:"finished"`
+			Crtime   int64           `json:"crtime"`
+			Params   json.RawMessage `json:"params"`
+		} `json:"tasks"`
+	}
+	if err := s.call("SYNO.FileStation.BackgroundTask", "list", url.Values{
+		"offset": {"0"},
+		"limit":  {"0"},
+	}, &data); err != nil {
+		return "", false
+	}
+	// The DSM clock and the daemon's are one clock; the slack covers the
+	// whole-second resolution of crtime.
+	floor := since.Add(-2 * time.Second).Unix()
+	var best string
+	var bestCr int64
+	bestOpen := false
+	for _, t := range data.Tasks {
+		if t.API != "SYNO.FileStation.CopyMove" || t.TaskID == "" {
+			continue
+		}
+		if t.Crtime != 0 && t.Crtime < floor {
+			continue
+		}
+		// A finished task with no creation time cannot be told apart from an
+		// earlier move of the same file, so only a running one is trusted.
+		if t.Crtime == 0 && t.Finished {
+			continue
+		}
+		if !taskParamsMatch(t.Params, srcShare, destShare, removeSrc) {
+			continue
+		}
+		open := !t.Finished
+		if best == "" || (open && !bestOpen) || (open == bestOpen && t.Crtime > bestCr) {
+			best, bestCr, bestOpen = t.TaskID, t.Crtime, open
+		}
+	}
+	return best, true
+}
+
+// taskParamsMatch reports whether a background task's echoed start
+// parameters name exactly this one source, this destination folder and this
+// remove_src. DSM echoes the request back as it parsed it, so each field is
+// read in any of the forms it could have kept: a path list as an array or as
+// the JSON text that was sent, a flag as a boolean or as its text.
+func taskParamsMatch(raw json.RawMessage, srcShare, destShare string, removeSrc bool) bool {
+	var p map[string]json.RawMessage
+	if json.Unmarshal(raw, &p) != nil {
+		return false
+	}
+	text := func(v json.RawMessage) (string, bool) {
+		var s string
+		if json.Unmarshal(v, &s) != nil {
+			return "", false
+		}
+		return s, true
+	}
+	list := func(v json.RawMessage) []string {
+		var arr []string
+		if json.Unmarshal(v, &arr) == nil {
+			return arr
+		}
+		if s, ok := text(v); ok {
+			if json.Unmarshal([]byte(s), &arr) == nil {
+				return arr
+			}
+			if inner, ok := text(json.RawMessage(s)); ok {
+				return []string{inner} // sent JSON-quoted, kept as that text
+			}
+			return []string{s}
+		}
+		return nil
+	}
+	paths := list(p["path"])
+	if len(paths) != 1 || paths[0] != srcShare {
+		return false
+	}
+	dests := list(p["dest_folder_path"])
+	if len(dests) != 1 || dests[0] != destShare {
+		return false
+	}
+	var flag bool
+	if json.Unmarshal(p["remove_src"], &flag) != nil {
+		s, ok := text(p["remove_src"])
+		if !ok {
+			return false
+		}
+		flag = s == "true"
+	}
+	return flag == removeSrc
 }
 
 func (s *fsSession) rename(pathShare, newName string) error {
@@ -605,7 +734,20 @@ const nameClaimTries = 25
 // folder or claim a file's location without probing first.
 func moveOutcomeUnknown(err error) bool {
 	var fe *fsError
-	return !errors.As(err, &fe)
+	var ns notStartedError
+	return !errors.As(err, &fe) && !errors.As(err, &ns)
+}
+
+// unsettledError is a move whose outcome nobody can state: File Station's
+// answer was lost, its task list could not say whether the move is running,
+// and the source was still in place after the wait. The entry may yet arrive
+// at the destination — a long copy to another volume ends exactly so — so
+// the caller treats where it would land as somewhere this app put a copy,
+// and the row stays listed, the source still being where it was.
+type unsettledError struct{ dest string }
+
+func (e unsettledError) Error() string {
+	return "File Station's answer was lost and it could not say whether the move is still running — the file may still arrive in " + e.dest + ". It is treated as a copy this app moved, so any copy left behind stays protected; check both places before deleting anything"
 }
 
 // moveViaFS executes one vetted move through File Station: srcShare into
@@ -646,8 +788,15 @@ func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, 
 		// source gone and the name present at the destination means the move
 		// SUCCEEDED and must be reported as such, or the caller tells the
 		// user a completed move failed (and never verifies it).
-		if moveOutcomeUnknown(err) && s.sourceLeaves(srcShare) {
-			return s.arrived(outShare+"/"+base, base, want)
+		if moveOutcomeUnknown(err) {
+			if s.sourceLeaves(srcShare) {
+				return s.arrived(outShare+"/"+base, base, want)
+			}
+			// Still in place, and nothing says whether File Station is still
+			// moving it. Reported unsettled, never as a plain failure: a move
+			// that then completes would land a copy nobody recorded, and a
+			// later scan could take it for an original.
+			return base, unsettledError{dest: outShare}
 		}
 		if !worthStaging(err) {
 			return "", err
