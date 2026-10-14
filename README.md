@@ -45,10 +45,13 @@ Files you select are **moved, never deleted**, into a folder you choose, and
   all, or nothing but disposable junk such as `Thumbs.db`, `.DS_Store` and
   Synology's `@eaDir` thumbnail cache. A folder whose only content is a
   hidden folder such as `.git` is never reported.
-- **Empty Files** and **Temporary Files.** Zero-byte files, and cache, backup
-  and editor droppings such as `*.tmp`, `*.bak` and `desktop.ini`. Named
-  pipes, sockets and device nodes are never listed: they look like empty
-  files, and are not files at all.
+- **Empty Files** and **Temporary Files.** Zero-byte files, and cache and
+  system junk such as `*.tmp`, unfinished downloads and `desktop.ini`.
+  Names that may be the only copy of something — backups such as `*.bak`,
+  `*.old` and an editor's `name~` copy, and an editor's swap file — are never
+  counted as junk, and a folder holding one is not empty. Named pipes,
+  sockets and device nodes are never listed: they look like empty files, and
+  are not files at all.
 - **Reference folders.** Folders you mark read-only are scanned but their
   files can never be selected or moved. Use them for the master copy of a
   photo library or a backup. The list is one setting shared by every tool

@@ -142,7 +142,7 @@ func mkJunkFolder(t *testing.T, f *moveVerifyFake, name string) (string, entIden
 	d := filepath.Join(f.root, name)
 	os.MkdirAll(filepath.Join(d, "@eaDir"), 0o755)
 	os.WriteFile(filepath.Join(d, "x.tmp"), []byte("tmp bytes"), 0o644)
-	os.WriteFile(filepath.Join(d, "accounts.bak"), bytes.Repeat([]byte{7}, 5000), 0o644)
+	os.WriteFile(filepath.Join(d, "film.part"), bytes.Repeat([]byte{7}, 5000), 0o644)
 	os.WriteFile(filepath.Join(d, "@eaDir", "thumb"), []byte("t"), 0o644)
 	old := time.Now().Add(-time.Hour)
 	os.Chtimes(d, old, old)
@@ -150,9 +150,9 @@ func mkJunkFolder(t *testing.T, f *moveVerifyFake, name string) (string, entIden
 	return d, entIdent{isDir: true, mod: fmtTime(fi.ModTime()), modUnix: fi.ModTime().Unix()}
 }
 
-// A junk-only folder carries its junk across with it — and a *.bak among
-// that junk may be somebody's only backup. Every file in the copy is checked
-// before the original folder goes.
+// A junk-only folder carries its junk across with it, and junk can be
+// large — a half-finished download of a film. Every file in the copy is
+// checked before the original folder goes.
 func TestTransitFolderIsCheckedFileByFileThenRemoved(t *testing.T) {
 	forceTransit(t)
 	f, sess := newMoveVerifyFake(t)
@@ -163,7 +163,7 @@ func TestTransitFolderIsCheckedFileByFileThenRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verified folder transit failed: %v", err)
 	}
-	if got, _ := os.ReadFile(filepath.Join(at, "accounts.bak")); len(got) != 5000 {
+	if got, _ := os.ReadFile(filepath.Join(at, "film.part")); len(got) != 5000 {
 		t.Fatal("the folder's files did not arrive")
 	}
 	if _, serr := os.Stat(d); !os.IsNotExist(serr) {
@@ -180,15 +180,15 @@ func TestTransitDamagedFileInsideAFolderKeepsTheFolder(t *testing.T) {
 	os.Mkdir(filepath.Join(f.root, "dest"), 0o755)
 	d, want := mkJunkFolder(t, f, "junk")
 	f.afterCopy = func(dest string) {
-		os.WriteFile(filepath.Join(dest, "accounts.bak"), bytes.Repeat([]byte{8}, 5000), 0o644)
+		os.WriteFile(filepath.Join(dest, "film.part"), bytes.Repeat([]byte{8}, 5000), 0o644)
 	}
 	_, err := execMoveFSAt(sess, d, d, "/Backups/dest", filepath.Join(f.root, "dest"),
 		[]entIdent{want}, nil, true, nil)
 	if err == nil || !strings.Contains(err.Error(), "the original is untouched") {
 		t.Fatalf("a damaged file inside the copy must keep the folder, got %v", err)
 	}
-	if got, _ := os.ReadFile(filepath.Join(d, "accounts.bak")); !bytes.Equal(got, bytes.Repeat([]byte{7}, 5000)) {
-		t.Fatal("the original folder's backup must be untouched")
+	if got, _ := os.ReadFile(filepath.Join(d, "film.part")); !bytes.Equal(got, bytes.Repeat([]byte{7}, 5000)) {
+		t.Fatal("the original folder's files must be untouched")
 	}
 	if ents, _ := os.ReadDir(filepath.Join(f.root, "dest")); len(ents) != 0 {
 		t.Fatalf("the damaged copy was left at the destination: %v", ents)

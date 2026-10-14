@@ -125,10 +125,10 @@ func TestLandedDataCoversAMovedFolder(t *testing.T) {
 	d := filepath.Join(root, "junk")
 	os.Mkdir(d, 0o755)
 	os.WriteFile(filepath.Join(d, "a.tmp"), []byte("a"), 0o644)
-	os.WriteFile(filepath.Join(d, "b.bak"), []byte("b"), 0o644)
+	os.WriteFile(filepath.Join(d, "b.part"), []byte("b"), 0o644)
 	m := moveOutSet{}.with(landedData(d))
 	os.Rename(d, filepath.Join(root, "elsewhere"))
-	if !m.isOut(filepath.Join(root, "elsewhere", "b.bak")) || !m.isOut(filepath.Join(root, "elsewhere", "a.tmp")) {
+	if !m.isOut(filepath.Join(root, "elsewhere", "b.part")) || !m.isOut(filepath.Join(root, "elsewhere", "a.tmp")) {
 		t.Fatal("the files of a moved folder must stay recognised after the folder is renamed")
 	}
 }

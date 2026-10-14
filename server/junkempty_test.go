@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -203,22 +204,22 @@ func TestPruneMovedDropsRowsUnderAMovedFolder(t *testing.T) {
 }
 
 // A folder offered as empty because everything in it has a junk name must
-// say what it holds: junk is decided by NAME, so "accounts.bak" qualifies
-// whatever its size, and a row reading "Empty" would invite the user to
-// delete a database backup. Size is the junk's total bytes, Junk the count,
-// JunkEx a few names; a nested junk-only folder's junk counts toward the
-// topmost folder that supersedes it. A truly empty folder reports nothing.
+// say what it holds: junk is decided by NAME, so "film.part" qualifies
+// whatever its size, and a row reading "Empty" would hide gigabytes. Size is
+// the junk's total bytes, Junk the count, JunkEx a few names; a nested
+// junk-only folder's junk counts toward the topmost folder that supersedes
+// it. A truly empty folder reports nothing.
 func TestEmptyFolderRowReportsTheJunkItHolds(t *testing.T) {
 	sized := func(p string, n int64) fEnt { f := efFile(p); f.size = n; return f }
 	sc := newEmptyFolderScan()
 	for _, f := range []fEnt{
 		efDir("/r/backups"),
-		sized("/r/backups/accounts.bak", 4<<30),
+		sized("/r/backups/film.part", 4<<30),
 		efDir("/r/backups/old"),
-		sized("/r/backups/old/settings.old", 100),
+		sized("/r/backups/old/setup.tmp", 100),
 		efDir("/r/bare"),
 		efDir("/r/mixed"),
-		sized("/r/mixed/a.bak", 7),
+		sized("/r/mixed/a.tmp", 7),
 		efFile("/r/mixed/keep.txt"),
 	} {
 		sc.visit(0, f)
@@ -235,7 +236,7 @@ func TestEmptyFolderRowReportsTheJunkItHolds(t *testing.T) {
 	if b.Size != 4<<30+100 || b.Junk != 2 {
 		t.Fatalf("backups row: size %d junk %d, want %d and 2", b.Size, b.Junk, int64(4<<30+100))
 	}
-	if len(b.JunkEx) != 2 || b.JunkEx[0] != "accounts.bak" || b.JunkEx[1] != "settings.old" {
+	if len(b.JunkEx) != 2 || b.JunkEx[0] != "film.part" || b.JunkEx[1] != "setup.tmp" {
 		t.Fatalf("backups row names: %v", b.JunkEx)
 	}
 	if e := got["/r/bare"]; e.Size != 0 || e.Junk != 0 || e.JunkEx != nil {
@@ -250,7 +251,7 @@ func TestEmptyFolderRowReportsTheJunkItHolds(t *testing.T) {
 // check is the only one that sees it at all. Whatever such a folder holds,
 // the parent is not empty — only Synology's @eaDir cache is accepted.
 func TestNativeJunkCheckRejectsJunkNamedDirectories(t *testing.T) {
-	for _, sub := range []string{".DS_Store", "._photos", "old.bak", "~$draft"} {
+	for _, sub := range []string{".DS_Store", "._photos", "old.tmp", "~$draft"} {
 		d := t.TempDir()
 		mkfile(t, filepath.Join(d, "Thumbs.db"), "x")
 		mkfile(t, filepath.Join(d, sub, "precious.jpg"), "real data")
@@ -273,5 +274,69 @@ func mkfile(t *testing.T, p, content string) {
 	}
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Names that may be the one copy of something are not junk: a backup
+// ("accounts.bak", "settings.old", an editor's "notes.txt~") or an editor's
+// swap file, which holds edits that were never saved. The Temporary Files
+// tool does not list them, and a folder holding nothing else is not empty —
+// neither to the scan nor to the move-time confirmation.
+func TestBackupNamesAreNotJunk(t *testing.T) {
+	keep := []string{"accounts.bak", "ACCOUNTS.BAK", "settings.old", "notes.txt~", ".notes.txt.swp", ".notes.txt.swo"}
+	for _, n := range keep {
+		if isTempName(n) {
+			t.Errorf("%q is counted as junk", n)
+		}
+	}
+	for _, n := range []string{"Thumbs.db", "x.tmp", "film.part", "~$book.xlsx"} {
+		if !isTempName(n) {
+			t.Errorf("%q must still count as junk", n)
+		}
+	}
+	sc := newEmptyFolderScan()
+	for _, f := range []fEnt{
+		efDir("/r/backups"),
+		efFile("/r/backups/accounts.bak"),
+		efDir("/r/editor"),
+		efFile("/r/editor/notes.txt~"),
+		efFile("/r/editor/x.tmp"),
+	} {
+		sc.visit(0, f)
+	}
+	files, _, _ := sc.finish(&Server{}, nil, func(string) (bool, error) { return true, nil })
+	if len(files) != 0 {
+		t.Fatalf("a folder holding a backup was offered as empty: %v", files)
+	}
+	for _, n := range keep {
+		d := t.TempDir()
+		mkfile(t, filepath.Join(d, "Thumbs.db"), "x")
+		mkfile(t, filepath.Join(d, n), "the only copy")
+		if ok, err := dirHoldsOnlyJunk(d); err != nil || ok {
+			t.Errorf("a folder holding %q was confirmed junk-only (ok=%v err=%v)", n, ok, err)
+		}
+	}
+}
+
+// The move judges a Temporary Files row by the rule in force at move time,
+// so a backup name an older scan listed is refused before anything happens.
+func TestMoveRefusesATempRowNoLongerJunk(t *testing.T) {
+	d := t.TempDir()
+	p := filepath.Join(d, "accounts.bak")
+	mkfile(t, p, "the only copy")
+	canon := newDirResolver()
+	cp := canon.path(p)
+	v := &moveVet{tool: "temp_files", canon: canon, allowed: map[string]bool{cp: true},
+		idents: map[string][]entIdent{}, keepers: map[string]bool{}, drops: map[string]bool{},
+		outHeld: map[string]bool{}, staleHeld: map[string]bool{}, vols: []string{canon.dir(d)}}
+	if err := v.refuse(cp); err == nil || !strings.Contains(err.Error(), "no longer counted as a temporary file") {
+		t.Fatalf("want a refusal naming the rule, got %v", err)
+	}
+	// The same vetting lets real junk through to the move itself.
+	j := filepath.Join(d, "x.tmp")
+	mkfile(t, j, "junk")
+	v.allowed[canon.path(j)] = true
+	if err := v.refuse(canon.path(j)); err != nil {
+		t.Fatalf("real junk must pass the vetting, got %v", err)
 	}
 }

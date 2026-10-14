@@ -309,6 +309,18 @@ func (s *Server) loadState() {
 			delete(ps.Results, "corrupted_files")
 			log.Printf("dropped persisted duplicates results recorded without content fingerprints; scan again to rebuild them")
 		}
+		// A Temporary Files row whose name this build no longer counts as
+		// junk — a backup name, once on the list — is not shown or offered for
+		// moving on the strength of an older build's judgement.
+		if tf := ps.Results["temp_files"]; tf != nil {
+			kept := tf.Files[:0]
+			for _, f := range tf.Files {
+				if isTempName(f.Name) {
+					kept = append(kept, f)
+				}
+			}
+			tf.Files = kept
+		}
 		s.results = ps.Results
 		s.invalidateDerivedLocked() // anything derived describes the pre-load results
 	}
