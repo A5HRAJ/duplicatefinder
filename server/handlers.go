@@ -115,6 +115,11 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	if s.saveErr != "" {
 		out["saveError"] = s.saveErr
 	}
+	// Earlier move records lost to an unreadable file: the app shows this
+	// until the user acknowledges it (POST /api/records/ack).
+	if s.recordsWarn != "" {
+		out["recordsWarning"] = s.recordsWarn
+	}
 	writeJSON(w, 200, out)
 }
 

@@ -1823,6 +1823,11 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 								? ' — the next Scan will offer to resume it' : ' — run Scan again') + '.');
 					}
 					if (st.running) me.attachProgress();
+					// Earlier move records lost to an unreadable file. A dialog,
+					// never only a toast: it changes how much the user can trust
+					// "keep one copy" for moves made before it, and the daemon
+					// keeps offering it until it is acknowledged here.
+					if (st.recordsWarning) me.showRecordsWarning(String(st.recordsWarning));
 					// A move this window did not start: still running (begun
 					// before a reload, or in another window) — follow it to
 					// its end — or finished with a report nobody has seen yet,
@@ -3808,6 +3813,27 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					errors.length + ' need' + (errors.length === 1 ? 's' : '') + ' attention.</b>' +
 					'<div style="padding-top:8px;">' + rows.join('') + '</div>',
 				buttons: [new UxButton({ btnStyle: 'blue', text: 'OK', handler: function () { win.close(); } })]
+			});
+			win.show();
+		},
+
+		// Tells the user the record of earlier moves was lost, and tells the
+		// daemon once they have read it.
+		showRecordsWarning: function (text) {
+			var me = this;
+			var win = new UxModal({
+				owner: me,
+				title: 'Move Records',
+				width: 480,
+				autoHeight: true,
+				modal: false,
+				cls: 'df-app',
+				bodyStyle: 'padding:14px;font-size:' + FSMALL + ';',
+				html: esc(text),
+				buttons: [new UxButton({ btnStyle: 'blue', text: 'OK', handler: function () {
+					api('/records/ack', 'POST', {}, function () {});
+					win.close();
+				} })]
 			});
 			win.show();
 		},

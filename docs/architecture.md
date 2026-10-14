@@ -264,6 +264,18 @@ those results dropped, and a duplicates result whose rows carry no content
 fingerprint (an older build's) is dropped too, so no row is ever moved
 without the prefix re-read the move promises.
 
+The move records — which copies the app moved, and which in-place copies of
+dissolved groups must stay — cannot be rebuilt by scanning, so they are kept
+three times: in `var/moves.json` (written first, on every save), in
+`var/moves.json.prev` (the generation it replaced, and only ever one that
+read back whole), and in the results file. At start the copies are merged,
+each only ever adding protection. A file that cannot be read is renamed with
+a `.damaged` suffix instead of being left for the next save to overwrite, and
+a results file that cannot be read is set aside the same way. When no
+readable copy carries the newest records, the app shows a Move Records
+warning that persists across restarts until the user acknowledges it
+(`POST /api/records/ack`).
+
 `var/scan.interrupted` records a scan in flight: its tools, generation and
 normalized request. Found at daemon start it means the scan died, and the app
 offers **Resume** or **Start Over** at the next Scan click when the run
