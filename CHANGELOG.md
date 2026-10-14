@@ -4,6 +4,21 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
+## [Unreleased]
+
+### Fixed
+- Stopping the package in the middle of a move — or the NAS restarting for
+  an update — made the app forget every file that move had already moved,
+  whenever the file in progress took longer than a few seconds (a large
+  file being verified, or copied to another volume or a USB disk). A file
+  moved with "Move all files into same folder" then looked like an original
+  at the next scan, and the last real original could follow it into the same
+  folder. Each file is now recorded the moment it moves, and the place File
+  Station is about to put a file is recorded before it is asked to, so the
+  next start finishes the bookkeeping and shows what the cut-short move did:
+  what moved, the file that was in progress and where to look for it, and
+  what was never reached.
+
 ## [1.1.9] - 2026-10-14
 
 ### Fixed

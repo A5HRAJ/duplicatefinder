@@ -290,6 +290,7 @@ func runDaemon(port int, varDir string) {
 	// so the UI can offer a resume.
 	s.loadState()
 	s.loadMoveReport()
+	s.replayMoveJournal()
 	s.interrupted = s.loadMarker()
 	log.Printf("Duplicate Finder %s listening on %s", appVersion, addr)
 	srv := newHTTPServer(handler)

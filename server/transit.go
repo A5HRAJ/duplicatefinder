@@ -200,6 +200,10 @@ func transitViaFS(s *fsSession, cp, srcShare, outShare, outFS string, want entId
 	tmpShare := outShare + "/" + tmp
 	tmpFS := filepath.Join(outFS, tmp)
 
+	if err := s.track.staging(tmpShare); err != nil {
+		s.removeEmptyFolder(tmpShare)
+		return "", err
+	}
 	say(" — copying")
 	if err := s.copyOnce(srcShare, tmpShare); err != nil {
 		return "", s.discardCopy(tmpShare, srcShare, want, untouched("File Station could not copy it to the destination ("+err.Error()+")"))
@@ -244,6 +248,7 @@ func transitViaFS(s *fsSession, cp, srcShare, outShare, outFS string, want entId
 		// File Station was asked about. The original was never touched.
 		return "", untouched("File Station's answer was lost while putting the verified copy in place — check " + outShare + " for it")
 	}
+	s.track.placed(outShare + "/" + name)
 	return name, s.retireOriginal(srcShare, cp, want, ref)
 }
 

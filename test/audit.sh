@@ -339,6 +339,44 @@ FREESPACE=1000 start_daemon "$WORK/daemon3.log"
 [ -z "$(api GET /api/state | field recordsWarning)" ] || fail "the acknowledged announcement came back after a restart"
 pass "a lost move record is announced, across restarts, until acknowledged"
 
+echo "== a move cut short by a stop"
+# Two flat moves into a folder inside the scanned share. The second never
+# finishes (the mock's never-lands hook — a copy longer than the stop's
+# grace), so the daemon is stopped with the batch half done. The first file's
+# record must survive: a moved copy forgotten would read as an original and
+# let its original follow it into the cleanup folder.
+printf 'cut-short one' > "$SHARE/c1.txt"; cp -p "$SHARE/c1.txt" "$SHARE/c1-copy.txt"
+printf 'cut-short two' > "$SHARE/c2.txt"; cp -p "$SHARE/c2.txt" "$SHARE/c2-never-lands.txt"
+mkdir -p "$SHARE/cut"
+scan '["duplicates"]'
+curl -s -m 60 -X POST -H 'Content-Type: application/json' \
+	-d "{\"tool\":\"duplicates\",\"id\":\"cut1\",\"files\":[\"$SHARE/c1-copy.txt\",\"$SHARE/c2-never-lands.txt\"],\"dest\":\"$SHARE/cut\",\"verify\":false,\"preserve\":false}" \
+	"http://127.0.0.1:$PORT/api/move" > "$WORK/cut.json" 2>&1 &
+CPID=$!
+for _ in $(seq 1 80); do api GET /api/state | grep -q 'never-lands' && break; sleep 0.25; done
+api GET /api/state | grep -q 'never-lands' || fail "fixture: the second move never started: $(api GET /api/state)"
+[ -f "$SHARE/cut/c1-copy.txt" ] || fail "fixture: the first file did not move"
+kill -TERM "$DPID"; wait "$DPID" 2>/dev/null || true; DPID=""
+wait "$CPID" 2>/dev/null || true
+[ -f "$STATE/moves.journal" ] || fail "the cut-short move left no journal"
+FREESPACE=1000 start_daemon "$WORK/daemon3.log"
+[ -f "$STATE/moves.journal" ] && fail "the journal is still there after its replay"
+[ "$(api GET /api/state | field lastMove.id)" = cut1 ] || fail "the cut-short move's report is not offered: $(api GET /api/state)"
+api GET '/api/move/report?id=cut1' | python3 -c '
+import json,sys
+share=sys.argv[1]
+r=json.load(sys.stdin)["report"]
+if not r.get("interrupted"): sys.exit("report not marked interrupted: %r" % r)
+if r["moved"]!=[share+"/c1-copy.txt"]: sys.exit("moved list wrong: %r" % r["moved"])
+e={x["path"]:x["error"] for x in r["errors"]}
+if "may have finished" not in e.get(share+"/c2-never-lands.txt",""): sys.exit("in-flight file not reported: %r" % e)' "$SHARE" || fail "the cut-short move's report is wrong"
+api POST /api/results '{"tool":"duplicates","offset":0,"limit":100}' | grep -q "\"c1-copy.txt\"" && fail "the moved file's row is back after the restart"
+scan '["duplicates"]'
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/c1.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")
+echo "$r" | grep -q 'already moved' || fail "the original of a file moved before the stop was not protected: $r"
+[ -f "$SHARE/c1.txt" ] || fail "the original moved despite the refusal"
+pass "a move cut short by a stop keeps the record of what it moved, prunes it, and reports what was in flight"
+
 echo "== SIGTERM"
 kill -TERM "$DPID"
 for i in $(seq 1 20); do kill -0 "$DPID" 2>/dev/null || break; sleep 0.25; done

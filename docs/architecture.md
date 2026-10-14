@@ -276,6 +276,18 @@ readable copy carries the newest records, the app shows a Move Records
 warning that persists across restarts until the user acknowledges it
 (`POST /api/records/ack`).
 
+Those saves happen when a move batch ends, and a daemon told to stop gives a
+request in flight only a few seconds. So a batch also keeps `var/moves.journal`
+(`server/journal.go`) as it goes: the request, each file as it starts, where
+it is about to land — flushed to disk before File Station is asked, because
+File Station finishes a move on its own after the daemon is gone — where it
+was placed, and its outcome with the records it added. A batch that ends and
+saves removes the journal. One found at start is replayed: its records are
+merged, a file with no outcome counts as landed wherever it was headed (as for
+a move whose answer was lost), the moved rows are pruned, and an interrupted
+report says what moved, what was in flight and where to look for it, and what
+was never reached. A file whose journal line cannot be written is not moved.
+
 `var/scan.interrupted` records a scan in flight: its tools, generation and
 normalized request. Found at daemon start it means the scan died, and the app
 offers **Resume** or **Start Over** at the next Scan click when the run

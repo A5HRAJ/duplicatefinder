@@ -32,6 +32,9 @@ type moveReport struct {
 	Errors    []map[string]string `json:"errors"`
 	Folder    string              `json:"folder,omitempty"`
 	SaveError string              `json:"saveError,omitempty"`
+	// Interrupted marks the report of a move Duplicate Finder did not live
+	// to finish, rebuilt from its journal at the next start (journal.go).
+	Interrupted bool `json:"interrupted,omitempty"`
 	// Seen is set once the app has shown the report to the user.
 	Seen bool `json:"seen"`
 }
