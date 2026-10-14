@@ -183,8 +183,9 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		cp, at, gone, err := s.moveOne(v, batchFn, sess, destShare, destCanon, req.Verify, note, src)
 		if at != "" {
 			// Something now sits at the destination because of this request
-			// — moved, or a verified copy whose original stayed put — and it
-			// must never count as the copy that stays. A flat move records the
+			// — moved, a verified copy whose original stayed put, or a move
+			// whose outcome is unsettled and may yet land — and it must never
+			// count as the copy that stays. A flat move records the
 			// entry itself; preserve mode records its batch folder below.
 			anyLanded = true
 			if batch == nil {
@@ -569,6 +570,11 @@ func (v *moveVet) refuse(cp string) error {
 		return errors.New("DSM's File Station cannot see this file, so it cannot be moved — delete it from the Mac that made it, or move the whole folder that holds it")
 	case !v.allowed[cp]:
 		return errors.New("not part of the current scan results — rescan and try again")
+	// A Temporary Files row is a claim about the NAME, and what counts as junk
+	// can change between the scan and the move — an upgrade that stopped
+	// counting backup names. Judged now, by the rule in force now.
+	case v.tool == "temp_files" && !isTempName(filepath.Base(cp)):
+		return errors.New("this name is no longer counted as a temporary file — it may be a backup; rescan to see the current list")
 	}
 	return nil
 }
@@ -793,8 +799,9 @@ func execMoveFS(sess *fsSession, src, cp, destShare, destCanon string, wants []e
 
 // execMoveFSAt is execMoveFS that also reports where the entry landed — its
 // canonical path at the destination — whenever File Station put it in place,
-// including a move whose verification then failed. A file left parked in a
-// staging folder reports "": that folder is hidden and never scanned.
+// including a move whose verification then failed, and where it would land
+// when the move's outcome is unsettled (unsettledError). A file left parked in
+// a staging folder reports "": that folder is hidden and never scanned.
 func execMoveFSAt(sess *fsSession, src, cp, destShare, destCanon string, wants []entIdent, batch func() (string, error), verify bool, note func(string)) (string, error) {
 	srcShare, err := sess.shareSpacePath(cp)
 	if err != nil {
@@ -882,6 +889,12 @@ func execMoveFSAt(sess *fsSession, src, cp, destShare, destCanon string, wants [
 		var pe parkedError
 		if errors.As(err, &pe) {
 			return "", parkedOutcome(pe, destShare, destCanon, preHash)
+		}
+		var ue unsettledError
+		if errors.As(err, &ue) {
+			// Where the entry lands if the move is still running: reported, so
+			// the caller records it as a copy this app put there.
+			return filepath.Join(destCanon, strings.TrimPrefix(outShare, destShare), finalName), err
 		}
 		return "", err
 	}
