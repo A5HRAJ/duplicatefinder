@@ -1514,6 +1514,15 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
 
   // The picker hands back share-space paths; the pick must resolve — this
   // exact call answered null (→ "This location cannot be used") before.
+  //
+  // The move above reloads the page when it ends. On a slow run (armv7 under
+  // QEMU) that reload landed mid-pick and rebuilt the selection, which the
+  // app rightly refused to move ("The selection changed…"). Settle the page
+  // first: a reload issued now supersedes the earlier one, whose reply is
+  // dropped as stale, so the next load is this one and nothing follows it.
+  const loadsBefore = win.__loads;
+  win.reloadPage();
+  for (let i = 0; i < 100 && win.__loads === loadsBefore; i++) await sleep(100);
   win.sm.clearSelections();
   for (let i = 0; i < 40 && !win.store.getCount(); i++) await sleep(200);
   const recU = win.store.getAt(4);
