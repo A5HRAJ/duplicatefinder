@@ -1062,11 +1062,13 @@ func (s *fsSession) folderIsEmpty(folderShare string) (bool, error) {
 // disposable junk, per File Station's own listing. This is the empty-folders
 // tool's definition of "empty": zero entries, or entries that are all either
 // files the Temporary Files tool itself would list (isTempName — one shared
-// list decides what "useless" means everywhere) or Synology's @eaDir
-// thumbnail cache, which DSM regenerates on demand. Any OTHER directory
-// rejects — a folder whose only child is .git is a repository, not clutter —
-// and so does any error or a listing too large to finish: unknown contents
-// must never read as empty.
+// list decides what "useless" means everywhere), Synology's @eaDir
+// thumbnail cache, which DSM regenerates on demand, or ordinary folders
+// whose own listings pass the same test, at every depth. Folders are judged
+// by innerDir, as in the native half: a hidden one, a junk-named one or a
+// system one rejects — a folder whose only child is .git is a repository,
+// not clutter — and so does any error, a Stop, or a reading past
+// emptyCheckMax: unknown contents must never read as empty.
 //
 // Two measured DSM behaviours this leans on: dotFILES like .keep and
 // .htaccess DO come back from list, so real content cannot hide from this
@@ -1075,41 +1077,62 @@ func (s *fsSession) folderIsEmpty(folderShare string) (bool, error) {
 // answers code 418 for them). Those never appear here at all, and it
 // does not matter: the native walk classifies exactly those names as junk
 // upstream, so the two layers agree without seeing the same entries.
-func (s *fsSession) folderHoldsOnlyJunk(folderShare string) (bool, error) {
+//
+// One listing call per folder inside, plus one per further page: the same
+// folders the walk has just read, so confirming costs no more round trips
+// than the empty folders found. Each page asks for the entries after the
+// ones received, not after the ones asked for, so a DSM that answers a
+// listing in smaller pieces cannot make this skip any.
+func (s *fsSession) folderHoldsOnlyJunk(folderShare string, cancel chan struct{}) (bool, error) {
 	const page = 500
-	const maxEntries = 10000 // past this, refuse rather than trust a partial read
-	fp := []byte(jsonQuote(folderShare))
-	for off := 0; off < maxEntries; off += page {
-		var data struct {
-			Files []struct {
-				Name  string `json:"name"`
-				IsDir bool   `json:"isdir"`
-			} `json:"files"`
-			Total int `json:"total"`
-		}
-		if err := s.call("SYNO.FileStation.List", "list", url.Values{
-			"folder_path": {string(fp)},
-			"offset":      {strconv.Itoa(off)},
-			"limit":       {strconv.Itoa(page)},
-		}, &data); err != nil {
-			return false, err
-		}
-		for _, f := range data.Files {
-			if f.IsDir {
-				if f.Name != "@eaDir" {
+	seen := 0
+	todo := []string{folderShare}
+	for len(todo) > 0 {
+		dir := todo[len(todo)-1]
+		todo = todo[:len(todo)-1]
+		for off := 0; ; {
+			if cancelled(cancel) {
+				return false, errors.New("the scan was stopped")
+			}
+			var data struct {
+				Files []struct {
+					Name  string `json:"name"`
+					IsDir bool   `json:"isdir"`
+				} `json:"files"`
+				Total int `json:"total"`
+			}
+			if err := s.call("SYNO.FileStation.List", "list", url.Values{
+				"folder_path": {jsonQuote(dir)},
+				"offset":      {strconv.Itoa(off)},
+				"limit":       {strconv.Itoa(page)},
+			}, &data); err != nil {
+				return false, err
+			}
+			for _, f := range data.Files {
+				if seen++; seen > emptyCheckMax {
+					return false, tooManyToCheck()
+				}
+				if f.IsDir {
+					skip, reject := innerDir(f.Name)
+					if reject {
+						return false, nil
+					}
+					if !skip {
+						todo = append(todo, dir+"/"+f.Name)
+					}
+					continue
+				}
+				if !isTempName(f.Name) {
 					return false, nil
 				}
-				continue
 			}
-			if !isTempName(f.Name) {
-				return false, nil
+			off += len(data.Files)
+			if len(data.Files) == 0 || off >= data.Total {
+				break
 			}
-		}
-		if len(data.Files) == 0 || off+len(data.Files) >= data.Total {
-			return true, nil
 		}
 	}
-	return false, nil
+	return true, nil
 }
 
 // mayBeRenamed reports whether a destination's file system may be unable to

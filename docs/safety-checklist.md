@@ -72,9 +72,9 @@ would take away the only copy of something.
 | C4 | Move exactly what's ticked. Changing the ticks while the folder picker is open moves nothing | ✅ | smoke "swapping the selection while the chooser is open" |
 | C5 | Never let Keep Newest or Select All tick a protected file or a copy the app already moved | ✅ | smoke "bulk select never selects protected rows", "Keep Newest never keeps or ticks a moved copy" |
 | C6 | Refuse files File Station can't handle (`.DS_Store`, `._` files) and say why | ✅ | `TestFsCannotAddressMatchesMeasuredDSMBehaviour`, smoke "nomove" |
-| C7 | Not move an "empty" folder that has gained a file since the scan | ✅ | `TestScanEmptyFoldersHardConfirm`, `TestTransitFolderThatGainedAFileIsKept` |
-| C8 | Count a hidden folder (e.g. `.git`), a zero-byte file, or a folder named like junk as real content | ✅ | `TestNativeJunkCheckRejectsJunkNamedDirectories`, `TestZeroByteFileIsNotJunk`, smoke "hiddenonly" |
-| C9 | Not call a folder empty just because it couldn't be read | ✅ | smoke "unreadable folder not reported as empty" |
+| C7 | Not move an "empty" folder that has gained a file since the scan, at any depth inside it | ✅ | `TestScanEmptyFoldersHardConfirm`, `TestTransitFolderThatGainedAFileIsKept`, `TestTransitNestedFolderThatGainedAFileIsKept`, audit "folders holding only empty folders" |
+| C8 | Count a hidden folder (e.g. `.git`), a zero-byte file, or a folder named like junk as real content, at any depth inside a folder of empty folders | ✅ | `TestNativeJunkCheckRejectsJunkNamedDirectories`, `TestConfirmEmptyLooksInsideFolders`, `TestZeroByteFileIsNotJunk`, smoke "hiddenonly", audit "folders holding only empty folders" |
+| C9 | Not call a folder empty just because it, or a folder inside it, couldn't be read, or held too much to read in full | ✅ | smoke "unreadable folder not reported as empty", `TestConfirmEmptyIsBoundedAndFailsClosed` |
 | C10 | Never list backup files (`.bak` etc.) as junk, and refuse a temporary-file row that no longer looks like junk | ✅ | `TestBackupNamesAreNotJunk`, `TestMoveRefusesATempRowNoLongerJunk` |
 | C11 | Let only NAS administrators move anything | 🟡 | The app's internal lock is tested (`TestAuthMiddleware`). The administrator check at the front door has no automated test |
 | C12 | Never run a scan and a move at once | ✅ | `TestScanRefusedWhileMoveActive`, `TestBeginMoveRefusesAScanThatStartedAfterThePrecheck` |
@@ -103,7 +103,7 @@ would take away the only copy of something.
 | E2 | Between disks, delete the original only after its copy has been checked | ✅ | `TestTransitRemovesTheOriginalOnlyAfterTheCopyVerifies`; tested on the USB disk, 2026-10-11 |
 | E3 | Leave the original untouched if the copy is damaged | ✅ | `TestTransitDamagedCopyLeavesTheOriginalUntouched`, smoke "damaged on its way to another volume" |
 | E4 | Keep both if the original changes while being copied | ✅ | `TestTransitOriginalChangedAfterTheCopyIsKept` |
-| E5 | Check moved folders file by file | ✅ | `TestTransitFolderIsCheckedFileByFileThenRemoved`, `TestTransitDamagedFileInsideAFolderKeepsTheFolder` |
+| E5 | Check moved folders file by file, at every depth | ✅ | `TestTransitFolderIsCheckedFileByFileThenRemoved`, `TestTransitDamagedFileInsideAFolderKeepsTheFolder`, `TestTransitFolderOfFoldersIsCheckedThenRemoved`, `TestTransitDamagedFileInANestedFolderKeepsTheFolder` |
 | E6 | Refuse to move a file that has decayed since the scan | ✅ | `TestMoveVerifyRefusesDeepRotBeforeMoving`, `TestMoveVerifyRefusesUnreadableSource` |
 | E7 | Never copy bytes for a move on the same disk (it's a rename) | ✅ | `TestVerifiedMoveOnOneFilesystemDoesNotCopy` |
 | E8 | Keep Verify on by default and never turn it off by itself | ✅ | smoke move dialog |

@@ -12,21 +12,24 @@ import (
 )
 
 // confirmEmpty reports whether a candidate folder holds nothing the user
-// could miss, per File Station's own listing (see folderHoldsOnlyJunk):
-// zero entries, or entries that are all junk — files the Temporary Files
-// tool itself would list, plus Synology's @eaDir thumbnail cache. Any other
-// entry counts as "not empty": this gate must never over-report emptiness.
-// An error is returned rather than folded into "not empty", because the
-// caller has to REPORT it: a File Station outage mid-confirmation must read
-// as "these could not be checked", not as "these were not empty". Candidates
-// always sit inside a shared folder — scan roots must, and candidates lie
-// strictly below the roots — so share space can always address them.
-func confirmEmpty(p string, sess *fsSession) (bool, error) {
+// could miss, per File Station's own listing (see folderHoldsOnlyJunk) and
+// the daemon's own reading (dirHoldsOnlyJunk): zero entries, or entries that
+// are all junk — files the Temporary Files tool itself would list, plus
+// Synology's @eaDir thumbnail cache — or ordinary folders whose own contents
+// pass the same test, at every depth (see innerDir). Any other entry counts
+// as "not empty": this gate must never over-report emptiness. An error is
+// returned rather than folded into "not empty", because the caller has to
+// REPORT it: a File Station outage mid-confirmation must read as "these
+// could not be checked", not as "these were not empty". Candidates always
+// sit inside a shared folder — scan roots must, and candidates lie strictly
+// below the roots — so share space can always address them. A closed cancel
+// ends File Station's reading with an error; nil never cancels.
+func confirmEmpty(p string, sess *fsSession, cancel chan struct{}) (bool, error) {
 	sp, err := sess.shareSpacePath(p)
 	if err != nil {
 		return false, err
 	}
-	if ok, err := sess.folderHoldsOnlyJunk(sp); err != nil || !ok {
+	if ok, err := sess.folderHoldsOnlyJunk(sp, cancel); err != nil || !ok {
 		return ok, err
 	}
 	// Then the daemon's own reading of the directory. It sees every name
@@ -37,35 +40,107 @@ func confirmEmpty(p string, sess *fsSession) (bool, error) {
 	return dirHoldsOnlyJunk(p)
 }
 
-// dirHoldsOnlyJunk is confirmEmpty's native half: every entry of the
-// directory must be a junk FILE (isTempName) or Synology's @eaDir cache. It
-// fails closed — a directory that cannot be read has unknown contents.
+// emptyCheckMax bounds how much of a candidate the confirmation reads: every
+// entry at every depth counts once. Past it the folder is refused with an
+// error, so the scan reports it as one that could not be checked; a partial
+// reading never calls a folder empty. A variable so the tests can lower it.
+var emptyCheckMax = 10000
+
+func tooManyToCheck() error {
+	return fmt.Errorf("it holds more than %d entries, too many to check", emptyCheckMax)
+}
+
+// innerDir is what a folder found inside a candidate means for it, decided
+// by name alone, identically in both halves of the confirmation:
 //
-// The junk names describe files only. A directory called ".DS_Store" or
-// "._photos" is a folder the walk never entered (dot-names are skipped as
-// hidden) and File Station's listing never shows, so this is the one check
-// that sees it — and whatever it holds, the folder around it is not empty.
+//   - @eaDir, Synology's thumbnail cache, regenerated on demand: accepted
+//     without being read.
+//   - a name the walk never enters (skipName: hidden, other @-folders,
+//     #recycle, #snapshot, lost+found) or a junk name: rejected, whatever it
+//     holds. The scan never looked inside, so its contents are unknown — a
+//     folder whose only child is .git is a repository, not clutter — and
+//     junk names describe FILES: a folder called ".DS_Store" or "._photos"
+//     is hidden from the walk and from File Station's listing alike.
+//   - any other folder: read in turn, and the candidate is empty only if it
+//     is too. The walk already found no real file in it; reading it again
+//     sees what the walk skipped and what arrived since.
+func innerDir(name string) (skip, reject bool) {
+	if name == "@eaDir" {
+		return true, false
+	}
+	return false, skipName(name) || isTempName(name)
+}
+
+// dirHoldsOnlyJunk is confirmEmpty's native half. It sees every name
+// whatever File Station's listing chooses to show, and reads the folder and
+// every folder inside it (innerDir decides which), so it is the one check
+// that sees the hidden and junk-named folders. Every entry that is not a
+// directory must be a junk file (isTempName). It fails closed: a folder
+// anywhere inside that cannot be read is an error, so is a reading past
+// emptyCheckMax, and a folder that is no longer a real directory when it is
+// opened (a symlink put in its place) is not empty.
 func dirHoldsOnlyJunk(p string) (bool, error) {
-	d, err := os.Open(p)
+	seen := 0
+	todo := []string{p}
+	for len(todo) > 0 {
+		dir := todo[len(todo)-1]
+		todo = todo[:len(todo)-1]
+		subs, ok, err := readJunkDir(dir, &seen)
+		if err != nil || !ok {
+			return false, err
+		}
+		for _, s := range subs {
+			todo = append(todo, filepath.Join(dir, s))
+		}
+	}
+	return true, nil
+}
+
+// readJunkDir reads one directory for dirHoldsOnlyJunk: ok is false at the
+// first entry that keeps the candidate from being empty, and subs are the
+// folders inside still to be read. Each folder is closed before the ones
+// inside it are opened, so depth never holds descriptors open.
+func readJunkDir(dir string, seen *int) (subs []string, ok bool, err error) {
+	before, err := os.Lstat(dir)
 	if err != nil {
-		return false, err
+		return nil, false, err
+	}
+	if !before.IsDir() {
+		return nil, false, nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return nil, false, err
 	}
 	defer d.Close()
+	if now, serr := d.Stat(); serr != nil || !os.SameFile(before, now) {
+		return nil, false, serr
+	}
 	for {
-		ents, err := d.ReadDir(256)
+		ents, rerr := d.ReadDir(256)
 		for _, e := range ents {
-			if e.Name() == "@eaDir" {
+			if *seen++; *seen > emptyCheckMax {
+				return nil, false, tooManyToCheck()
+			}
+			if e.IsDir() {
+				skip, reject := innerDir(e.Name())
+				if reject {
+					return nil, false, nil
+				}
+				if !skip {
+					subs = append(subs, e.Name())
+				}
 				continue
 			}
-			if e.IsDir() || !isTempName(e.Name()) {
-				return false, nil
+			if !isTempName(e.Name()) {
+				return nil, false, nil
 			}
 		}
-		if err == io.EOF {
-			return true, nil
+		if rerr == io.EOF {
+			return subs, true, nil
 		}
-		if err != nil {
-			return false, err
+		if rerr != nil {
+			return nil, false, rerr
 		}
 	}
 }
@@ -79,13 +154,14 @@ func dirHoldsOnlyJunk(p string) (bool, error) {
 // folder is moved). The walk finds the TOPMOST directory whose subtree
 // holds no real file, and only that one is offered; a candidate is reported
 // only after the confirm callback (File Station's own listing in production
-// — see confirmEmpty) verifies every entry it can see is junk too. The
-// walker skips hidden/system DIRECTORIES (".*", "@eaDir", "#recycle", …),
-// so a candidate may hold one — confirmation accepts @eaDir (Synology's
-// thumbnail cache, regenerated on demand) and rejects every other
-// directory: a folder whose only child is .git is a repository, not
-// clutter, and a folder holding just an empty folder reports neither —
-// data-safe for a tool that must never cause loss. Directories whose
+// — see confirmEmpty) verifies, at every depth, that everything it can see
+// is junk or a folder holding only junk. A folder holding nothing but an
+// empty folder is therefore offered and listed as the one row: the folder
+// inside rides along when it moves. The walker skips hidden/system
+// DIRECTORIES (".*", "@eaDir", "#recycle", …), so a candidate may hold one
+// at any depth — confirmation accepts @eaDir (Synology's thumbnail cache,
+// regenerated on demand) and rejects every other (innerDir): a folder whose
+// only child is .git is a repository, not clutter. Directories whose
 // contents could not be read have unknown contents
 // — e.g. a Hyper Backup .hbk vault the package user cannot open — so they
 // and their ancestors count as non-empty rather than being offered for
@@ -341,7 +417,7 @@ func (e *emptyFolderScan) finish(s *Server, cancel chan struct{}, confirm func(s
 	}
 	var errs []string
 	if failed > 0 {
-		errs = append(errs, fmt.Sprintf("%d empty-folder candidates could not be confirmed through File Station and were left out (%s)", failed, firstErr))
+		errs = append(errs, fmt.Sprintf("%d empty-folder candidates could not be confirmed empty and were left out (%s)", failed, firstErr))
 	}
 	return out, trunc, errs
 }

@@ -437,7 +437,7 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 		res := newResult("empty_folders")
 		var confirmErrs []string
 		res.Files, res.Truncated, confirmErrs = ef.finish(s, cancel, func(p string) (bool, error) {
-			return confirmEmpty(p, sess)
+			return confirmEmpty(p, sess, cancel)
 		})
 		if cancelled(cancel) {
 			return // finish stopped part-way: the list is not the answer

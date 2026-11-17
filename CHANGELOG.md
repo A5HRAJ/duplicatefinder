@@ -4,6 +4,20 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
+## [Unreleased]
+
+### Fixed
+- Empty Folders never listed a folder whose only content was another empty
+  folder, and never listed the folder inside it either: a skeleton of empty
+  folders left behind after moving files out (2015/01, 2015/02, …) did not
+  appear at all. Such a folder is now listed as one row, and the folders
+  inside it go with it when it is moved. It is still left off the list when
+  anything inside it, at any depth, is a real file, a hidden folder such as
+  `.git`, a folder with a junk name such as `.DS_Store`, or a folder that
+  cannot be read. The move checks every level again before anything moves,
+  and a move to another volume with Verify on now checks the copy at every
+  level before the original is removed.
+
 ## [1.1.11] - 2026-11-17
 
 ### Added
