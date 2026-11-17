@@ -23,6 +23,12 @@ package versions shown in Package Center.
   marked the original as moved too, and with every copy marked as moved,
   the last original could be moved after them. A record now names the
   folder it was written for and counts only there.
+- A verified move to another disk checked, just before deleting the
+  original, that it had not changed since its copy was verified, but only
+  to the second. A file rewritten in place at the same length within that
+  second, such as a download still being written, was deleted, and only
+  the older copy survived at the destination. The check is now to the
+  nanosecond, and such a file is kept beside its copy.
 
 ## [1.1.12] - 2026-11-17
 

@@ -944,7 +944,9 @@ func execMoveFSAt(sess *fsSession, src, cp, destShare, destCanon string, wants [
 	// A file's content is hashed before it moves. Placed above batch() with
 	// every other refusal, so a verify refusal creates nothing.
 	preHash := ""
+	var preStat os.FileInfo // taken BEFORE the hash: a write during it shows
 	if verify && !e.IsDir {
+		preStat, _ = os.Lstat(cp)
 		if preHash, err = preMoveHash(cp, want, note); err != nil {
 			return "", err
 		}
@@ -955,6 +957,9 @@ func execMoveFSAt(sess *fsSession, src, cp, destShare, destCanon string, wants [
 	// filesystem its move is a rename and no byte of it travels.
 	transit := verify && crossesFS(filepath.Dir(cp), destCanon)
 	ref := transitRef{hash: preHash}
+	if preStat != nil && preStat.Mode().IsRegular() {
+		ref.size, ref.mtimeNs = preStat.Size(), preStat.ModTime().UnixNano()
+	}
 	if transit && e.IsDir {
 		if note != nil {
 			note(" — verifying")

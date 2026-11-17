@@ -103,7 +103,7 @@ would take away the only copy of something.
 | E1 | With Verify on, read the moved file back and compare it with the scan | ✅ | `TestMoveVerifyHappyPath`, `TestMoveVerifyCatchesTransitCorruption` and the other `TestMoveVerify*` tests |
 | E2 | Between disks, delete the original only after its copy has been checked | ✅ | `TestTransitRemovesTheOriginalOnlyAfterTheCopyVerifies`; tested on the USB disk, 2026-10-11 |
 | E3 | Leave the original untouched if the copy is damaged | ✅ | `TestTransitDamagedCopyLeavesTheOriginalUntouched`, smoke "damaged on its way to another volume" |
-| E4 | Keep both if the original changes while being copied | ✅ | `TestTransitOriginalChangedAfterTheCopyIsKept` |
+| E4 | Keep both if the original changes while being copied | ✅ | `TestTransitOriginalChangedAfterTheCopyIsKept`; `TestTransitKeepsANewerVersionWrittenInTheSameSecond` and its folder twin: a same-length rewrite within the same second, after the copy was verified, is caught by a nanosecond comparison (until 2026-11-17 the newer bytes were deleted) |
 | E5 | Check moved folders file by file, at every depth | ✅ | `TestTransitFolderIsCheckedFileByFileThenRemoved`, `TestTransitDamagedFileInsideAFolderKeepsTheFolder`, `TestTransitFolderOfFoldersIsCheckedThenRemoved`, `TestTransitDamagedFileInANestedFolderKeepsTheFolder` |
 | E6 | Refuse to move a file that has decayed since the scan | ✅ | `TestMoveVerifyRefusesDeepRotBeforeMoving`, `TestMoveVerifyRefusesUnreadableSource` |
 | E7 | Never copy bytes for a move on the same disk (it's a rename) | ✅ | `TestVerifiedMoveOnOneFilesystemDoesNotCopy` |

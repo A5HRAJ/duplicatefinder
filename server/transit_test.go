@@ -493,3 +493,58 @@ func TestTransitNestedFolderThatGainedAFileIsKept(t *testing.T) {
 		}
 	}
 }
+
+// sameSecond returns a time in the same whole second as t but not equal to
+// it: what a write lands on when it follows another within the second.
+func sameSecond(t time.Time) time.Time {
+	s := t.Truncate(time.Second)
+	return s.Add(time.Duration((t.Nanosecond() + 500_000_000) % 1_000_000_000))
+}
+
+// An original rewritten in place after its copy was verified — same length,
+// within the same second — is newer than the copy at the destination. It
+// must be kept, never deleted on a size-and-seconds match.
+func TestTransitKeepsANewerVersionWrittenInTheSameSecond(t *testing.T) {
+	forceTransit(t)
+	f, sess := newMoveVerifyFake(t)
+	os.Mkdir(filepath.Join(f.root, "dest"), 0o755)
+	p, want, body := mkMoveFile(t, f, "a.bin")
+	fi0, _ := os.Stat(p)
+	newer := bytes.Repeat([]byte{0x43}, len(body))
+	f.afterMove = func(string) {
+		os.WriteFile(p, newer, 0o644)
+		ts := sameSecond(fi0.ModTime())
+		os.Chtimes(p, ts, ts)
+	}
+	_, err := execMoveFSAt(sess, p, p, "/Backups/dest", filepath.Join(f.root, "dest"), []entIdent{want}, nil, true, nil)
+	if err == nil || !strings.Contains(err.Error(), "both copies now exist") {
+		t.Fatalf("a newer original must be kept beside its older copy, got %v", err)
+	}
+	if got, _ := os.ReadFile(p); !bytes.Equal(got, newer) {
+		t.Fatal("the newer version of the original was lost")
+	}
+}
+
+// The same inside a folder: a junk file rewritten in place after the copy
+// was verified keeps the folder.
+func TestTransitKeepsAFolderWhoseFileWasRewrittenInTheSameSecond(t *testing.T) {
+	forceTransit(t)
+	f, sess := newMoveVerifyFake(t)
+	os.Mkdir(filepath.Join(f.root, "dest"), 0o755)
+	d, want := mkJunkFolder(t, f, "junk")
+	inner := filepath.Join(d, "film.part")
+	fi0, _ := os.Stat(inner)
+	newer := bytes.Repeat([]byte{9}, int(fi0.Size()))
+	f.afterMove = func(string) {
+		os.WriteFile(inner, newer, 0o644)
+		ts := sameSecond(fi0.ModTime())
+		os.Chtimes(inner, ts, ts)
+	}
+	_, err := execMoveFSAt(sess, d, d, "/Backups/dest", filepath.Join(f.root, "dest"), []entIdent{want}, nil, true, nil)
+	if err == nil || !strings.Contains(err.Error(), "both copies now exist") {
+		t.Fatalf("a folder whose file was rewritten must be kept, got %v", err)
+	}
+	if got, _ := os.ReadFile(inner); !bytes.Equal(got, newer) {
+		t.Fatal("the newer version of the folder's file was lost")
+	}
+}
