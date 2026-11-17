@@ -294,6 +294,45 @@ func (a syncedArea) holds(p string) bool {
 	return false
 }
 
+// keeps reports whether moving src to dest leaves it inside the same
+// synced folder — the service then sees a move and keeps the file. For a
+// folder under "home" that is the same user's copy of it: one user's
+// Dropbox is not another's, though both match holds.
+func (a syncedArea) keeps(src, dest string) bool {
+	for _, r := range a.roots {
+		if (src == r || strings.HasPrefix(src, r+"/")) && (dest == r || strings.HasPrefix(dest, r+"/")) {
+			return true
+		}
+	}
+	for _, h := range a.homes {
+		su, sok := homeUser(src, h)
+		du, dok := homeUser(dest, h)
+		if !sok || !dok || su != du {
+			continue
+		}
+		root := h + "/" + su
+		if a.homeRest != "" {
+			root += a.homeRest
+		}
+		if (src == root || strings.HasPrefix(src, root+"/")) && (dest == root || strings.HasPrefix(dest, root+"/")) {
+			return true
+		}
+	}
+	return false
+}
+
+// homeUser is the user whose home under h holds p.
+func homeUser(p, h string) (string, bool) {
+	if !strings.HasPrefix(p, h+"/") {
+		return "", false
+	}
+	u := p[len(h)+1:]
+	if i := strings.IndexByte(u, '/'); i >= 0 {
+		u = u[:i]
+	}
+	return u, u != ""
+}
+
 // within reports whether the synced folder is somewhere inside folder p,
 // so that moving p carries the whole synced folder away with it.
 func (a syncedArea) within(p string) bool {
@@ -320,7 +359,7 @@ func syncHits(areas []syncedArea, unchecked []string, files []string, dest strin
 	idx := map[syncedFolder]int{}
 	for _, src := range files {
 		for _, a := range areas {
-			if !a.within(src) && (!a.holds(src) || a.holds(dest)) {
+			if !a.within(src) && (!a.holds(src) || a.keeps(src, dest)) {
 				continue
 			}
 			i, ok := idx[a.syncedFolder]

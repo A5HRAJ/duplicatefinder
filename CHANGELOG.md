@@ -66,6 +66,10 @@ package versions shown in Package Center.
 - The gateway accepted a request carrying a valid sign-in token followed by
   an empty second one as if it carried one. It still needed a valid
   administrator's token, but it now refuses any request with more than one.
+- Moving a file from one user's Cloud Sync folder in their home into another
+  user's folder of the same name gave no warning, though it removed the file
+  from the first user's synced copy. It now warns, as any other move out of
+  a synced folder does.
 
 ## [1.1.12] - 2026-11-17
 

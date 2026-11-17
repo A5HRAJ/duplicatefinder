@@ -267,6 +267,11 @@ func TestSyncHitsSeesThroughTheTwoNamesOfAHome(t *testing.T) {
 	if h := syncHits(areas, nil, []string{"/volume1/homes/ash/Dropbox/a"}, "/volume1/homes/ash/Dropbox/Duplicates"); len(h) != 0 {
 		t.Errorf("a move inside the synced home folder was flagged: %+v", h)
 	}
+	// But one user's synced folder is not another's: moving from Ash's
+	// Dropbox into Bob's removes it from Ash's, and is warned about.
+	if h := syncHits(areas, nil, []string{"/volume1/homes/ash/Dropbox/a"}, "/volume1/homes/bob/Dropbox/Duplicates"); len(h) != 1 {
+		t.Errorf("a move between two users' synced home folders was not flagged: %+v", h)
+	}
 	// Without a "homes" share listed, the homes are found beside "home".
 	areas = locate([]syncedFolder{{"/home", byCloudSync}}, []shareEntry{{name: "home", real: "/volume1/homes/ash"}})
 	if h := syncHits(areas, nil, []string{"/volume1/homes/ash/x", "/volume1/homes/bob/y"}, "/volume1/Team"); len(h) != 1 || h[0].Files != 2 {
