@@ -875,11 +875,17 @@ func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, 
 		// filling up — and reporting it "parked" would tell the user the file
 		// had left when it had not (cutShortCopy).
 		name, there, serr := s.stagedName(tmpShare, base)
-		if serr == nil && !there {
+		switch {
+		case serr == nil && !there:
 			s.removeEmptyFolder(tmpShare)
-		} else if serr == nil && !want.isDir && !moveOutcomeUnknown(err) && s.sourceIntact(srcShare, want) {
-			err = s.cutShortCopy(err, tmpShare, name, want)
-		} else {
+		case serr == nil && !want.isDir && !moveOutcomeUnknown(err) && s.sourceIntact(srcShare, want):
+			err = s.cutShortCopy(err, tmpShare, base, name, want)
+		case serr != nil && !want.isDir && s.sourceIntact(srcShare, want):
+			// The staging folder could not even be looked into, but the file
+			// is still where it was, exactly as scanned: it did not leave, so
+			// it is not "parked", and its row must stay.
+			err = fmt.Errorf("%v — nothing was moved and the original is untouched, but File Station may have left a copy in %s; check it before deleting anything", err, tmpShare)
+		default:
 			if name == "" {
 				name = base
 			}
@@ -926,9 +932,9 @@ func (s *fsSession) sourceIntact(srcShare string, want entIdent) bool {
 // partway is the usual cause — and holds nothing the original does not: it
 // is removed with the staging folder. Anything else is left where it is and
 // reported, since nothing more than size and time says it is spare.
-func (s *fsSession) cutShortCopy(err error, tmpShare, name string, want entIdent) error {
+func (s *fsSession) cutShortCopy(err error, tmpShare, base, name string, want entIdent) error {
 	p := tmpShare + "/" + name
-	if info, ierr := s.getInfo([]string{p}, []string{"size", "time"}); ierr == nil {
+	if info, ierr := s.getInfo([]string{p}, []string{"size", "time"}); ierr == nil && ownStagedName(base, name) {
 		if e, ok := info[p]; ok && e.exists() && !e.IsDir && e.Additional.Size < want.size {
 			if s.removeFile(p) == nil && s.removeEmptyFolder(tmpShare) == nil {
 				return fmt.Errorf("%v — nothing was moved and the original is untouched; the incomplete copy File Station left at the destination was removed", err)
@@ -936,6 +942,34 @@ func (s *fsSession) cutShortCopy(err error, tmpShare, name string, want entIdent
 		}
 	}
 	return fmt.Errorf("%v — nothing was moved and the original is untouched, but File Station left a copy in %s; check it before deleting anything", err, tmpShare)
+}
+
+// ownStagedName reports whether the entry called name in a staging folder can
+// be the copy of base: the same name, or the name a destination that cannot
+// store some characters gives it, each such character replaced by "-" and a
+// trailing dot or space dropped (as measured on an exFAT disk). Anything else
+// someone else put there, however small, and it is never deleted as a spare.
+func ownStagedName(base, name string) bool {
+	if name == base {
+		return true
+	}
+	if !mayBeRenamed(base) {
+		return false
+	}
+	b := []rune(strings.TrimRight(base, ". "))
+	n := []rune(name)
+	if len(b) != len(n) {
+		return false
+	}
+	for i := range b {
+		if n[i] == b[i] {
+			continue
+		}
+		if n[i] != '-' || !(b[i] < 0x20 || strings.ContainsRune(`"*:<>?\|`, b[i])) {
+			return false
+		}
+	}
+	return true
 }
 
 // leftBehind completes the report of a move File Station refused, aimed at a

@@ -67,6 +67,9 @@ type moveVerifyFake struct {
 	// destination that cannot store every name, as File Station does onto
 	// an exFAT disk ("what?.bin" arrives as "what-.bin"), silently.
 	storeAs func(name string) string
+	// loseStagingInfo makes every getinfo that asks about a staging folder's
+	// entries lose its reply, as a dropped connection would.
+	loseStagingInfo bool
 	// uploads counts the files Upload wrote.
 	uploads int
 	// fillDest, when nonzero, is a destination that fills up partway: every
@@ -190,6 +193,18 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 				}
 				var paths []string
 				json.Unmarshal([]byte(r.FormValue("path")), &paths)
+				if f.loseStagingInfo {
+					for _, p := range paths {
+						if strings.Contains(p, ".dupfinder-tmp-") {
+							if hj, ok := w.(http.Hijacker); ok {
+								if conn, _, err := hj.Hijack(); err == nil {
+									conn.Close()
+									return
+								}
+							}
+						}
+					}
+				}
 				files := make([]map[string]any, 0, len(paths))
 				for _, p := range paths {
 					st, err := os.Stat(f.real(p))

@@ -79,7 +79,7 @@ func TestFullCopyLeftInStagingIsKeptAndReported(t *testing.T) {
 	tmp := ".dupfinder-tmp-0000000000000000"
 	os.Mkdir(filepath.Join(dest, tmp), 0o755)
 	os.WriteFile(filepath.Join(dest, tmp, "a.bin"), body, 0o644)
-	got := sess.cutShortCopy(errors.New("File Station CopyMove failed (error 1000)"), "/Backups/dest/"+tmp, "a.bin", want)
+	got := sess.cutShortCopy(errors.New("File Station CopyMove failed (error 1000)"), "/Backups/dest/"+tmp, "a.bin", "a.bin", want)
 	if !strings.Contains(got.Error(), "left a copy in /Backups/dest/"+tmp) {
 		t.Fatalf("a full copy left in staging is not reported by path: %v", got)
 	}
@@ -143,5 +143,63 @@ func TestACopyInTheRecycleBinNeverStays(t *testing.T) {
 	v := s.newMoveVet(MoveReq{Tool: "duplicates", Files: []string{live}}, sess)
 	if !v.drops[v.canon.path(live)] {
 		t.Fatalf("the live copy may move while its only other copy sits in the recycle bin (drops %v)", v.drops)
+	}
+}
+
+// A cut-short copy is removed only when it can be the file's own copy: its
+// name, or the name a destination that cannot store some characters gives
+// it ("what?.bin" arrives as "what-.bin"). Anything else in the staging
+// folder is left and reported, however small it is.
+func TestOnlyTheFilesOwnCutShortCopyIsRemoved(t *testing.T) {
+	for _, tc := range []struct {
+		base, staged string
+		removed      bool
+	}{
+		{"a.bin", "a.bin", true},
+		{"what?.bin", "what-.bin", true},
+		{"a:b.bin", "a-b.bin", true},
+		{"a.bin", "notes.txt", false},
+		{"what?.bin", "what_.bin", false},
+		{"what?.bin", "other.bin", false},
+	} {
+		t.Run(tc.base+" as "+tc.staged, func(t *testing.T) {
+			f, sess := newMoveVerifyFake(t)
+			dest := filepath.Join(f.root, "dest")
+			tmp := ".dupfinder-tmp-0000000000000001"
+			os.MkdirAll(filepath.Join(dest, tmp), 0o755)
+			staged := filepath.Join(dest, tmp, tc.staged)
+			os.WriteFile(staged, []byte("small"), 0o644)
+			want := entIdent{size: 1 << 20}
+			got := sess.cutShortCopy(errors.New("File Station CopyMove failed (error 1000)"), "/Backups/dest/"+tmp, tc.base, tc.staged, want)
+			_, serr := os.Stat(staged)
+			if removed := os.IsNotExist(serr); removed != tc.removed {
+				t.Fatalf("removed=%v, want %v (%v)", removed, tc.removed, got)
+			}
+			if !tc.removed && !strings.Contains(got.Error(), "left a copy in") {
+				t.Fatalf("a file left in staging is not reported: %v", got)
+			}
+		})
+	}
+}
+
+// When even the look into the staging folder gets no answer, a file whose
+// original is still in place is not reported as parked, and its row is not
+// dropped: nothing says it left.
+func TestALostLookIntoStagingDoesNotCallTheFileParked(t *testing.T) {
+	f, sess := newMoveVerifyFake(t)
+	dest := filepath.Join(f.root, "dest")
+	os.Mkdir(dest, 0o755)
+	p, want, body := mkMoveFile(t, f, "a.bin")
+	os.WriteFile(filepath.Join(dest, "a.bin"), []byte("theirs"), 0o644) // forces staging
+	f.fillDest = 1000
+	f.loseStagingInfo = true // the look into the staging folder gets no answer
+	_, err := execMoveFSAt(sess, p, p, "/Backups/dest", dest, []entIdent{want}, nil, false, nil)
+	var mbe movedButError
+	var pe parkedError
+	if err == nil || errors.As(err, &mbe) || errors.As(err, &pe) {
+		t.Fatalf("reported as moved or parked (%T: %v) while the original never left", err, err)
+	}
+	if b, _ := os.ReadFile(p); !bytes.Equal(b, body) {
+		t.Fatal("the original changed")
 	}
 }

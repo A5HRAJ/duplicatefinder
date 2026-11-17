@@ -78,6 +78,11 @@ package versions shown in Package Center.
   open (from another window, or by another administrator), the move went
   ahead with whatever files the new scan listed at those places. It now
   moves nothing and asks you to look at the list again.
+- When a move onto a full destination failed and DSM's next answer was then
+  lost too, the app could report the file as "parked" in a hidden folder and
+  drop it from the list, though it had not moved. It now checks that the
+  original is still in place first. And it now removes an incomplete copy
+  from that hidden folder only when it carries the file's own name.
 
 ## [1.1.12] - 2026-11-17
 
