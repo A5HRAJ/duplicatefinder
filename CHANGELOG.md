@@ -4,6 +4,53 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
+## [1.1.11] - 2026-11-17
+
+### Added
+- Moving files out of a folder that Cloud Sync, Synology Drive, a Hybrid
+  Share or ShareSync keeps in step with other places removes them from
+  those places too: the cloud account, other computers, another NAS. The
+  app now asks DSM which folders are synced before every move and, when a
+  move would take files out of one (or move a folder holding one), names
+  the folders and services and moves nothing unless you choose Move Anyway.
+  A sync service it cannot check counts as "might be synced", so it asks
+  then too.
+
+### Fixed
+- Files whose names a USB disk cannot store could not be moved onto it.
+  exFAT, FAT and NTFS refuse characters such as `?` and `:`, and File
+  Station quietly stores such a file under another name ("what?.bin"
+  arrives as "what-.bin"). With verification on, the app looked for the
+  old name, did not find it, discarded the copy and blamed the disk's
+  permissions; with verification off, it recorded the moved copy under a
+  name that did not exist, so a later scan could take that copy for an
+  original. The app now reads back the name the file really landed with,
+  verifies and records it under that name, and mentions permissions only
+  when access really was refused.
+- On a NAS with little memory the app answered slowly while a scan ran —
+  a median of 3 seconds and up to 14 seconds per click on a 1 GB DS124 —
+  because the scan's own reads pushed everything else out of the system's
+  file cache, the app's program and DSM's own included. Each file the scan
+  reads in full is now dropped from the cache once it has been hashed:
+  answers stay at about a tenth of a second, and the scan itself is faster.
+- A file with two names (hard links) but no other copy was listed as a
+  duplicate group headed "1 copies" with 0 B reclaimable. Names that are
+  all one file are no longer a duplicate group.
+- Empty Files, Temporary Files and Empty Folders listed again the entries
+  an earlier move had put away, whenever the destination was inside the
+  scan scope. What a move landed is no longer offered again.
+- The default scan scope (the first shared folders of the first volume)
+  was never saved, so a shared folder created later joined it unseen the
+  next time the app opened, and an interrupted scan could then never be
+  resumed because its settings had "changed". The default is now saved the
+  first time it is filled in.
+- Choosing a move destination the package's user has no access to said
+  "destination is not a folder". It now says to grant that user access
+  under Control Panel → Shared Folder → Edit → Permissions.
+- A scan interrupted by a package stop or restart left a half-written
+  temporary copy of the hash cache in the package's data folder, one more
+  for every interruption. They are cleared when the package starts.
+
 ## [1.1.10] - 2026-10-14
 
 ### Fixed
