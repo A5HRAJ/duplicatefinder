@@ -1033,3 +1033,24 @@ func TestDestinationWithoutAccessSaysHowToGrantIt(t *testing.T) {
 		}
 	}
 }
+
+// A move made from results that another scan has replaced since is refused
+// before anything is looked at: the files at those paths are not the ones
+// the user saw listed. The same scan, or a caller that does not say, is not.
+func TestMoveFromReplacedResultsIsRefused(t *testing.T) {
+	s := &Server{results: map[string]*toolResult{"duplicates": {Tool: "duplicates", Scanned: "2026-11-17T10:00:00.5Z"}}}
+	move := func(scanned string) int {
+		body, _ := json.Marshal(MoveReq{Tool: "duplicates", Files: []string{"/volume1/x/a"}, Dest: "/volume1/x/d", Scanned: scanned})
+		rec := httptest.NewRecorder()
+		s.handleMove(rec, httptest.NewRequest("POST", "/api/move", strings.NewReader(string(body))))
+		return rec.Code
+	}
+	if c := move("2026-11-17T09:00:00.1Z"); c != 409 {
+		t.Fatalf("a move from replaced results: want 409, got %d", c)
+	}
+	for _, same := range []string{"2026-11-17T10:00:00.5Z", ""} {
+		if c := move(same); c == 409 {
+			t.Fatalf("scanned %q was refused as replaced", same)
+		}
+	}
+}

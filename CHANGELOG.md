@@ -74,6 +74,10 @@ package versions shown in Package Center.
   synced folder, including one that became synced while the question was
   open. It now agrees only to the folders the question named; any other is
   asked about first, and nothing moves until then.
+- If another scan replaced the results while a question about a move was
+  open (from another window, or by another administrator), the move went
+  ahead with whatever files the new scan listed at those places. It now
+  moves nothing and asks you to look at the list again.
 
 ## [1.1.12] - 2026-11-17
 

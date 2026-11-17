@@ -1566,6 +1566,8 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
       txt.indexOf(shareDir) >= 0 && /Cloud Sync/.test(txt));
     check('the question is owned by the app window', !!win._syncWin && win._syncWin.owner === win);
     check('the first request did not claim permission', bodies.length === 1 && bodies[0].syncOK === false);
+    check('a move says which scan its files were chosen from',
+      bodies.length === 1 && !!bodies[0].scanned && bodies[0].scanned === win.state.scannedAt[win.state.tool]);
     check('nothing moved while the question is open', fsm.existsSync(srcS));
     clickBtn(/^Cancel$/);
     await sleep(400);

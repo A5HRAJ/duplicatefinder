@@ -51,6 +51,12 @@ type MoveReq struct {
 	// files out of is among them: one that became synced while the question
 	// was open is asked about in its turn.
 	SyncAgreed []syncHit `json:"syncAgreed"`
+	// Scanned is the scan the app's selection was made from (the result's
+	// scannedAt). When another scan has replaced that result since — while a
+	// question was open, or from another window — the files at those paths
+	// are not the ones the user saw listed, and nothing moves. Empty skips
+	// the check, for a caller that does not know.
+	Scanned string `json:"scanned"`
 }
 
 func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
@@ -69,9 +75,17 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	// sufficient: mu is dropped on the next line.
 	s.mu.Lock()
 	scanning := s.job.Running
+	current := ""
+	if res := s.results[req.Tool]; res != nil {
+		current = res.Scanned
+	}
 	s.mu.Unlock()
 	if scanning {
 		writeErr(w, 409, "a scan is running — wait for it to finish before moving files")
+		return
+	}
+	if req.Scanned != "" && req.Scanned != current {
+		writeErr(w, 409, "these results were replaced by a newer scan since you chose the files — look at the list again and choose them anew")
 		return
 	}
 	destH, destCanon, destShare, sess, ok := s.vetDestination(w, r, req.Dest)

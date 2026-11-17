@@ -3518,6 +3518,10 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// Captured, not read back at request time, so the batch carries the
 			// tool it was selected under even if state.tool changes underneath.
 			var tool = this.state.tool;
+			// And the scan the selection was made from: should another scan
+			// replace these results before the move is sent, the daemon
+			// refuses rather than acting on paths the user did not see listed.
+			var scanned = this.state.scannedAt[tool] || '';
 			// Fingerprint of the batch this dialog was opened for. The records
 			// are captured, so a selection REPLACED between here and the pick
 			// would move rows the user is no longer pointing at — and the pick
@@ -3628,7 +3632,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 									me.notify('The selection changed while the folder was being chosen — nothing was moved.');
 									return;
 								}
-								me.doMove(recs, dest, doPreserve, tool, doVerify);
+								me.doMove(recs, dest, doPreserve, tool, doVerify, null, scanned);
 							}
 						});
 					} }),
@@ -3644,7 +3648,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		// stays clickable while the folder chooser is up — see the capture
 		// there. It only ever labels the folder the daemon creates; the move's
 		// vetting is unaffected by it.
-		doMove: function (recs, dest, preserve, tool, verify, syncAgreed) {
+		doMove: function (recs, dest, preserve, tool, verify, syncAgreed, scanned) {
 			var me = this;
 			var paths = [];
 			Ext.each(recs, function (r) { paths.push(r.get('path') + '/' + r.get('name')); });
@@ -3674,7 +3678,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// verify defaults ON when the caller does not say otherwise — the
 			// dialog always says, so this covers programmatic callers, and the
 			// default lands on the safe side.
-			api('/move', 'POST', { files: paths, dest: dest, preserve: preserve, tool: tool, verify: verify !== false, id: id, syncOK: !!syncAgreed, syncAgreed: syncAgreed || [] }, function (err, j, meta) {
+			api('/move', 'POST', { files: paths, dest: dest, preserve: preserve, tool: tool, verify: verify !== false, id: id, syncOK: !!syncAgreed, syncAgreed: syncAgreed || [], scanned: scanned || '' }, function (err, j, meta) {
 				if (err && meta && meta.transport) {
 					// The connection died — DSM's web server gave up on the
 					// request long before the 12-hour timeout here — while the
@@ -3697,7 +3701,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				// the question was open comes back here, and is asked about.
 				if (err && j && j.synced && j.synced.length) {
 					me.confirmSyncedMove(j.synced, paths.length, function () {
-						me.doMove(recs, dest, preserve, tool, verify, j.synced);
+						me.doMove(recs, dest, preserve, tool, verify, j.synced, scanned);
 					});
 					return;
 				}
