@@ -45,6 +45,10 @@ package versions shown in Package Center.
   an issue of the scan, naming its folder. How much a scan reads from
   such records is bounded, so a planted or damaged one cannot exhaust a
   small NAS's memory.
+- Stopping a scan right after it had recognised moved copies from their
+  folder's record, before it showed any results, threw that away: after
+  the package restarted, results from earlier could treat a moved copy as
+  an original again. What a scan recognises this way is now saved at once.
 
 ## [1.1.12] - 2026-11-17
 

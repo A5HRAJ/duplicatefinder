@@ -428,6 +428,14 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 		s.moveOut = s.moveOut.with(add)
 		moved = s.moveOut
 		s.mu.Unlock()
+		// Saved at once, not with the results at the end: a scan stopped (or
+		// a NAS that loses power) before any tool publishes would otherwise
+		// forget what it recovered, and the stored groups from before would
+		// be acted on again after a restart as if the moved copy were an
+		// original.
+		if err := s.saveState(); err != nil {
+			s.noteSaveError(err)
+		}
 	}
 	if cancelled(cancel) {
 		return // the walk is shared: a stop here has nothing complete to keep

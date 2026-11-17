@@ -777,6 +777,37 @@ echo "$r" | grep -q 'already moved' || fail "the original moved past its moved c
 rm -rf "$SHARE/lib" "$SHARE/other" "$SHARE/clean"
 pass "a folder record copied into another folder does not speak for that folder"
 
+echo "== protection recovered by a scan that is then stopped"
+# A scan that recovers a moved copy from its folder record, and is then
+# stopped before any result is published, must still keep what it
+# recovered: after a restart, the groups stored earlier must not treat the
+# moved copy as an original. The 2 GiB sparse images make the hashing slow
+# enough for the Stop to land after the walk.
+mkdir -p "$SHARE/sv/clean"
+printf 'recovered, then the scan was stopped' > "$SHARE/sv/o.dat"; cp -p "$SHARE/sv/o.dat" "$SHARE/sv/o-copy.dat"
+scan '["duplicates"]'
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/sv/o-copy.dat\"],\"dest\":\"$SHARE/sv/clean\",\"verify\":false,\"preserve\":false}")
+echo "$r" | grep -q '"moved":\["' || fail "fixture: the flat move failed: $r"
+stop_daemon
+rm -rf "$STATE"; mkdir -p "$STATE"
+mv "$SHARE/sv/clean/.duplicate-finder-moved" "$SHARE/sv/clean/.held-aside"
+FREESPACE=1000 start_daemon "$WORK/daemon3.log"
+scan '["duplicates"]'
+mv "$SHARE/sv/clean/.held-aside" "$SHARE/sv/clean/.duplicate-finder-moved"
+r=$(api POST /api/scan "{\"tool\":\"duplicates\",\"tools\":[\"duplicates\"],\"dirs\":[\"$SHARE\"],\"recurse\":true,\"match\":{}}")
+echo "$r" | grep -q '"started":true' || fail "scan refused: $r"
+for _ in $(seq 1 400); do api GET /api/state | grep -qi 'hash' && break; sleep 0.025; done
+api POST /api/cancel '{}' >/dev/null
+wait_idle
+[ "$(api GET /api/state | field lastEnd.completed)" = "False" ] || fail "fixture: the scan finished before the Stop landed"
+stop_daemon
+FREESPACE=1000 start_daemon "$WORK/daemon3.log"
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/sv/o.dat\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")
+echo "$r" | grep -q 'already moved' || fail "what a stopped scan recovered was forgotten, and the original may follow its moved copy: $r"
+[ -f "$SHARE/sv/o.dat" ] || fail "the original moved despite the refusal"
+rm -rf "$SHARE/sv"
+pass "protection a scan recovers from a folder record survives the scan being stopped and a restart"
+
 echo "== SIGTERM"
 kill -TERM "$DPID"
 for i in $(seq 1 20); do kill -0 "$DPID" 2>/dev/null || break; sleep 0.25; done
