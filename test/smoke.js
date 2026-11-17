@@ -192,6 +192,12 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   check('capacities rendered through DSM CapacityRender',
     /\d+(\.\d)? (MB|GB|TB) of \d+(\.\d)? (MB|GB|TB) used/.test(volHtml));
   check('default scope populated from shares', win.state.dirs.length >= 1);
+  check('the default scope is saved, so a shared folder created later cannot join it unseen', (() => {
+    try {
+      const p = JSON.parse(window.localStorage.getItem('duplicateFinder.native'));
+      return !!p && JSON.stringify(p.dirs) === JSON.stringify(win.state.dirs);
+    } catch (e) { return false; }
+  })());
   check('idle card active before scan', win.centerPanel.getLayout().activeItem === win.idlePanel);
 
   // progress dialog structure (driven directly so it doesn't race the scan):
@@ -1498,6 +1504,99 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     fsm.existsSync(dlgDest + '/Duplicates' + dir3 + '/' + name3));
   check('the toast names the folder that was created', /Duplicates/.test(msg2 || ''));
 
+  // ---- moving out of a synced folder asks first ---------------------------
+  // A folder another service keeps in step elsewhere (Cloud Sync here): the
+  // daemon asks DSM, and the dev mock answers from DUPFINDER_DEV_SYNCED. The
+  // first request is answered with the folder and moves nothing, the app
+  // asks, Cancel moves nothing, and Move Anyway sends the same move again
+  // with syncOK.
+  {
+    const syncedConf = process.env.DUPFINDER_DEV_SYNCED;
+    check('the harness says where the synced-folder list lives', !!syncedConf);
+    const lb = win.__loads;
+    win.reloadPage();
+    for (let i = 0; i < 100 && win.__loads === lb; i++) await sleep(100);
+    for (let i = 0; i < 40 && !win.store.getCount(); i++) await sleep(200);
+    const recS = win.store.getAt(4);
+    const nameS = recS.get('name'), dirS = recS.get('path');
+    const srcS = dirS + '/' + nameS;
+    const shareDir = dirS.slice(volRoot.length); // share space, e.g. /Backups/A
+    fsm.writeFileSync(syncedConf, JSON.stringify({ cloudsync: [shareDir] }));
+    const selectS = () => {
+      win.sm.clearSelections();
+      const idx = win.store.findBy((r) => r.get('path') === dirS && r.get('name') === nameS);
+      if (idx >= 0) win.sm.selectRow(idx, true);
+      return idx;
+    };
+    const syncAsked = async () => {
+      for (let i = 0; i < 50; i++) {
+        if (win._syncWin && !win._syncWin.isDestroyed && win._syncWin.isVisible()) return true;
+        await sleep(100);
+      }
+      return false;
+    };
+    const pickTo = async () => {
+      win.openMoveDialog();
+      await sleep(200);
+      clickBtn(/^Choose Folder/);
+      await sleep(200);
+      window.__lastChooser.fireEvent('choose', window.__lastChooser, { path: '/spare/moved-ui2' });
+    };
+    const bodies = [];
+    window.Ext.Ajax.request = function (o) {
+      if (/\/move(\?|$)/.test(o.url || '')) bodies.push(o.jsonData);
+      return oa2.apply(this, arguments);
+    };
+    check('the row in the synced folder is on the page', selectS() >= 0);
+    msg2 = null;
+    await pickTo();
+    const asked = await syncAsked();
+    const txt = doc.body.textContent;
+    check('a move out of a synced folder asks first', asked && /Move Out of Synced Folders/.test(txt));
+    check('the question names the folder and the service',
+      txt.indexOf(shareDir) >= 0 && /Cloud Sync/.test(txt));
+    check('the question is owned by the app window', !!win._syncWin && win._syncWin.owner === win);
+    check('the first request did not claim permission', bodies.length === 1 && bodies[0].syncOK === false);
+    check('nothing moved while the question is open', fsm.existsSync(srcS));
+    clickBtn(/^Cancel$/);
+    await sleep(400);
+    check('Cancel moves nothing and says so',
+      fsm.existsSync(srcS) && bodies.length === 1 && /Nothing was moved/.test(msg2 || ''));
+    check('the row is still selectable after Cancel', selectS() >= 0);
+    msg2 = null;
+    await pickTo();
+    check('the question comes back for a second try', await syncAsked());
+    clickBtn(/^Move Anyway$/);
+    for (let i = 0; i < 50 && !/Moved 1 file/.test(msg2 || ''); i++) await sleep(200);
+    check('Move Anyway sends the same move with syncOK',
+      bodies.length === 3 && bodies[2].syncOK === true &&
+      JSON.stringify(bodies[2].files) === JSON.stringify(bodies[1].files) &&
+      bodies[2].dest === bodies[1].dest);
+    check('and the file moved (' + JSON.stringify(msg2) + ')', !fsm.existsSync(srcS));
+
+    // A service that is installed but does not answer cannot be ruled out:
+    // the app asks all the same, and says which service it could not check.
+    fsm.writeFileSync(syncedConf, JSON.stringify({ broken: ['cloudsync'] }));
+    await sleep(600);
+    for (let i = 0; i < 40 && !win.store.getCount(); i++) await sleep(200);
+    const recU = win.store.getAt(0);
+    const srcU = recU.get('path') + '/' + recU.get('name');
+    win.sm.clearSelections();
+    win.sm.selectRow(0, true);
+    const sent = bodies.length;
+    msg2 = null;
+    await pickTo();
+    check('a service that did not answer still asks', await syncAsked());
+    check('and the question says which one could not be checked',
+      /could not check Cloud Sync/.test(doc.body.textContent));
+    clickBtn(/^Cancel$/);
+    await sleep(400);
+    check('Cancel after an unchecked service moves nothing',
+      fsm.existsSync(srcU) && bodies.length === sent + 1 && /Nothing was moved/.test(msg2 || ''));
+    window.Ext.Ajax.request = oa2;
+    fsm.unlinkSync(syncedConf);
+  }
+
   // ---- external (USB-shaped) share as destination ------------------------
   // The fixture's second volume reproduces a real USB disk's defining trap:
   // the share NAME ("usbshare1") differs from the directory it lives in
@@ -2087,6 +2186,14 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     fs.existsSync(pres3 + '/Empty Files (1)' + vol + '/spare/pres3.bin'));
   check('the two batches did not merge',
     fs.readdirSync(pres3).sort().join('|') === 'Empty Files|Empty Files (1)');
+  // What a move landed is not offered again: a rescan whose scope takes in
+  // the destination lists none of the files sitting in its batch folders,
+  // and still lists the empty files nothing moved.
+  await api('/scan', { tool: 'empty_files', dirs: [vol + '/spare', pres3], refDirs: [], recurse: true, match: {} });
+  for (let i = 0; i < 40; i++) { st = await api('/state'); if (!st.running) break; await sleep(250); }
+  const efAgain = await api('/results?tool=empty_files');
+  check('a rescan does not offer the empty files a move already put away',
+    efAgain.files.length > 0 && !efAgain.files.some((f) => (f.path + '/').startsWith(pres3 + '/')));
 
   // Lazy allocation: a request whose every file is refused must leave no
   // empty folder behind (pres.bin was never surfaced by a scan).

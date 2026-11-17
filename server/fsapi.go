@@ -781,7 +781,9 @@ func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, 
 	if err != nil {
 		return "", err
 	}
-	if !taken {
+	// A name the destination may store differently goes through staging, so
+	// the name it lands under is read back rather than assumed (mayBeRenamed).
+	if !taken && !mayBeRenamed(base) {
 		if err := s.track.ahead(outShare + "/" + base); err != nil {
 			return "", err
 		}
@@ -849,14 +851,27 @@ func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, 
 		// member by member, or a transient code on a task that in fact
 		// finished. Deleting on that evidence would be permanent data loss,
 		// so the folder is removed only when the entry is CONFIRMED absent
-		// from it; anything less certain parks, visibly and by path.
-		if there, _, serr := s.statShare(tmpShare + "/" + base); serr != nil || there {
-			return "", parkedError{tmpShare: tmpShare, name: base, cause: err}
+		// from it — under any name, since the destination may have renamed
+		// it; anything less certain parks, visibly and by path.
+		if name, there, serr := s.stagedName(tmpShare, base); serr != nil || there {
+			if name == "" {
+				name = base
+			}
+			return "", parkedError{tmpShare: tmpShare, name: name, cause: err}
 		}
 		s.removeEmptyFolder(tmpShare)
 		return "", err
 	}
-	return s.claimFromStaging(tmpShare, base, outShare, want)
+	name := base
+	if mayBeRenamed(base) {
+		var there bool
+		if name, there, err = s.stagedName(tmpShare, base); err != nil {
+			return "", parkedError{tmpShare: tmpShare, name: base, cause: err}
+		} else if !there {
+			return "", parkedError{tmpShare: tmpShare, name: base, cause: errors.New("nothing arrived in the staging folder, though File Station reported the move finished")}
+		}
+	}
+	return s.claimFromStaging(tmpShare, name, outShare, want)
 }
 
 // claimFromStaging is a staged move's final hop: the entry named base waits
@@ -1095,6 +1110,65 @@ func (s *fsSession) folderHoldsOnlyJunk(folderShare string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// mayBeRenamed reports whether a destination's file system may be unable to
+// store name as it is. File Station then gives the copy another name and
+// says nothing: measured on DSM 7.4.1 copying onto an exFAT USB disk,
+// "what?.bin" arrives as "what-.bin" and "a:b.bin" as "a-b.bin", with the
+// task reported finished and no error. These are the characters FAT, exFAT
+// and NTFS refuse, plus the trailing dot or space Windows file systems drop.
+// A name like this always travels through a fresh staging folder, where the
+// one entry the folder holds is the copy, whatever it ended up called.
+func mayBeRenamed(name string) bool {
+	for _, r := range name {
+		if r < 0x20 || strings.ContainsRune(`"*:<>?\|`, r) {
+			return true
+		}
+	}
+	return strings.HasSuffix(name, ".") || strings.HasSuffix(name, " ")
+}
+
+// stagedName is the name the entry File Station put into the fresh staging
+// folder tmpShare has there: base when the name was kept, otherwise the
+// folder's only entry. The folder is new, hidden and this request's alone,
+// so whatever it holds is the entry. ok is false when it holds nothing. An
+// error — the folder cannot be listed, or holds more than one entry — means
+// the caller cannot tell, and must treat the folder as possibly holding the
+// only copy.
+func (s *fsSession) stagedName(tmpShare, base string) (name string, ok bool, err error) {
+	there, _, err := s.statShare(tmpShare + "/" + base)
+	if err != nil {
+		return "", false, err
+	}
+	if there {
+		return base, true, nil
+	}
+	var data struct {
+		Files []struct {
+			Name string `json:"name"`
+		} `json:"files"`
+	}
+	if err := s.call("SYNO.FileStation.List", "list", url.Values{
+		"folder_path": {jsonQuote(tmpShare)},
+		"offset":      {"0"},
+		"limit":       {"10"},
+	}, &data); err != nil {
+		return "", false, err
+	}
+	var names []string
+	for _, f := range data.Files {
+		if f.Name != "@eaDir" { // DSM's thumbnail cache, made on its own
+			names = append(names, f.Name)
+		}
+	}
+	switch len(names) {
+	case 0:
+		return "", false, nil
+	case 1:
+		return names[0], true, nil
+	}
+	return "", false, fmt.Errorf("the staging folder %s holds %d entries", tmpShare, len(names))
 }
 
 // firstFreeName returns base if the destination folder does not hold it,

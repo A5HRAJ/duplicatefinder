@@ -62,6 +62,10 @@ type moveVerifyFake struct {
 	afterCopy func(dest string)
 	// deleted records every path a Delete removed, share-space.
 	deleted []string
+	// storeAs, when set, is the name a copy or move lands under: a
+	// destination that cannot store every name, as File Station does onto
+	// an exFAT disk ("what?.bin" arrives as "what-.bin"), silently.
+	storeAs func(name string) string
 }
 
 type fakeTask struct {
@@ -129,6 +133,19 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 				fakeEnv(w, 0, map[string]any{"shares": []map[string]any{
 					{"name": "Backups", "additional": map[string]any{"real_path": f.root}},
 				}})
+			case "list":
+				var dir string
+				json.Unmarshal([]byte(r.FormValue("folder_path")), &dir)
+				ents, err := os.ReadDir(f.real(dir))
+				if err != nil {
+					fakeEnv(w, 408, nil)
+					return
+				}
+				files := []map[string]any{}
+				for _, e := range ents {
+					files = append(files, map[string]any{"name": e.Name(), "isdir": e.IsDir(), "path": dir + "/" + e.Name()})
+				}
+				fakeEnv(w, 0, map[string]any{"files": files, "total": len(files), "offset": 0})
 			case "getinfo":
 				if len(f.pending) > 0 && f.landAfterInfo > 0 {
 					if f.landAfterInfo--; f.landAfterInfo == 0 {
@@ -209,7 +226,11 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 					destDir = dd[0]
 				}
 				for _, sp := range srcs {
-					dst := f.real(destDir + "/" + filepath.Base(sp))
+					name := filepath.Base(sp)
+					if f.storeAs != nil {
+						name = f.storeAs(name)
+					}
+					dst := f.real(destDir + "/" + name)
 					if r.FormValue("remove_src") == "false" {
 						f.copies++
 						if err := copyTree(f.real(sp), dst); err != nil {

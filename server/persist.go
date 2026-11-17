@@ -17,6 +17,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"syscall"
 	"time"
@@ -117,6 +118,35 @@ func (s *Server) stateDir() string {
 		return s.varDir
 	}
 	return devStateDir()
+}
+
+// staleTempRe matches the temporary siblings writeAtomic and the token
+// writer create: "<name>.tmp-<digits>" (os.CreateTemp's pattern).
+var staleTempRe = regexp.MustCompile(`\.tmp-[0-9]+$`)
+
+// removeStaleTemps clears the temporary files an earlier run of the daemon
+// was stopped in the middle of writing. writeAtomic removes its own on every
+// path it gets to finish, but a stop ends the process with a scan's
+// hash-cache save still running — a scan in flight is left to die on purpose,
+// which is what makes it resumable — and the half-written file stayed, one
+// more for every interrupted scan. On a large NAS each is the size of the
+// hash cache. Called once the daemon holds its port, so no other instance can
+// be writing one.
+func removeStaleTemps(dir string) {
+	if dir == "" {
+		return
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		if e.Type().IsRegular() && staleTempRe.MatchString(e.Name()) {
+			if os.Remove(filepath.Join(dir, e.Name())) == nil {
+				log.Printf("removed %s, left half-written by an earlier run", e.Name())
+			}
+		}
+	}
 }
 
 // writeAtomic writes path through a temporary sibling that is synced to disk

@@ -13,10 +13,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -1007,5 +1009,27 @@ func TestScanAdmissionNeverWaitsOnMoveMu(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("scan admission blocked while moveMu was held — /api/scan would hang for the length of a move")
+	}
+}
+
+// A destination the package user may not open is a missing grant, and the
+// refusal says how to give it; anything else is still "not a folder".
+func TestDestinationWithoutAccessSaysHowToGrantIt(t *testing.T) {
+	if m := destOpenError(fs.ErrPermission); !strings.Contains(m, "Permissions → System internal user") || strings.Contains(m, "not a folder") {
+		t.Errorf("a refused open must name the grant: %q", m)
+	}
+	if m := destOpenError(fs.ErrNotExist); m != "destination is not a folder" {
+		t.Errorf("a missing folder is not a permissions problem: %q", m)
+	}
+	// On Linux, where the daemon runs, an unreadable folder really does
+	// fail to open with a permission error.
+	if runtime.GOOS == "linux" && os.Geteuid() != 0 {
+		d := filepath.Join(t.TempDir(), "locked")
+		os.Mkdir(d, 0o000)
+		t.Cleanup(func() { os.Chmod(d, 0o755) })
+		_, err := dirhandle.Open(d)
+		if err == nil || !strings.Contains(destOpenError(err), "Permissions") {
+			t.Errorf("opening a folder without access gave %v", err)
+		}
 	}
 }

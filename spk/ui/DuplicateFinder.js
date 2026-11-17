@@ -1787,6 +1787,12 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					Ext.each((v0.shares || []).slice(0, 6), function (s) {
 						if (s && s.path) me.state.dirs.push(s.path);
 					});
+					// Saved at once: the scope on screen is the scope, and it
+					// changes only when the user changes it. Left unsaved, a
+					// shared folder created later joined it the next time the
+					// app opened, unseen — and an interrupted scan could then
+					// never be resumed, its settings having "changed".
+					me.savePrefs();
 				}
 				me.renderVolumes();
 				me.syncScopeList(); // the default scope was filled in just above
@@ -3636,7 +3642,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		// stays clickable while the folder chooser is up — see the capture
 		// there. It only ever labels the folder the daemon creates; the move's
 		// vetting is unaffected by it.
-		doMove: function (recs, dest, preserve, tool, verify) {
+		doMove: function (recs, dest, preserve, tool, verify, syncOK) {
 			var me = this;
 			var paths = [];
 			Ext.each(recs, function (r) { paths.push(r.get('path') + '/' + r.get('name')); });
@@ -3666,7 +3672,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// verify defaults ON when the caller does not say otherwise — the
 			// dialog always says, so this covers programmatic callers, and the
 			// default lands on the safe side.
-			api('/move', 'POST', { files: paths, dest: dest, preserve: preserve, tool: tool, verify: verify !== false, id: id }, function (err, j, meta) {
+			api('/move', 'POST', { files: paths, dest: dest, preserve: preserve, tool: tool, verify: verify !== false, id: id, syncOK: syncOK === true }, function (err, j, meta) {
 				if (err && meta && meta.transport) {
 					// The connection died — DSM's web server gave up on the
 					// request long before the 12-hour timeout here — while the
@@ -3682,6 +3688,15 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				follow.stop();
 				me._moveInFlight = false;
 				busy.close();
+				// Some of the files are in folders another service keeps in
+				// step elsewhere, and nothing has moved: ask, and send the
+				// same move again only on the user's say-so.
+				if (err && j && j.synced && j.synced.length && syncOK !== true) {
+					me.confirmSyncedMove(j.synced, paths.length, function () {
+						me.doMove(recs, dest, preserve, tool, verify, true);
+					});
+					return;
+				}
 				if (err) {
 					me.notify(err);
 					return;
@@ -3817,6 +3832,55 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					'<div style="padding-top:8px;">' + rows.join('') + '</div>',
 				buttons: [new UxButton({ btnStyle: 'blue', text: 'OK', handler: function () { win.close(); } })]
 			});
+			win.show();
+		},
+
+		// Asks before moving files out of folders that Cloud Sync, Synology
+		// Drive or a Hybrid Share keeps in step elsewhere: the service removes
+		// them from the cloud, the computers and the other NASes too. Cancel
+		// is the default and moves nothing.
+		confirmSyncedMove: function (hits, total, onMove) {
+			var me = this, rows = [], unchecked = [];
+			Ext.each(hits, function (h) {
+				if (h.unchecked) {
+					unchecked.push(esc(h.by));
+					return;
+				}
+				rows.push('<div style="padding:4px 0;border-bottom:1px solid rgba(128,128,128,0.25);">' +
+					'<div style="word-break:break-all;">' + esc(h.folder) + '</div>' +
+					'<div style="color:' + FONT2 + ';">' + esc(h.by) + ' · ' + h.files + ' of the ' +
+					total + ' selected ' + (total === 1 ? 'item' : 'items') + '</div></div>');
+			});
+			var html = '';
+			if (rows.length) {
+				html += 'These folders are kept in step with copies elsewhere — a cloud account, ' +
+					'other computers or another NAS. Moving files out of them removes the files ' +
+					'from those places too.' +
+					'<div style="padding-top:8px;">' + rows.join('') + '</div>';
+			}
+			if (unchecked.length) {
+				html += (html ? '<div style="padding-top:10px;">' : '<div>') +
+					'Duplicate Finder could not check ' + unchecked.join(' or ') +
+					', so some of these files may be in a folder it keeps in step elsewhere.</div>';
+			}
+			var win = new UxModal({
+				owner: me,
+				title: 'Move Out of Synced Folders?',
+				width: 480,
+				autoHeight: true,
+				modal: false,
+				cls: 'df-app',
+				bodyStyle: 'padding:14px;font-size:' + FSMALL + ';',
+				html: html,
+				buttons: [
+					new UxButton({ text: 'Move Anyway', handler: function () { win.close(); onMove(); } }),
+					new UxButton({ btnStyle: 'blue', text: 'Cancel', handler: function () {
+						win.close();
+						me.notify('Nothing was moved.');
+					} })
+				]
+			});
+			me._syncWin = win;
 			win.show();
 		},
 

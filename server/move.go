@@ -9,6 +9,7 @@ import (
 	"dupfinder/internal/dirhandle"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -41,6 +42,10 @@ type MoveReq struct {
 	// ID names the request so its report can be fetched after its own
 	// answer is lost (movereport.go). Chosen by the app; optional.
 	ID string `json:"id"`
+	// SyncOK says the user has agreed to move files out of folders another
+	// service keeps in step elsewhere (synced.go). Without it such a move is
+	// answered 409 with the folders listed under "synced", and nothing moves.
+	SyncOK bool `json:"syncOK"`
 }
 
 func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
@@ -120,6 +125,22 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	if need := v.crossVolumeNeed(req.Files, destCanon); need > 0 {
 		if free, known := sess.volumeFree(destCanon); known && need > free {
 			writeErr(w, 400, fmt.Sprintf("the destination volume has %s free, and moving these files onto it needs %s — free some space, or choose a destination on the same volume as the files", fmtBytes(free), fmtBytes(need)))
+			return
+		}
+	}
+
+	// A file moved out of a folder that Cloud Sync, Synology Drive or a
+	// Hybrid Share keeps in step elsewhere disappears from those other
+	// places too — the user's cloud account, their laptop, another NAS. That
+	// is the user's call, so it is asked before anything is created, and the
+	// app sends the move again with syncOK once they have agreed.
+	if !req.SyncOK {
+		canon := make([]string, 0, len(req.Files))
+		for _, f := range req.Files {
+			canon = append(canon, v.canon.path(filepath.Clean(f)))
+		}
+		if hits := moveSyncHits(sess, canon, destCanon); len(hits) > 0 {
+			writeJSON(w, 409, map[string]any{"error": syncHitsMessage(hits), "synced": hits})
 			return
 		}
 	}
@@ -1051,7 +1072,11 @@ func verifyMoved(destFS, preHash string, note func(string)) error {
 	}
 	h, herr := verifyRead(destFS)
 	if herr != nil {
-		return movedButError{"moved, but the copy could not be read back to verify it — grant the package user read access to the destination share, or compare the copies yourself before deleting anything"}
+		why := "moved, but the copy could not be read back to verify it (" + herr.Error() + ") — compare the copies yourself before deleting anything"
+		if errors.Is(herr, fs.ErrPermission) {
+			why = "moved, but the copy could not be read back to verify it — grant the package user read access to the destination share, or compare the copies yourself before deleting anything"
+		}
+		return movedButError{why}
 	}
 	if h != preHash {
 		return movedButError{"moved, but the copy at the destination does not match the original content — the data may have been damaged in transit; check it before deleting any other copy"}

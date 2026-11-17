@@ -1,7 +1,8 @@
 # Beta testing
 
-Duplicate Finder has been exercised on one machine: a DS916+ (x86_64) running
-DSM 7.4 on a btrfs volume. The ARM builds have only run under emulation.
+Duplicate Finder has been exercised on two machines: a DS916+ (x86_64)
+running DSM 7.4 on a btrfs volume, and a DS124 (armv8) running DSM 7.4.1 on
+an ext4 volume. The armv7 build has only run under emulation.
 Before the package is offered to everyone through SynoCommunity it needs to
 be tried where the maintainer cannot try it, and this page says how.
 
@@ -24,11 +25,11 @@ enough to move it to the left.
 
 | Area | Covered | Not yet covered |
 | --- | --- | --- |
-| Architecture | x86_64 | armv8 (DS218, DS220j, DS418...), armv7 (DS216j, DS416slim...) on real hardware |
+| Architecture | x86_64, armv8 (DS124) | armv7 (DS216j, DS416slim...) on real hardware |
 | DSM version | 7.4 | 7.0, 7.1, 7.2, 7.3 |
-| Volume filesystem | btrfs | ext4, and moves between a btrfs and an ext4 volume |
-| Volumes | one | two or more volumes, with scan scope and destination on different volumes |
-| External disks | none | a USB or eSATA disk as scan scope and as move destination (ext4, exFAT, NTFS) |
+| Volume filesystem | btrfs, ext4 | moves between a btrfs and an ext4 volume |
+| Volumes | one internal volume plus a USB disk, with scan scope and destination on either | two or more internal volumes |
+| External disks | a USB disk as scan scope and as move destination, ext4 and exFAT | NTFS, an eSATA disk |
 | Scale | tens of thousands of files | a volume with over a million files, or over ten million duplicate candidates |
 | Accounts | one administrator | a second administrator using the app at the same time; DSM with CSRF protection turned off |
 | Locale | English DSM | a DSM set to another language (the app's own text is English; DSM's widgets are not) |
@@ -93,5 +94,5 @@ you do not want public.
 - Created dates come from File Station and are blank where it has none.
 - The emulated ARM test suite once showed an intermittent failure while
   moving a junk-only folder; it did not reproduce in 18 consecutive runs
-  afterwards. A junk-only folder move that fails on real ARM hardware is
-  exactly the report to send.
+  afterwards, nor on a real DS124. A junk-only folder move that fails on
+  other ARM hardware is exactly the report to send.

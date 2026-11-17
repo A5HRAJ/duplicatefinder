@@ -490,7 +490,10 @@ func (s *Server) dupWindow(files []fEnt, match MatchOpts, cache *hashCache, canc
 	// IDs and the per-file EXIF read cost real work, and only the groups that
 	// survive the stored-results cap are ever worth it.
 	for key, g := range byHash {
-		if len(g) < 2 {
+		// Two names are not two copies when they are hard links to one file:
+		// moving either frees nothing, so a group whose names all share one
+		// inode has nothing to offer and is not a duplicate.
+		if len(g) < 2 || physicalCopies(g) < 2 {
 			continue
 		}
 		sort.Slice(g, func(i, j int) bool { return g[i].path < g[j].path })

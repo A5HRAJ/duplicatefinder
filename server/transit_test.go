@@ -9,6 +9,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -278,5 +279,123 @@ func TestTransitNameClashLandsBesideTheExistingFile(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(at); !bytes.Equal(got, body) {
 		t.Fatal("the copy is not intact")
+	}
+}
+
+// exfatName is what File Station made of a name on the DS124's exFAT USB
+// disk (DSM 7.4.1): every character exFAT refuses became "-".
+func exfatName(name string) string {
+	return strings.Map(func(r rune) rune {
+		if strings.ContainsRune(`"*:<>?\|`, r) {
+			return '-'
+		}
+		return r
+	}, name)
+}
+
+// A destination that cannot store the name as it is gets the copy under the
+// name File Station chose. The verified move still completes, the original
+// goes only once that copy has been read back, and the landing path names
+// the file that is really there — not the name it was asked to have.
+func TestTransitFollowsANameTheDestinationChanged(t *testing.T) {
+	forceTransit(t)
+	f, sess := newMoveVerifyFake(t)
+	f.storeAs = exfatName
+	os.Mkdir(filepath.Join(f.root, "dest"), 0o755)
+	p, want, body := mkMoveFile(t, f, "what?.bin")
+	at, err := execMoveFSAt(sess, p, p, "/Backups/dest", filepath.Join(f.root, "dest"),
+		[]entIdent{want}, nil, true, nil)
+	if err != nil {
+		t.Fatalf("the move failed: %v", err)
+	}
+	if at != filepath.Join(f.root, "dest", "what-.bin") {
+		t.Fatalf("landing path %q, want the name File Station gave it", at)
+	}
+	if got, rerr := os.ReadFile(at); rerr != nil || !bytes.Equal(got, body) {
+		t.Fatalf("the copy is not intact: %v", rerr)
+	}
+	if _, serr := os.Stat(p); !os.IsNotExist(serr) {
+		t.Fatal("the original must go once its copy is verified")
+	}
+	if l := leftovers(t, f.root); len(l) != 0 {
+		t.Fatalf("staging entries left behind: %v", l)
+	}
+	// A clash is judged on the name it will really have.
+	p2, want2, _ := mkMoveFile(t, f, "what:.bin")
+	at2, err := execMoveFSAt(sess, p2, p2, "/Backups/dest", filepath.Join(f.root, "dest"),
+		[]entIdent{want2}, nil, true, nil)
+	if err != nil || filepath.Base(at2) != "what- (1).bin" {
+		t.Fatalf("second file landed as %q (%v), want beside the first", at2, err)
+	}
+	if got, _ := os.ReadFile(at); !bytes.Equal(got, body) {
+		t.Fatal("the first copy was overwritten")
+	}
+}
+
+// The same without verification: the move records where the file really
+// landed, so a copy this app moved is never mistaken for an original under
+// a name nobody looks at.
+func TestUnverifiedMoveFollowsANameTheDestinationChanged(t *testing.T) {
+	forceTransit(t)
+	f, sess := newMoveVerifyFake(t)
+	f.storeAs = exfatName
+	os.Mkdir(filepath.Join(f.root, "dest"), 0o755)
+	p, want, body := mkMoveFile(t, f, "a:b.bin")
+	at, err := execMoveFSAt(sess, p, p, "/Backups/dest", filepath.Join(f.root, "dest"),
+		[]entIdent{want}, nil, false, nil)
+	if err != nil {
+		t.Fatalf("the move failed: %v", err)
+	}
+	if at != filepath.Join(f.root, "dest", "a-b.bin") {
+		t.Fatalf("landing path %q, want the name File Station gave it", at)
+	}
+	if got, rerr := os.ReadFile(at); rerr != nil || !bytes.Equal(got, body) {
+		t.Fatalf("the moved file is not there: %v", rerr)
+	}
+	if l := leftovers(t, f.root); len(l) != 0 {
+		t.Fatalf("staging entries left behind: %v", l)
+	}
+}
+
+// A folder whose contents the destination renames is not "damaged in
+// transit": the copy is discarded, the original stays, and the reason says
+// what really happened.
+func TestTransitFolderWithNamesTheDestinationChangesSaysSo(t *testing.T) {
+	forceTransit(t)
+	f, sess := newMoveVerifyFake(t)
+	f.storeAs = exfatName
+	os.Mkdir(filepath.Join(f.root, "dest"), 0o755)
+	d, want := mkJunkFolder(t, f, "junk")
+	os.WriteFile(filepath.Join(d, "odd?.tmp"), []byte("tmp"), 0o644)
+	old := time.Now().Add(-time.Hour)
+	os.Chtimes(d, old, old)
+	fi, _ := os.Stat(d)
+	want.mod, want.modUnix = fmtTime(fi.ModTime()), fi.ModTime().Unix()
+	// copyTree keeps inner names; rename the inner entry the way the
+	// destination would, once the copy lands.
+	f.afterCopy = func(dst string) {
+		os.Rename(filepath.Join(dst, "odd?.tmp"), filepath.Join(dst, "odd-.tmp"))
+	}
+	_, err := execMoveFSAt(sess, d, d, "/Backups/dest", filepath.Join(f.root, "dest"),
+		[]entIdent{want}, nil, true, nil)
+	if err == nil || !strings.Contains(err.Error(), "cannot store every name") || strings.Contains(err.Error(), "damaged") {
+		t.Fatalf("want the renaming named as the reason, got %v", err)
+	}
+	if _, serr := os.Stat(filepath.Join(d, "odd?.tmp")); serr != nil {
+		t.Fatal("the original folder must be untouched")
+	}
+	if l := leftovers(t, f.root); len(l) != 0 {
+		t.Fatalf("staging entries left behind: %v", l)
+	}
+}
+
+// A copy that cannot be read back for a reason other than access does not
+// send the user to the share's permissions.
+func TestReadBackFailureBlamesAccessOnlyWhenItIsAccess(t *testing.T) {
+	if m := readBackFailure(fs.ErrPermission); !strings.Contains(m, "grant the package user") {
+		t.Errorf("a refused read must point at permissions: %q", m)
+	}
+	if m := readBackFailure(fs.ErrNotExist); strings.Contains(m, "grant") {
+		t.Errorf("a missing file must not point at permissions: %q", m)
 	}
 }

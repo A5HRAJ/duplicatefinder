@@ -245,10 +245,18 @@ func mockWebAPI(w http.ResponseWriter, r *http.Request) {
 	switch api {
 	case "SYNO.API.Info":
 		out := map[string]any{}
+		_, haveSynced := mockSynced()
 		for _, q := range strings.Split(r.FormValue("query"), ",") {
+			// The sync services exist only when the harness declares some:
+			// otherwise this NAS has none installed, like the DS916+.
+			if mockSyncAPI(q) && !haveSynced {
+				continue
+			}
 			out[q] = map[string]int{"minVersion": 1, "maxVersion": 3}
 		}
 		mockEnv(w, 0, out)
+	case "SYNO.Core.Share", "SYNO.CloudSync", "SYNO.SynologyDrive.Share", "SYNO.SynologyDrive.TeamFolders":
+		mockSyncService(w, api, method, r)
 	case "SYNO.FileStation.CopyMove":
 		switch method {
 		case "start":
@@ -441,6 +449,98 @@ func mockWebAPI(w http.ResponseWriter, r *http.Request) {
 		mockEnv(w, 0, nil)
 	default:
 		mockEnv(w, 102, nil)
+	}
+}
+
+// DUPFINDER_DEV_SYNCED names a JSON file declaring the folders the sync
+// services keep in step, read on every request so a test can change it
+// while the daemon runs:
+//
+//	{"hybrid": ["Share"], "sharesync": ["Share"], "drive": ["Share"],
+//	 "cloudsync": ["/Share/sub"], "broken": ["cloudsync"]}
+//
+// "broken" makes that service answer every list with an error.
+type mockSyncedConf struct {
+	Hybrid    []string `json:"hybrid"`
+	ShareSync []string `json:"sharesync"`
+	Drive     []string `json:"drive"`
+	CloudSync []string `json:"cloudsync"`
+	Broken    []string `json:"broken"`
+}
+
+func mockSynced() (mockSyncedConf, bool) {
+	var c mockSyncedConf
+	p := os.Getenv("DUPFINDER_DEV_SYNCED")
+	if p == "" {
+		return c, false
+	}
+	b, err := os.ReadFile(p)
+	if err != nil || json.Unmarshal(b, &c) != nil {
+		return c, false
+	}
+	return c, true
+}
+
+func mockSyncAPI(api string) bool {
+	switch api {
+	case "SYNO.Core.Share", "SYNO.CloudSync", "SYNO.SynologyDrive.Share", "SYNO.SynologyDrive.TeamFolders":
+		return true
+	}
+	return false
+}
+
+func mockSyncService(w http.ResponseWriter, api, method string, r *http.Request) {
+	c, ok := mockSynced()
+	if !ok {
+		mockEnv(w, 102, nil)
+		return
+	}
+	broken := func(name string) bool {
+		for _, b := range c.Broken {
+			if b == name {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case api == "SYNO.Core.Share" && method == "list":
+		if broken("share") {
+			mockEnv(w, 400, nil)
+			return
+		}
+		var shares []map[string]any
+		for _, n := range c.Hybrid {
+			shares = append(shares, map[string]any{"name": n, "is_c2_share": true, "is_sync_share": false})
+		}
+		for _, n := range c.ShareSync {
+			shares = append(shares, map[string]any{"name": n, "is_c2_share": false, "is_sync_share": true})
+		}
+		mockEnv(w, 0, map[string]any{"shares": shares, "total": len(shares)})
+	case api == "SYNO.CloudSync" && broken("cloudsync"):
+		mockEnv(w, 400, nil)
+	case api == "SYNO.CloudSync" && method == "list_conn":
+		conn := []map[string]any{}
+		if len(c.CloudSync) > 0 {
+			conn = append(conn, map[string]any{"id": 1})
+		}
+		mockEnv(w, 0, map[string]any{"conn": conn, "total": len(conn)})
+	case api == "SYNO.CloudSync" && method == "list_sess":
+		sess := []map[string]any{}
+		for _, p := range c.CloudSync {
+			sess = append(sess, map[string]any{"local_sync_path": p})
+		}
+		mockEnv(w, 0, map[string]any{"sess": sess})
+	case strings.HasPrefix(api, "SYNO.SynologyDrive.") && broken("drive"):
+		mockEnv(w, 400, nil)
+	case strings.HasPrefix(api, "SYNO.SynologyDrive.") && method == "list":
+		items := []map[string]any{}
+		for _, n := range c.Drive {
+			items = append(items, map[string]any{"share_name": n, "share_enable": true})
+		}
+		mockEnv(w, 0, map[string]any{"items": items, "total": len(items)})
+	default:
+		mockEnv(w, 103, nil)
 	}
 }
 

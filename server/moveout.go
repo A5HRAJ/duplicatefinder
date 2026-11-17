@@ -209,3 +209,16 @@ func markGroupOut(groups []Group, m moveOutSet, roots []RootMap) {
 		groups[i].Files = files
 	}
 }
+
+// dropMovedRows removes the rows that are entries a move landed: a folder a
+// flat move put among the destination's own entries would otherwise be
+// listed as empty again by the next scan that takes the destination in.
+func dropMovedRows(files []FileEnt, m moveOutSet, roots []RootMap) []FileEnt {
+	out := files[:0]
+	for _, f := range files {
+		if !rowIsOut(m, roots, f.Dir, f.Name) {
+			out = append(out, f)
+		}
+	}
+	return out
+}

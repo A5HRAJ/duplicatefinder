@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 // crossesFS reports whether moving an entry out of the folder srcDir into the
@@ -161,6 +162,39 @@ func hiddenName(prefix string) (string, error) {
 	return prefix + hex.EncodeToString(buf), nil
 }
 
+// readBackFailure says why a copy at the destination could not be read
+// back. Only a refused read is a matter of access, and only then is the
+// user sent to the share's permissions.
+func readBackFailure(err error) string {
+	if errors.Is(err, fs.ErrPermission) {
+		return "the copy at the destination could not be read back to verify it — grant the package user read access to the destination share"
+	}
+	return "the copy at the destination could not be read back to verify it (" + err.Error() + ")"
+}
+
+// renamedInside names an entry of a copied folder that arrived under another
+// name because the destination could not store it as it was, "" when the
+// copy differs for any other reason. Only names mayBeRenamed flags count, and
+// only when the copy holds an entry the original does not: a rename, not a
+// loss.
+func renamedInside(orig, cp manifest) string {
+	extra := false
+	for name := range cp {
+		if _, ok := orig[name]; !ok {
+			extra = true
+		}
+	}
+	if !extra {
+		return ""
+	}
+	for name := range orig {
+		if _, ok := cp[name]; !ok && mayBeRenamed(name) {
+			return name
+		}
+	}
+	return ""
+}
+
 // untouched is the ending of every failure before the original was touched:
 // whatever went wrong, the original is exactly where it was.
 func untouched(why string) error {
@@ -209,19 +243,32 @@ func transitViaFS(s *fsSession, cp, srcShare, outShare, outFS string, want entId
 		return "", s.discardCopy(tmpShare, srcShare, want, untouched("File Station could not copy it to the destination ("+err.Error()+")"))
 	}
 	say(" — verifying the copy")
+	// The destination may have stored it under another name (mayBeRenamed).
+	// The staging folder is this request's alone, so when the name it was
+	// sent under is not there, its one entry is the copy.
+	if _, lerr := os.Lstat(filepath.Join(tmpFS, base)); lerr != nil {
+		got, there, serr := s.stagedName(tmpShare, base)
+		if serr != nil || !there {
+			return "", s.discardCopy(tmpShare, srcShare, want, untouched("File Station reported the copy finished, but it could not be found at the destination"))
+		}
+		base = got
+	}
 	staged := filepath.Join(tmpFS, base)
 	if ref.isDir {
 		got, merr := takeManifest(staged, true)
 		if merr != nil {
-			return "", s.discardCopy(tmpShare, srcShare, want, untouched("the copy at the destination could not be read back to verify it"))
+			return "", s.discardCopy(tmpShare, srcShare, want, untouched(readBackFailure(merr)))
 		}
 		if !copyMatches(ref.man, got) {
+			if n := renamedInside(ref.man, got); n != "" {
+				return "", s.discardCopy(tmpShare, srcShare, want, untouched("the destination cannot store every name inside this folder as it is (File Station renamed "+strconv.Quote(n)+"), so the copy was discarded"))
+			}
 			return "", s.discardCopy(tmpShare, srcShare, want, untouched("the copy at the destination does not match the original — the data was damaged in transit"))
 		}
 	} else {
 		h, herr := verifyRead(staged)
 		if herr != nil {
-			return "", s.discardCopy(tmpShare, srcShare, want, untouched("the copy at the destination could not be read back to verify it — grant the package user read access to the destination share"))
+			return "", s.discardCopy(tmpShare, srcShare, want, untouched(readBackFailure(herr)))
 		}
 		if h != ref.hash {
 			return "", s.discardCopy(tmpShare, srcShare, want, untouched("the copy at the destination does not match the original — the data was damaged in transit"))

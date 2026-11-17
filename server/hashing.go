@@ -101,6 +101,12 @@ func hashOnce(open func() (*os.File, error), limit int64, cancel chan struct{}) 
 		return "", err
 	}
 	defer f.Close()
+	if limit <= 0 {
+		// A full read is the bulk of a scan's I/O and is not read again
+		// soon: keep it from evicting everything else (dropCached). Prefix
+		// reads are small, and the full read that may follow starts there.
+		defer dropCached(f)
+	}
 	h := blake3.New(32, nil)
 	var r io.Reader = f
 	if limit > 0 {

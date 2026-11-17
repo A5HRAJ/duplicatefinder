@@ -317,6 +317,15 @@ symlink-resolved paths so an alias cannot slip past a prefix test:
    string surgery (external shares mount under a directory that differs from
    their name). A destination inside a reference folder is refused: nothing
    leaves a reference folder and nothing is moved into one.
+   Before anything is created, DSM is asked which folders a sync service
+   keeps in step elsewhere (Hybrid Share and ShareSync flags on the shared
+   folders, Cloud Sync's tasks, Synology Drive's team folders). Those
+   folders are located on the volumes through the share table and compared
+   with the files' canonical paths. A request that would take files out of
+   one, or move a folder holding one, is answered 409 with the folders
+   under `synced` and moves nothing; the app asks the user and repeats the
+   request with `syncOK`. A service that is installed but cannot be read is
+   reported the same way, since none of the files can be ruled out.
 4. Every requested path must be in the allowlist built from every stored
    result, and the identity File Station reports for it now (type, size,
    modified time as an epoch value) must match what some scan recorded. For

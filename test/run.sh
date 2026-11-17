@@ -43,11 +43,15 @@ cp harness.html ext/ext-base.js ext/ext-all.js "$UIDIR/"
 # (results, hash cache, scan marker) is exercised without arming the token.
 STATE="$WORK/state"
 mkdir -p "$STATE"
+# DUPFINDER_DEV_SYNCED: where the mock's sync services read the folders they
+# keep in step (dev.go). Absent until the smoke suite writes it, so the NAS
+# starts with no sync service installed.
+SYNCED="$WORK/synced.json"
 # start_daemon <logfile>: the one launcher for every (re)start below, so no
 # launch can skip the readiness wait.
 start_daemon() {
 	DUPFINDER_ROOTS="$V:$WORK/volumeUSB1" DUPFINDER_UI="$UIDIR" DUPFINDER_DSM_URL="http://127.0.0.1:$PORT" \
-		DUPFINDER_STATE="$STATE" \
+		DUPFINDER_STATE="$STATE" DUPFINDER_DEV_SYNCED="$SYNCED" \
 		"$WORK/dupfinder-dev" -mode daemon -port "$PORT" > "$1" 2>&1 &
 	DPID=$!
 	disown
@@ -56,7 +60,7 @@ start_daemon() {
 start_daemon "$WORK/daemon.log"
 
 echo "== smoke suite"
-DUPFINDER_TEST_PORT="$PORT" node smoke.js
+DUPFINDER_TEST_PORT="$PORT" DUPFINDER_DEV_SYNCED="$SYNCED" node smoke.js
 
 echo "== persistence across restart"
 # The smoke suite left results behind; a restarted daemon must still serve

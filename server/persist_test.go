@@ -674,3 +674,28 @@ func TestLoadStateDropsTempRowsNoLongerJunk(t *testing.T) {
 		t.Fatalf("want only Thumbs.db left, got %+v", tf)
 	}
 }
+
+// A write the daemon was stopped in the middle of leaves its temporary file;
+// the next start clears those, and nothing else.
+func TestStaleTempFilesAreClearedAtStart(t *testing.T) {
+	d := t.TempDir()
+	stale := []string{"hashcache.bin.tmp-3254280108", "results.json.gz.tmp-1", ".authtoken.tmp-42"}
+	keep := []string{"hashcache.bin", "results.json.gz", "notes.tmp-draft", "moves.journal"}
+	for _, n := range append(append([]string{}, stale...), keep...) {
+		if err := os.WriteFile(filepath.Join(d, n), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.Mkdir(filepath.Join(d, "folder.tmp-7"), 0o700) // only files are ours to clear
+	removeStaleTemps(d)
+	for _, n := range stale {
+		if _, err := os.Stat(filepath.Join(d, n)); !os.IsNotExist(err) {
+			t.Errorf("%s was left behind", n)
+		}
+	}
+	for _, n := range append(keep, "folder.tmp-7") {
+		if _, err := os.Stat(filepath.Join(d, n)); err != nil {
+			t.Errorf("%s was removed: %v", n, err)
+		}
+	}
+}

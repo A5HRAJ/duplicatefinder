@@ -8,6 +8,7 @@ import (
 	"dupfinder/internal/dirhandle"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 )
 
@@ -498,6 +499,22 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
+// destOpenError is the refusal for a destination the daemon cannot open.
+// Refused access means the package user has no grant on that shared folder:
+// the folder chooser lists it because the signed-in administrator can see
+// it, and calling it "not a folder" sent users looking for the wrong fault.
+func destOpenError(err error) string {
+	if errors.Is(err, fs.ErrPermission) {
+		who := "the package's user"
+		if u := serviceUser(); u != "" {
+			who = "the \"" + u + "\" user"
+		}
+		return "Duplicate Finder cannot open this folder — give " + who +
+			" read/write access to its shared folder under Control Panel → Shared Folder → Edit → Permissions → System internal user"
+	}
+	return "destination is not a folder"
+}
+
 // vetDestination pins and vets a move or export destination and returns the
 // pinned handle (the caller closes it), its canonical and share-space paths
 // and the caller's session. One implementation for both handlers, so the
@@ -513,7 +530,7 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 func (s *Server) vetDestination(w http.ResponseWriter, r *http.Request, dest string) (destH *dirhandle.Handle, destCanon, destShare string, sess *fsSession, ok bool) {
 	destH, err := dirhandle.Open(dest)
 	if err != nil {
-		writeErr(w, 400, "destination is not a folder")
+		writeErr(w, 400, destOpenError(err))
 		return nil, "", "", nil, false
 	}
 	fail := func(code int, msg string) (*dirhandle.Handle, string, string, *fsSession, bool) {

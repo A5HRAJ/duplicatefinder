@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -200,4 +201,27 @@ func firstKey(m map[string]bool) string {
 		return k
 	}
 	return ""
+}
+
+// Entries a move landed are not offered again by the flat tools: neither
+// what sits in a batch folder, nor what a flat move put straight into a
+// folder, nor anything inside such an entry. Everything else stays.
+func TestDropMovedRowsKeepsOnlyWhatNoMoveLanded(t *testing.T) {
+	m := moveOutSet{}.with([]string{"/volume1/Pick/empty-a", "/volume1/Pick/junk"})
+	rows := []FileEnt{
+		{Dir: "/volume1/Pick", Name: "empty-a"},                                         // flat-moved folder
+		{Dir: "/volume1/Pick/junk", Name: "inner"},                                      // inside a flat-moved folder
+		{Dir: "/volume1/Pick/Empty Folders/volume1/Photos", Name: "old"},                // batch folder
+		{Dir: "/volume1/Pick", Name: "mine"},                                            // the user's own, beside them
+		{Dir: "/volume1/Photos", Name: "still-empty"},                                   // never moved
+		{Dir: "/volume1/Pick/Empty Folders", Name: "not-a-batch-layout-without-volume"}, // a name match alone is not a batch folder
+	}
+	got := dropMovedRows(rows, m, nil)
+	var names []string
+	for _, f := range got {
+		names = append(names, f.Name)
+	}
+	if strings.Join(names, ",") != "mine,still-empty,not-a-batch-layout-without-volume" {
+		t.Fatalf("kept %v", names)
+	}
 }

@@ -259,6 +259,12 @@ func runDaemon(port int, varDir string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// The port is ours, so no other instance is writing: clear what an
+	// earlier run was stopped in the middle of writing.
+	removeStaleTemps(varDir)
+	if sd := s.stateDir(); sd != varDir {
+		removeStaleTemps(sd)
+	}
 	if varDir != "" {
 		tok, err := loadOrCreateToken(filepath.Join(varDir, authTokenFile))
 		if err != nil {

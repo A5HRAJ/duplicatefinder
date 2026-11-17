@@ -367,6 +367,14 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 	if ef != nil {
 		unreadable = ef.noteUnreadable
 	}
+	// What earlier moves put somewhere: a destination inside the scope is
+	// walked like any other folder, and the files a move landed there are not
+	// offered again by the flat tools — they are already in a folder whose
+	// fate is the user's to decide. Moves are refused while a scan runs, so
+	// the set cannot change under the walk.
+	s.mu.Lock()
+	moved := s.moveOut
+	s.mu.Unlock()
 	walkErrs, hs, rootOf := s.walkStream(safeRoots, req.Recurse, ef != nil, cancel, func(idx int, f fEnt) {
 		if ef != nil {
 			ef.visit(idx, f)
@@ -374,9 +382,18 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 		if f.isDir {
 			return
 		}
+		out := -1 // unknown until a flat tool wants the file
 		for t, top := range tops {
 			if flatKeep[t](&f) {
-				top.add(f)
+				if out < 0 {
+					out = 0
+					if rowIsOut(moved, base.Roots, f.dir, f.name) {
+						out = 1
+					}
+				}
+				if out == 0 {
+					top.add(f)
+				}
 			}
 		}
 		if sp != nil && f.size > 0 {
@@ -426,6 +443,7 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 			return // finish stopped part-way: the list is not the answer
 		}
 		res.Errors = append(res.Errors, confirmErrs...)
+		res.Files = dropMovedRows(res.Files, moved, base.Roots)
 		publish(res)
 	}
 

@@ -116,6 +116,12 @@ from a direct call to the daemon:
   them all, and the survivor stays protected until the next duplicates scan.
   Files inside reference folders are never moved, and nothing is moved into
   a reference folder either.
+- Moving a file out of a folder that Cloud Sync, Synology Drive, a Hybrid
+  Share or ShareSync keeps in step with other places removes it from those
+  places too. The app asks DSM which folders are synced before every move,
+  and when the move would take files out of one it names the folders and
+  services and moves nothing unless you choose Move Anyway. A sync service
+  it could not check is treated the same way.
 - The move itself is executed by File Station with your own DSM account, so
   it behaves exactly like a move made in File Station: permissions, metadata
   and the real creation date carry over, and moves within a btrfs volume use
@@ -181,9 +187,10 @@ names it, not only the app.
 
 | Environment | Status |
 | --- | --- |
-| DS916+ (x86_64), DSM 7.4, btrfs volume | the development NAS; every release is installed and exercised here |
-| armv8 and armv7 builds | headless test suite under emulation only; no real ARM hardware yet |
-| ext4 volumes, several volumes, DSM 7.0 to 7.3 | not yet tested |
+| DS916+ (x86_64), DSM 7.4, btrfs volume, ext4 USB disk | the development NAS; every release is installed and exercised here |
+| DS124 (armv8), DSM 7.4.1, ext4 volume, exFAT USB disk | the whole [beta checklist](docs/beta-testing.md) walked on 1.1.10 in November 2026, hard links and moves to and from the USB disk included |
+| armv7 builds | headless test suite under emulation only; no real hardware yet |
+| several internal volumes, NTFS disks, DSM 7.0 to 7.3 | not yet tested |
 
 If you run Duplicate Finder on anything in the last two rows, an issue
 reporting how it went, good or bad, is welcome; the
