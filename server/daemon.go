@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -418,6 +419,18 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			subtle.ConstantTimeCompare([]byte(r.Header.Get(authTokenHeader)), []byte(s.authToken)) != 1 {
 			writeErr(w, http.StatusUnauthorized, "missing or invalid daemon token")
 			return
+		}
+		// Anything that changes state must arrive as JSON, as the app sends
+		// it. A page on another origin can make the browser send a form or
+		// text/plain POST carrying the administrator's DSM cookie with no
+		// preflight; JSON it cannot send without the server's consent. With
+		// DSM's own CSRF protection turned off, the gateway accepts a
+		// cookie-only request, and this is then what turns such a page away.
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+				writeErr(w, http.StatusUnsupportedMediaType, "requests that change anything must be sent as JSON")
+				return
+			}
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 		next.ServeHTTP(w, r)

@@ -6,6 +6,8 @@ package main
 
 import (
 	"encoding/binary"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,5 +129,38 @@ func TestIdentMatchesUsesEpochWhenRecorded(t *testing.T) {
 	}
 	if _, ok := identMatches(e, []entIdent{{size: 11, modUnix: 1700000000}}); ok {
 		t.Fatal("a different size must not match")
+	}
+}
+
+// A request that changes anything must be sent as JSON. A page on another
+// origin can make a browser send a "simple" POST (text/plain, a form) with
+// the administrator's cookie and no preflight; it cannot send JSON without
+// the server's consent. With DSM's own CSRF protection turned off, this is
+// what stops such a page from starting a scan or a move, or clearing the
+// reference folders.
+func TestStateChangesMustBeJSON(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	h := (&Server{}).withAuth(ok)
+	for _, tc := range []struct {
+		method, ctype string
+		want          int
+	}{
+		{"POST", "text/plain", 415},
+		{"POST", "application/x-www-form-urlencoded", 415},
+		{"POST", "multipart/form-data; boundary=x", 415},
+		{"POST", "", 415},
+		{"POST", "application/json", 200},
+		{"POST", "application/json; charset=UTF-8", 200},
+		{"GET", "", 200},
+	} {
+		r := httptest.NewRequest(tc.method, "/api/refs", strings.NewReader(`{"refDirs":[]}`))
+		if tc.ctype != "" {
+			r.Header.Set("Content-Type", tc.ctype)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != tc.want {
+			t.Errorf("%s with %q: want %d, got %d", tc.method, tc.ctype, tc.want, w.Code)
+		}
 	}
 }

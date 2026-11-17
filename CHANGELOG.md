@@ -53,6 +53,11 @@ package versions shown in Package Center.
   bin or a snapshot, from when such a folder could be scanned directly, and
   that copy could count as the one that stays. It never does now, even
   before the next scan.
+- With DSM's own protection against cross-site requests turned off (it is
+  on by default), a web page on another site could make an administrator's
+  browser start a scan or a move, or clear the reference folders. The app
+  now accepts such requests only in the form it sends them itself, which a
+  browser will not send to another site without its consent.
 
 ## [1.1.12] - 2026-11-17
 

@@ -80,6 +80,7 @@ would take away the only copy of something.
 | C12 | Never run a scan and a move at once | ✅ | `TestScanRefusedWhileMoveActive`, `TestBeginMoveRefusesAScanThatStartedAfterThePrecheck` |
 | C13 | Never run two moves at once | ✅ | Audit "a move cut short by a stop": while a move runs, the daemon refuses a second one at once and moves nothing; smoke for the window |
 | C14 | Never let a file or folder name run as code in the administrator's DSM page — a script there could move or delete anything | ✅ | smoke "tooltips are TEXT": evidence, status and scope-list tooltips decode to text, never markup (the scope list's did not until 2026-11-17) |
+| C15 | Never let a page on another site act with the administrator's DSM session, even with DSM's own cross-site protection turned off | ✅ | `TestStateChangesMustBeJSON`: the daemon accepts a request that changes anything only as JSON, which a browser will not send to another site without its consent (any content type was accepted until 2026-11-17) |
 
 ## D. Where files land
 
@@ -155,9 +156,9 @@ would take away the only copy of something.
 
 | | Count |
 |---|---|
-| ✅ Proven | 65 |
+| ✅ Proven | 66 |
 | 🟡 Partly proven | 9 |
 | ❌ Protected but unproven, or not yet protected | 0 |
 | ❓ Undecided | 0 |
 | Decided against | 1 (I2) |
-| **Total** | **75** |
+| **Total** | **76** |
