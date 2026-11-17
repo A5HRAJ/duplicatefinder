@@ -29,6 +29,10 @@ package versions shown in Package Center.
   second, such as a download still being written, was deleted, and only
   the older copy survived at the destination. The check is now to the
   nanosecond, and such a file is kept beside its copy.
+- A real file saved into an empty folder in the moment between the app's
+  last emptiness check and its copying of the folder to another disk was
+  copied along and left with the folder. What is copied is now checked
+  against the same rule, and the folder stays.
 
 ## [1.1.12] - 2026-11-17
 

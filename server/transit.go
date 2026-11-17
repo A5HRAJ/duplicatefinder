@@ -15,6 +15,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 )
@@ -148,6 +149,31 @@ func readManifestDir(dir, rel string, hashed bool, m manifest) ([]string, error)
 			return nil, rerr
 		}
 	}
+}
+
+// manifestHoldsOnlyJunk holds a folder's manifest to the empty-folder rule
+// that offered it (innerDir and isTempName, as dirHoldsOnlyJunk applies
+// them): every folder inside an ordinary one, every other entry a junk FILE.
+// The move-time check ran a moment earlier; a real file arriving in between
+// would otherwise be hashed into the manifest, copied, verified, and leave
+// with the folder.
+func manifestHoldsOnlyJunk(m manifest) bool {
+	for key, e := range m {
+		name := path.Base(key)
+		switch {
+		case e.typ.IsDir():
+			if _, reject := innerDir(name); reject {
+				return false
+			}
+		case e.typ.IsRegular():
+			if !isTempName(name) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // copyMatches reports whether a copy's manifest reproduces the original's:

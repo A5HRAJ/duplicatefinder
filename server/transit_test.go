@@ -548,3 +548,30 @@ func TestTransitKeepsAFolderWhoseFileWasRewrittenInTheSameSecond(t *testing.T) {
 		t.Fatal("the newer version of the folder's file was lost")
 	}
 }
+
+// A real file that arrives inside an "empty" folder after the move-time
+// emptiness check, but before the folder's contents are read for the copy,
+// must not ride along: the contents read for the copy are held to the same
+// rule. It lands in a subfolder, so the folder's own identity still matches.
+func TestTransitRefusesAFolderThatGainedARealFileBeforeItsCopy(t *testing.T) {
+	forceTransit(t)
+	f, sess := newMoveVerifyFake(t)
+	os.Mkdir(filepath.Join(f.root, "dest"), 0o755)
+	d := filepath.Join(f.root, "archive")
+	os.MkdirAll(filepath.Join(d, "sub"), 0o755)
+	os.WriteFile(filepath.Join(d, "film.part"), []byte("junk"), 0o644)
+	fi, _ := os.Stat(d)
+	want := entIdent{isDir: true, mod: fmtTime(fi.ModTime()), modUnix: fi.ModTime().Unix()}
+	late := filepath.Join(d, "sub", "report.pdf")
+	os.WriteFile(late, []byte("a real file, arrived late"), 0o644)
+	_, err := execMoveFSAt(sess, d, d, "/Backups/dest", filepath.Join(f.root, "dest"), []entIdent{want}, nil, true, nil)
+	if err == nil || !strings.Contains(err.Error(), "no longer empty") {
+		t.Fatalf("a folder that gained a real file must be refused, got %v", err)
+	}
+	if _, serr := os.Stat(late); serr != nil {
+		t.Fatal("the real file left its folder")
+	}
+	if ents, _ := os.ReadDir(filepath.Join(f.root, "dest")); len(ents) != 0 {
+		t.Fatalf("something reached the destination: %v", ents)
+	}
+}

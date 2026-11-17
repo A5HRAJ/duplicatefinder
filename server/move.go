@@ -968,6 +968,9 @@ func execMoveFSAt(sess *fsSession, src, cp, destShare, destCanon string, wants [
 		if merr != nil {
 			return "", errors.New("could not read what the folder holds to verify it (" + merr.Error() + ") — nothing was moved")
 		}
+		if !manifestHoldsOnlyJunk(man) {
+			return "", errors.New("the folder is no longer empty — rescan and try again")
+		}
 		ref = transitRef{isDir: true, man: man}
 	}
 	outShare := destShare
