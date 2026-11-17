@@ -67,7 +67,11 @@ This is what CI runs on every push, pull request and release tag
 order: `gofmt`; `go vet` for the host and for linux/amd64, linux/arm64 and
 linux/arm, in release and dev builds; `staticcheck` (pinned to the last
 release that supports the module's Go version) for the same targets; the unit
-tests under the race detector; and the headless suite below.
+tests under the race detector; the headless suite below; `test/audit.sh`, the
+real dev daemon against what a filesystem and an interrupted move can hand it;
+and `test/gateway.sh`, the front door (`spk/ui/api.cgi`) run against
+stand-ins for DSM's sign-in module and group lookup, proving that only a
+signed-in administrator reaches the app.
 
 ### The headless suite
 

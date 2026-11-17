@@ -56,7 +56,9 @@ surprised you, even if it is not a failure.
    that the moved rows disappeared from the list.
 5. **Move, flat.** Repeat with *Move all files into same folder*, including
    two files with the same name, and confirm the second got a ` (1)` suffix
-   rather than replacing the first.
+   rather than replacing the first. A hidden `.duplicate-finder-moved`
+   folder appears in the destination: it is the app's record of the files it
+   moved there, and should hold one small file per move.
 6. **Move across volumes or onto an external disk**, with verification on.
    This is the path that copies data, so it is the one that matters most on
    ext4 and USB.

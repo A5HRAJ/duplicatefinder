@@ -399,3 +399,97 @@ func TestReadBackFailureBlamesAccessOnlyWhenItIsAccess(t *testing.T) {
 		t.Errorf("a missing file must not point at permissions: %q", m)
 	}
 }
+
+// mkNestedJunkFolder is mkJunkFolder with folders inside: an empty one, and
+// one holding junk of its own. That is what an Empty Folders row now is
+// whenever the walk found only empty folders under the one it offers.
+func mkNestedJunkFolder(t *testing.T, f *moveVerifyFake, name string) (string, entIdent) {
+	t.Helper()
+	d, _ := mkJunkFolder(t, f, name)
+	os.MkdirAll(filepath.Join(d, "empty", "deeper"), 0o755)
+	os.MkdirAll(filepath.Join(d, "sub", "@eaDir"), 0o755)
+	os.WriteFile(filepath.Join(d, "sub", "y.tmp"), bytes.Repeat([]byte{9}, 3000), 0o644)
+	old := time.Now().Add(-time.Hour)
+	for _, p := range []string{filepath.Join(d, "empty", "deeper"), filepath.Join(d, "empty"), filepath.Join(d, "sub"), d} {
+		os.Chtimes(p, old, old)
+	}
+	fi, _ := os.Stat(d)
+	return d, entIdent{isDir: true, mod: fmtTime(fi.ModTime()), modUnix: fi.ModTime().Unix()}
+}
+
+// Across filesystems a folder of folders is copied whole, every file at
+// every depth checked, and only then is the original removed.
+func TestTransitFolderOfFoldersIsCheckedThenRemoved(t *testing.T) {
+	forceTransit(t)
+	f, sess := newMoveVerifyFake(t)
+	os.Mkdir(filepath.Join(f.root, "dest"), 0o755)
+	d, want := mkNestedJunkFolder(t, f, "junk")
+	at, err := execMoveFSAt(sess, d, d, "/Backups/dest", filepath.Join(f.root, "dest"),
+		[]entIdent{want}, nil, true, nil)
+	if err != nil {
+		t.Fatalf("verified transit of a folder holding folders failed: %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(at, "sub", "y.tmp")); len(got) != 3000 {
+		t.Fatal("the nested folder's junk did not arrive")
+	}
+	if fi, serr := os.Stat(filepath.Join(at, "empty", "deeper")); serr != nil || !fi.IsDir() {
+		t.Fatal("the nested empty folders did not arrive")
+	}
+	if _, serr := os.Stat(d); !os.IsNotExist(serr) {
+		t.Fatal("the original folder must be removed once its copy is verified")
+	}
+	if l := leftovers(t, f.root); len(l) != 0 {
+		t.Fatalf("hidden entries left behind: %v", l)
+	}
+}
+
+// A file damaged on its way, two folders down, keeps the original.
+func TestTransitDamagedFileInANestedFolderKeepsTheFolder(t *testing.T) {
+	forceTransit(t)
+	f, sess := newMoveVerifyFake(t)
+	os.Mkdir(filepath.Join(f.root, "dest"), 0o755)
+	d, want := mkNestedJunkFolder(t, f, "junk")
+	f.afterCopy = func(dest string) {
+		os.WriteFile(filepath.Join(dest, "sub", "y.tmp"), bytes.Repeat([]byte{8}, 3000), 0o644)
+	}
+	_, err := execMoveFSAt(sess, d, d, "/Backups/dest", filepath.Join(f.root, "dest"),
+		[]entIdent{want}, nil, true, nil)
+	if err == nil || !strings.Contains(err.Error(), "the original is untouched") {
+		t.Fatalf("a damaged file deep inside the copy must keep the folder, got %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(d, "sub", "y.tmp")); !bytes.Equal(got, bytes.Repeat([]byte{9}, 3000)) {
+		t.Fatal("the original's nested files must be untouched")
+	}
+	if ents, _ := os.ReadDir(filepath.Join(f.root, "dest")); len(ents) != 0 {
+		t.Fatalf("the damaged copy was left at the destination: %v", ents)
+	}
+}
+
+// A file that lands in a NESTED folder after the copy was taken would be
+// deleted with the original. It is not, even with every folder's own time
+// put back: the comparison before removal reaches every depth.
+func TestTransitNestedFolderThatGainedAFileIsKept(t *testing.T) {
+	forceTransit(t)
+	f, sess := newMoveVerifyFake(t)
+	os.Mkdir(filepath.Join(f.root, "dest"), 0o755)
+	d, want := mkNestedJunkFolder(t, f, "junk")
+	deeper := filepath.Join(d, "empty", "deeper")
+	fi, _ := os.Stat(deeper)
+	f.afterMove = func(string) {
+		os.WriteFile(filepath.Join(deeper, "late.txt"), []byte("arrived late"), 0o644)
+		os.Chtimes(deeper, fi.ModTime(), fi.ModTime())
+	}
+	_, err := execMoveFSAt(sess, d, d, "/Backups/dest", filepath.Join(f.root, "dest"),
+		[]entIdent{want}, nil, true, nil)
+	if err == nil || !strings.Contains(err.Error(), "both copies now exist") {
+		t.Fatalf("a folder whose nested folder gained a file must be kept, got %v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(deeper, "late.txt")); string(got) != "arrived late" {
+		t.Fatal("the late file must survive in the original folder")
+	}
+	for _, p := range f.deleted {
+		if strings.Contains(p, ".dupfinder-del-") {
+			t.Fatalf("the retired original was deleted despite the difference: %s", p)
+		}
+	}
+}

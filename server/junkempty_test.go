@@ -142,7 +142,7 @@ func TestFolderHoldsOnlyJunk(t *testing.T) {
 	}
 	for _, c := range cases {
 		sess, done := newJunkListFake(t, c.ents, 500)
-		got, err := sess.folderHoldsOnlyJunk("/share/x")
+		got, err := sess.folderHoldsOnlyJunk("/share/x", nil)
 		done()
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
@@ -162,17 +162,27 @@ func TestFolderHoldsOnlyJunkPagesThroughLargeListings(t *testing.T) {
 		many = append(many, junkEnt{"junk.tmp", false})
 	}
 	sess, done := newJunkListFake(t, many, 500)
-	got, err := sess.folderHoldsOnlyJunk("/share/big")
+	got, err := sess.folderHoldsOnlyJunk("/share/big", nil)
 	done()
 	if err != nil || !got {
 		t.Fatalf("all-junk multi-page listing: want true, got %v err %v", got, err)
 	}
 	many[1202] = junkEnt{"real.dat", false}
 	sess, done = newJunkListFake(t, many, 500)
-	got, err = sess.folderHoldsOnlyJunk("/share/big")
+	got, err = sess.folderHoldsOnlyJunk("/share/big", nil)
 	done()
 	if err != nil || got {
 		t.Fatalf("real file on the last page: want false, got %v err %v", got, err)
+	}
+	// A DSM that answers in pieces smaller than asked for: the next page
+	// must start after what arrived, or the real file in the gap is missed.
+	many[1202] = junkEnt{"junk.tmp", false}
+	many[300] = junkEnt{"real.dat", false}
+	sess, done = newJunkListFake(t, many, 200)
+	got, err = sess.folderHoldsOnlyJunk("/share/big", nil)
+	done()
+	if err != nil || got {
+		t.Fatalf("real file inside a listing answered in smaller pieces: want false, got %v err %v", got, err)
 	}
 }
 
@@ -338,5 +348,170 @@ func TestMoveRefusesATempRowNoLongerJunk(t *testing.T) {
 	v.allowed[canon.path(j)] = true
 	if err := v.refuse(canon.path(j)); err != nil {
 		t.Fatalf("real junk must pass the vetting, got %v", err)
+	}
+}
+
+// A folder whose only content is more folders — empty, or holding nothing
+// but junk — is empty. The walk offers only the topmost such folder, so the
+// confirmation has to look inside the folders it holds rather than refuse
+// them on sight: a refusal there lists neither the folder nor anything
+// inside it. What the walk never went into is still unknown
+// content at any depth — a hidden folder, a folder with a junk name, a
+// Synology @-folder other than @eaDir, the recycle bin — and so is a
+// symlink; any of them, or any real file, keeps the whole folder off the
+// list. Run against the real confirmEmpty and against each half alone,
+// which must agree.
+func TestConfirmEmptyLooksInsideFolders(t *testing.T) {
+	f, sess := newMoveVerifyFake(t)
+	elsewhere := t.TempDir()
+	cases := []struct {
+		name  string
+		build func(d string)
+		want  bool
+	}{
+		{"bare", func(d string) {}, true},
+		{"one empty folder", func(d string) { mkdirs(t, d, "inner") }, true},
+		{"a chain of empty folders", func(d string) { mkdirs(t, d, "a/b/c") }, true},
+		{"several empty folders beside junk", func(d string) {
+			mkdirs(t, d, "one", "two/three")
+			mkfile(t, filepath.Join(d, "x.tmp"), "junk")
+		}, true},
+		{"junk and @eaDir deep down", func(d string) {
+			mkfile(t, filepath.Join(d, "a/b/Thumbs.db"), "x")
+			mkfile(t, filepath.Join(d, "a/@eaDir/SYNOPHOTO_THUMB_S.jpg"), "t")
+		}, true},
+		{"a real file deep down", func(d string) { mkfile(t, filepath.Join(d, "a/b/keep.txt"), "real") }, false},
+		{"a hidden folder deep down", func(d string) { mkfile(t, filepath.Join(d, "a/.git/config"), "repo") }, false},
+		{"an empty hidden folder", func(d string) { mkdirs(t, d, "a/.hidden") }, false},
+		{"a junk-named hidden folder", func(d string) { mkfile(t, filepath.Join(d, "a/.DS_Store/precious.jpg"), "real") }, false},
+		{"an empty junk-named folder", func(d string) { mkdirs(t, d, "a/old.tmp") }, false},
+		{"the recycle bin", func(d string) { mkdirs(t, d, "a/#recycle") }, false},
+		{"a Synology folder other than @eaDir", func(d string) { mkdirs(t, d, "a/@tmp") }, false},
+		{"a FILE named @eaDir", func(d string) { mkfile(t, filepath.Join(d, "@eaDir"), "real") }, false},
+		{"a symlink to a folder", func(d string) {
+			mkdirs(t, d, "a")
+			if err := os.Symlink(elsewhere, filepath.Join(d, "a", "link")); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+	}
+	for i, c := range cases {
+		rel := "case" + strings.Repeat("x", i)
+		d := filepath.Join(f.root, rel)
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		c.build(d)
+		got, err := confirmEmpty(d, sess, nil)
+		if err != nil || got != c.want {
+			t.Errorf("%s: confirmEmpty = %v (err %v), want %v", c.name, got, err, c.want)
+		}
+		if got, err := dirHoldsOnlyJunk(d); err != nil || got != c.want {
+			t.Errorf("%s: the native half = %v (err %v), want %v", c.name, got, err, c.want)
+		}
+		if got, err := sess.folderHoldsOnlyJunk("/Backups/"+rel, nil); err != nil || got != c.want {
+			t.Errorf("%s: File Station's half = %v (err %v), want %v", c.name, got, err, c.want)
+		}
+	}
+}
+
+func mkdirs(t *testing.T, base string, rels ...string) {
+	t.Helper()
+	for _, r := range rels {
+		if err := os.MkdirAll(filepath.Join(base, r), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Looking inside folders is bounded, and the bound fails closed: a folder
+// holding more than the limit is reported as one that could not be checked
+// — an error, so the scan says so — never as empty. So does a folder deep
+// inside that cannot be read, and a Stop ends the File Station reading at
+// once.
+func TestConfirmEmptyIsBoundedAndFailsClosed(t *testing.T) {
+	f, sess := newMoveVerifyFake(t)
+	old := emptyCheckMax
+	emptyCheckMax = 5
+	t.Cleanup(func() { emptyCheckMax = old })
+
+	d := filepath.Join(f.root, "many")
+	mkdirs(t, d, "a/b/c", "d/e/f") // six folders: one past the limit
+	ok, err := confirmEmpty(d, sess, nil)
+	if ok || err == nil || !strings.Contains(err.Error(), "more than 5") {
+		t.Fatalf("a folder past the limit: want an error naming it, got %v %v", ok, err)
+	}
+	if ok, err := dirHoldsOnlyJunk(d); ok || err == nil {
+		t.Fatalf("the native half past the limit: want an error, got %v %v", ok, err)
+	}
+	if ok, err := sess.folderHoldsOnlyJunk("/Backups/many", nil); ok || err == nil {
+		t.Fatalf("File Station's half past the limit: want an error, got %v %v", ok, err)
+	}
+	emptyCheckMax = old
+
+	stop := make(chan struct{})
+	close(stop)
+	if ok, err := sess.folderHoldsOnlyJunk("/Backups/many", stop); ok || err == nil {
+		t.Fatalf("a stopped check must not answer empty, got %v %v", ok, err)
+	}
+
+	if os.Geteuid() == 0 {
+		return // root reads every folder; the unreadable case cannot be built
+	}
+	l := filepath.Join(f.root, "locked")
+	mkdirs(t, l, "a/vault")
+	os.Chmod(filepath.Join(l, "a", "vault"), 0o000)
+	t.Cleanup(func() { os.Chmod(filepath.Join(l, "a", "vault"), 0o755) })
+	if ok, err := confirmEmpty(l, sess, nil); ok || err == nil {
+		t.Fatalf("an unreadable folder deep inside must fail closed with an error, got %v %v", ok, err)
+	}
+	if ok, err := dirHoldsOnlyJunk(l); ok || err == nil {
+		t.Fatalf("the native half on an unreadable folder: want an error, got %v %v", ok, err)
+	}
+}
+
+// The confirmation refuses a folder holding a folder with a junk name, so the
+// walk has to count one as content for the folder around it. Otherwise that
+// folder is offered as the topmost candidate, refused, and the genuinely
+// empty folders beside it — the junk-named one included — are never offered.
+func TestJunkNamedFolderIsContentForItsParent(t *testing.T) {
+	offered, reported := driveEF(t, []fEnt{
+		efDir("/r/ef"),
+		efDir("/r/ef/a"),
+		efDir("/r/ef/cache.tmp"),
+	}, func(string) bool { return true })
+	want := []string{"/r/ef/a", "/r/ef/cache.tmp"}
+	if strings.Join(offered, " ") != strings.Join(want, " ") {
+		t.Fatalf("want %v offered, got %v", want, offered)
+	}
+	if strings.Join(reported, " ") != strings.Join(want, " ") {
+		t.Fatalf("want %v reported, got %v", want, reported)
+	}
+}
+
+// What the walk passes over without visiting is content for the folder
+// holding it exactly when the confirmation would refuse that folder: every
+// folder the walk does not enter except @eaDir, and every symlink, pipe,
+// socket or device whose name is not junk.
+func TestPassedOverIsContentMatchesTheConfirmation(t *testing.T) {
+	cases := []struct {
+		name  string
+		isDir bool
+		want  bool
+	}{
+		{"@eaDir", true, false},
+		{".git", true, true},
+		{".DS_Store", true, true},
+		{"@tmp", true, true},
+		{"#recycle", true, true},
+		{"#snapshot", true, true},
+		{"lost+found", true, true},
+		{"photos", false, true}, // a symlink, pipe or socket named like content
+		{"x.tmp", false, false}, // the same under a junk name: junk, as the confirmation reads it
+	}
+	for _, c := range cases {
+		if got := passedOverIsContent(c.name, c.isDir); got != c.want {
+			t.Errorf("%q (dir %v): got %v, want %v", c.name, c.isDir, got, c.want)
+		}
 	}
 }

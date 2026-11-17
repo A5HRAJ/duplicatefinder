@@ -72,7 +72,11 @@ Every scan root is opened as a pinned directory handle
 canonical path, so a root swapped for a symlink after validation is refused
 rather than followed. Enumeration goes through the handle; symlinks below a
 root are skipped; Synology system directories (`@eaDir`, `#recycle`,
-`#snapshot`) and hidden names are skipped. Overlapping or aliased roots are
+`#snapshot`) and hidden names are skipped. A scan root or reference folder
+inside the recycle bin or a snapshot is refused outright, both when it is
+chosen and when a stored scope is scanned again: their files disappear on
+their own, so a copy there must never be the copy that stays, nor be
+protected as a reference. Overlapping or aliased roots are
 de-overlapped by canonical path first, so no file is visited twice under two
 names. Content reads (hashing, EXIF) open files through the pinned root with
 `O_NOFOLLOW` on every path component (`openrel.go` in that package), which works on
@@ -345,7 +349,16 @@ symlink-resolved paths so an alias cannot slip past a prefix test:
    and each landed file's data (shared folder, inode, size, modified time),
    so a copy stays recognised after the user renames or reorganises the
    folder it was moved into, and is an original again once put back where it
-   came from. A path inside a network mount whose server is this NAS
+   came from. Because that record lives in the package's data folder, which
+   Package Center's Repair can erase and a move to a new NAS leaves behind, a
+   flat move also leaves a record in the folder the files landed in
+   (`server/movedmark.go`): a hidden `.duplicate-finder-moved` folder holding
+   one small JSON file per move — written through File Station Upload under a
+   fresh name, so nothing is ever overwritten — that lists each landed file's
+   name, size and modified time. A scan reads these as it enters each folder,
+   before the folder's files, and a file a record lists with that size and
+   time joins the app's own record. A preserve-mode move needs none: its
+   batch folder's layout identifies it. A path inside a network mount whose server is this NAS
    (`server/selfmount.go`, from `/proc/mounts` and the mount's `addr=`) is
    never a copy that stays, never moves, and is never a destination; scans
    skip such mounts and list them as issues.
@@ -372,7 +385,15 @@ a partial move rather than staged, which would split it across two names. A
 move that ends with the file parked in the staging folder reports the full
 path, and with verification on the parked copy is verified there. Failures
 that happen after the source is gone still prune the row, so it can never
-linger as a phantom survivor.
+linger as a phantom survivor. A refused move whose source file is still in
+place as the scan recorded it is never reported as parked: what reached the
+staging folder is then a copy, and one smaller than the file — cut short,
+most often by the destination filling up — is deleted (a single
+`recursive=false` delete of that file, then the empty folder); anything else
+is left and reported by path. When the destination name was free as the
+move began and is taken once File Station refuses it, the report says an
+incomplete copy may be there; that file is not deleted, since another writer
+may have taken the name.
 
 A verified move that leaves one filesystem for another — another volume, a
 USB disk, a remote folder mounted in a share, or another shared folder on

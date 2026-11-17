@@ -60,7 +60,10 @@ Files you select are **moved, never deleted**, into a folder you choose, and
   named after the tool that found them and mirroring each file's original
   folder path, or straight into the destination. A name clash never
   overwrites anything; the file gets a ` (n)` suffix instead. An optional
-  check reads every moved file back and compares it with the original.
+  check reads every moved file back and compares it with the original. A
+  move straight into a folder leaves a small hidden record there
+  (`.duplicate-finder-moved`), so the app still knows those files are copies
+  it moved even if its own records are lost.
 - **Export.** Any result list can be saved as a CSV report.
 - **Built for large volumes.** Scans stream, so memory does not grow with the
   size of the volume. Results are paged like a big folder in File Station,

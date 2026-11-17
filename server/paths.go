@@ -6,6 +6,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -100,7 +101,34 @@ func resolveAllowedRoot(p string) (string, error) {
 	if !isUnder(rp, volumeRootsResolved()) {
 		return "", errors.New("path outside allowed volumes: " + p)
 	}
+	if inSelfEmptying(p) || inSelfEmptying(rp) {
+		return "", fmt.Errorf("%w: %s", errSelfEmptying, p)
+	}
 	return rp, nil
+}
+
+// errSelfEmptying refuses a scan folder or reference folder inside the
+// recycle bin or a snapshot. The walk already skips both when it meets them
+// inside a folder; this closes the other way in — choosing one directly.
+var errSelfEmptying = errors.New("the recycle bin and snapshots are never scanned, because their files disappear on their own (when the bin is emptied, or a snapshot expires)")
+
+// selfEmptyingName names the folders whose contents DSM removes by itself:
+// the recycle bin (#recycle) and a shared folder's snapshots (#snapshot). A
+// copy in either must never be "the copy that stays" — it vanishes with the
+// next emptying — and a reference folder there would protect copies that are
+// about to go.
+func selfEmptyingName(name string) bool {
+	return name == "#recycle" || name == "#snapshot"
+}
+
+// inSelfEmptying reports whether any component of p is such a folder.
+func inSelfEmptying(p string) bool {
+	for _, seg := range strings.Split(filepath.Clean(p), "/") {
+		if selfEmptyingName(seg) {
+			return true
+		}
+	}
+	return false
 }
 
 // dirResolver canonicalizes paths by symlink-resolving their directory part,
@@ -156,7 +184,7 @@ func (r *dirResolver) strictPath(p string) (string, error) {
 // should never be scanned or offered in pickers.
 func skipName(name string) bool {
 	return strings.HasPrefix(name, "@") || strings.HasPrefix(name, ".") ||
-		name == "#recycle" || name == "#snapshot" || name == "lost+found"
+		selfEmptyingName(name) || name == "lost+found"
 }
 
 func uniquePaths(in []string) []string {

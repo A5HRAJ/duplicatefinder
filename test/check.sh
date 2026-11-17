@@ -13,6 +13,8 @@
 #   6. test/audit.sh  — the real daemon against what a filesystem can hand it:
 #                       named pipes and sockets, sparse files, names outside
 #                       UTF-8, Stop, a full destination volume, SIGTERM
+#   7. test/gateway.sh — the front door (spk/ui/api.cgi): only a signed-in
+#                       administrator reaches the app
 #
 # Requires: Go 1.20+, Node 18+, Python 3, and network on the first run
 # (staticcheck is fetched into the module cache; run.sh fetches ExtJS and
@@ -67,6 +69,9 @@ test/run.sh
 
 echo "== filesystem edge cases against the real daemon"
 test/audit.sh
+
+echo "== the front door"
+test/gateway.sh
 
 echo
 echo "ALL CHECKS PASSED"

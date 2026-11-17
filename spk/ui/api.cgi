@@ -9,8 +9,12 @@
 # only answers if the session's SynoToken is also supplied (the UI sends it
 # on every request via the query string or the X-Syno-Token header).
 
+# Both locations can be overridden from the environment so test/gateway.sh
+# can run this gate off the NAS; DSM's web server passes a CGI only its own
+# variables and HTTP_* headers, so a request cannot set either.
 MODULES="${DUPFINDER_MODULES:-/usr/syno/synoman/webman/modules}"
 AUTH="$MODULES/authenticate.cgi"
+PACKAGES="${DUPFINDER_PACKAGES:-/var/packages}"
 
 deny() {
 	printf 'Status: %s\r\nContent-Type: application/json\r\n\r\n{"error":"%s"}' "$1" "$2"
@@ -53,10 +57,10 @@ fi
 case "$PKG_ID" in
 	""|.|..|*[!A-Za-z0-9._-]*) PKG_ID="" ;;
 esac
-if [ -z "$PKG_ID" ] || [ ! -x "/var/packages/$PKG_ID/target/bin/dupfinder" ]; then
+if [ -z "$PKG_ID" ] || [ ! -x "$PACKAGES/$PKG_ID/target/bin/dupfinder" ]; then
 	deny "500 Internal Server Error" "Cannot locate the Duplicate Finder package"
 fi
-PKG_DEST="/var/packages/$PKG_ID/target"
+PKG_DEST="$PACKAGES/$PKG_ID/target"
 
 # --- recover the session's SynoToken -----------------------------------
 # The query-string value is URL-encoded; authenticate.cgi expects the raw
@@ -166,7 +170,7 @@ fi
 
 # Where the daemon keeps its shared auth token; the CGI proxy reads it and
 # attaches it to every request it forwards to the daemon.
-DUPFINDER_VAR="/var/packages/$PKG_ID/var"
+DUPFINDER_VAR="$PACKAGES/$PKG_ID/var"
 export DUPFINDER_VAR
 
 # One spk per architecture ships exactly one binary (see build.sh).

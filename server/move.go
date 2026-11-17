@@ -199,7 +199,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	defer func() { jr.finish(saved) }()
 
 	moved := []string{}
-	var movedCanon, movedDirs, allLanded []string
+	var movedCanon, movedDirs, allLanded, flatLanded []string
 	anyLanded, batchRecorded := false, false
 	errs := []map[string]string{}
 	for i, src := range req.Files {
@@ -242,6 +242,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			anyLanded = true
 			if batch == nil {
 				landed = append(landed, at)
+				flatLanded = append(flatLanded, at)
 			} else if !batchRecorded && batch.name != "" {
 				landed = append(landed, filepath.Join(destCanon, batch.name))
 				batchRecorded = true
@@ -331,6 +332,18 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A flat move also leaves its record in the folder the files landed in
+	// (movedmark.go): the app's own record can be lost entirely — Package
+	// Center's Repair, the files carried to a new NAS — and the copies moved
+	// here must still never count as the copy that stays.
+	recordErr := ""
+	if batch == nil && len(flatLanded) > 0 {
+		if err := leaveMovedMark(sess, destShare, destCanon, flatLanded); err != nil {
+			log.Printf("move record in %s: %v", req.Dest, err)
+			recordErr = errMovedMark(req.Dest, err)
+		}
+	}
+
 	// Record where this request put things (journaled file by file above),
 	// so the next duplicates scan's pairing of each moved copy with its
 	// original can never make the moved copy the one that stays
@@ -355,7 +368,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			saved = false
 		}
 	}
-	rep := &moveReport{ID: req.ID, Tool: req.Tool, Dest: req.Dest, Total: len(req.Files), Moved: moved, Errors: errs}
+	rep := &moveReport{ID: req.ID, Tool: req.Tool, Dest: req.Dest, Total: len(req.Files), Moved: moved, Errors: errs, RecordError: recordErr}
 	s.mu.Lock()
 	// The prune above could not be saved: the moved rows would be back after
 	// a restart, and the app tells the user so.
@@ -726,7 +739,7 @@ func (s *Server) moveOne(v *moveVet, batch func() (string, error), sess *fsSessi
 	// again, now, whether it still holds nothing but junk: content that
 	// arrived since the scan must not ride along into the cleanup folder.
 	if v.tool == "empty_folders" && isDirIdent(v.idents[cp]) {
-		empty, cerr := confirmEmpty(cp, sess)
+		empty, cerr := confirmEmpty(cp, sess, nil)
 		if cerr != nil {
 			return cp, "", false, errors.New("could not confirm the folder is still empty — " + cerr.Error())
 		}

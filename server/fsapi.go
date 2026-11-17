@@ -179,7 +179,14 @@ func (e *fsError) Error() string {
 	for _, n := range e.Nested {
 		code += "/" + strconv.Itoa(n)
 	}
-	return fmt.Sprintf("File Station %s failed (error %s)", strings.TrimPrefix(e.API, "SYNO.FileStation."), code)
+	api := strings.TrimPrefix(e.API, "SYNO.FileStation.")
+	switch {
+	case e.hasCode(416):
+		return fmt.Sprintf("File Station %s failed: there is no space left at the destination (error %s)", api, code)
+	case e.hasCode(415):
+		return fmt.Sprintf("File Station %s failed: the destination's disk quota is used up (error %s)", api, code)
+	}
+	return fmt.Sprintf("File Station %s failed (error %s)", api, code)
 }
 
 func (e *fsError) hasCode(codes ...int) bool {
@@ -603,13 +610,20 @@ func (s *fsSession) createFolder(parentShare, name string, forceParent bool) err
 // inside — one File Station reported moved but left behind, or one another
 // writer put there a moment ago — can never be deleted with it. A refusal
 // leaves the folder in place, visible. On a single FILE the same call
-// deletes the file (measured on DSM 7.4), which is how removeEntry uses it.
+// deletes the file (measured on DSM 7.4), which is how removeFile uses it.
 func (s *fsSession) removeEmptyFolder(pathShare string) error {
 	// The blocking variant: fine for a single empty folder or one file.
 	return s.call("SYNO.FileStation.Delete", "delete", url.Values{
 		"path":      {jsonArr(pathShare)},
 		"recursive": {"false"},
 	}, nil)
+}
+
+// removeFile deletes one file the package proved spare (cutShortCopy). The
+// call is recursive=false, so had a folder taken the name meanwhile, DSM
+// would refuse it unless it is empty.
+func (s *fsSession) removeFile(pathShare string) error {
+	return s.removeEmptyFolder(pathShare)
 }
 
 // removeTree deletes a share-space folder AND EVERYTHING IN IT. It exists
@@ -783,7 +797,8 @@ func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, 
 	}
 	// A name the destination may store differently goes through staging, so
 	// the name it lands under is read back rather than assumed (mayBeRenamed).
-	if !taken && !mayBeRenamed(base) {
+	direct := !taken && !mayBeRenamed(base)
+	if direct {
 		if err := s.track.ahead(outShare + "/" + base); err != nil {
 			return "", err
 		}
@@ -808,7 +823,7 @@ func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, 
 			return base, unsettledError{dest: outShare}
 		}
 		if !worthStaging(err) {
-			return "", err
+			return "", s.leftBehind(err, srcShare, outShare+"/"+base)
 		}
 		if !isCollision(err) {
 			// A generic failure code earns the staging retry only when the name
@@ -853,13 +868,28 @@ func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, 
 		// so the folder is removed only when the entry is CONFIRMED absent
 		// from it — under any name, since the destination may have renamed
 		// it; anything less certain parks, visibly and by path.
-		if name, there, serr := s.stagedName(tmpShare, base); serr != nil || there {
+		//
+		// The one exception is a FILE whose source is still in place exactly
+		// as the scan recorded it, after a coded answer: then what arrived is
+		// a copy, not the file — most often one cut short by the destination
+		// filling up — and reporting it "parked" would tell the user the file
+		// had left when it had not (cutShortCopy).
+		name, there, serr := s.stagedName(tmpShare, base)
+		if serr == nil && !there {
+			s.removeEmptyFolder(tmpShare)
+		} else if serr == nil && !want.isDir && !moveOutcomeUnknown(err) && s.sourceIntact(srcShare, want) {
+			err = s.cutShortCopy(err, tmpShare, name, want)
+		} else {
 			if name == "" {
 				name = base
 			}
 			return "", parkedError{tmpShare: tmpShare, name: name, cause: err}
 		}
-		s.removeEmptyFolder(tmpShare)
+		if direct {
+			// The direct attempt above failed first, and may have left
+			// something under the name it was aimed at.
+			err = s.leftBehind(err, srcShare, outShare+"/"+base)
+		}
 		return "", err
 	}
 	name := base
@@ -872,6 +902,56 @@ func moveViaFS(s *fsSession, srcShare, outShare string, want entIdent) (string, 
 		}
 	}
 	return s.claimFromStaging(tmpShare, name, outShare, want)
+}
+
+// sourceIntact reports whether the entry at srcShare is still there exactly
+// as the scan recorded it: its type, size and modified time.
+func (s *fsSession) sourceIntact(srcShare string, want entIdent) bool {
+	info, err := s.getInfo([]string{srcShare}, []string{"size", "time"})
+	if err != nil {
+		return false
+	}
+	e, ok := info[srcShare]
+	if !ok || !e.exists() {
+		return false
+	}
+	_, same := identMatches(e, []entIdent{want})
+	return same
+}
+
+// cutShortCopy settles a move into a staging folder that File Station
+// refused with a coded answer while the source file is still in place as
+// the scan recorded it, so what arrived there is a copy rather than the file.
+// A copy smaller than the file is one cut short — the destination filling up
+// partway is the usual cause — and holds nothing the original does not: it
+// is removed with the staging folder. Anything else is left where it is and
+// reported, since nothing more than size and time says it is spare.
+func (s *fsSession) cutShortCopy(err error, tmpShare, name string, want entIdent) error {
+	p := tmpShare + "/" + name
+	if info, ierr := s.getInfo([]string{p}, []string{"size", "time"}); ierr == nil {
+		if e, ok := info[p]; ok && e.exists() && !e.IsDir && e.Additional.Size < want.size {
+			if s.removeFile(p) == nil && s.removeEmptyFolder(tmpShare) == nil {
+				return fmt.Errorf("%v — nothing was moved and the original is untouched; the incomplete copy File Station left at the destination was removed", err)
+			}
+		}
+	}
+	return fmt.Errorf("%v — nothing was moved and the original is untouched, but File Station left a copy in %s; check it before deleting anything", err, tmpShare)
+}
+
+// leftBehind completes the report of a move File Station refused, aimed at a
+// name that was free when it began. The name taken now, with the source still
+// in place, means File Station most likely left an incomplete copy there —
+// the destination filling up partway is the usual cause. Nothing is deleted
+// on that evidence, since another writer may have taken the name meanwhile:
+// the user is told where to look.
+func (s *fsSession) leftBehind(err error, srcShare, destPath string) error {
+	if there, _, serr := s.statShare(destPath); serr != nil || !there {
+		return err
+	}
+	if srcThere, _, serr := s.statShare(srcShare); serr == nil && !srcThere {
+		return fmt.Errorf("%v — and the original is no longer where it was: File Station may have moved it to %s, perhaps incompletely; check there before deleting anything", err, destPath)
+	}
+	return fmt.Errorf("%v — the original is still in place, but File Station may have left an incomplete copy at %s; check it before relying on it", err, destPath)
 }
 
 // claimFromStaging is a staged move's final hop: the entry named base waits
@@ -1062,11 +1142,13 @@ func (s *fsSession) folderIsEmpty(folderShare string) (bool, error) {
 // disposable junk, per File Station's own listing. This is the empty-folders
 // tool's definition of "empty": zero entries, or entries that are all either
 // files the Temporary Files tool itself would list (isTempName — one shared
-// list decides what "useless" means everywhere) or Synology's @eaDir
-// thumbnail cache, which DSM regenerates on demand. Any OTHER directory
-// rejects — a folder whose only child is .git is a repository, not clutter —
-// and so does any error or a listing too large to finish: unknown contents
-// must never read as empty.
+// list decides what "useless" means everywhere), Synology's @eaDir
+// thumbnail cache, which DSM regenerates on demand, or ordinary folders
+// whose own listings pass the same test, at every depth. Folders are judged
+// by innerDir, as in the native half: a hidden one, a junk-named one or a
+// system one rejects — a folder whose only child is .git is a repository,
+// not clutter — and so does any error, a Stop, or a reading past
+// emptyCheckMax: unknown contents must never read as empty.
 //
 // Two measured DSM behaviours this leans on: dotFILES like .keep and
 // .htaccess DO come back from list, so real content cannot hide from this
@@ -1075,41 +1157,62 @@ func (s *fsSession) folderIsEmpty(folderShare string) (bool, error) {
 // answers code 418 for them). Those never appear here at all, and it
 // does not matter: the native walk classifies exactly those names as junk
 // upstream, so the two layers agree without seeing the same entries.
-func (s *fsSession) folderHoldsOnlyJunk(folderShare string) (bool, error) {
+//
+// One listing call per folder inside, plus one per further page: the same
+// folders the walk has just read, so confirming costs no more round trips
+// than the empty folders found. Each page asks for the entries after the
+// ones received, not after the ones asked for, so a DSM that answers a
+// listing in smaller pieces cannot make this skip any.
+func (s *fsSession) folderHoldsOnlyJunk(folderShare string, cancel chan struct{}) (bool, error) {
 	const page = 500
-	const maxEntries = 10000 // past this, refuse rather than trust a partial read
-	fp := []byte(jsonQuote(folderShare))
-	for off := 0; off < maxEntries; off += page {
-		var data struct {
-			Files []struct {
-				Name  string `json:"name"`
-				IsDir bool   `json:"isdir"`
-			} `json:"files"`
-			Total int `json:"total"`
-		}
-		if err := s.call("SYNO.FileStation.List", "list", url.Values{
-			"folder_path": {string(fp)},
-			"offset":      {strconv.Itoa(off)},
-			"limit":       {strconv.Itoa(page)},
-		}, &data); err != nil {
-			return false, err
-		}
-		for _, f := range data.Files {
-			if f.IsDir {
-				if f.Name != "@eaDir" {
+	seen := 0
+	todo := []string{folderShare}
+	for len(todo) > 0 {
+		dir := todo[len(todo)-1]
+		todo = todo[:len(todo)-1]
+		for off := 0; ; {
+			if cancelled(cancel) {
+				return false, errors.New("the scan was stopped")
+			}
+			var data struct {
+				Files []struct {
+					Name  string `json:"name"`
+					IsDir bool   `json:"isdir"`
+				} `json:"files"`
+				Total int `json:"total"`
+			}
+			if err := s.call("SYNO.FileStation.List", "list", url.Values{
+				"folder_path": {jsonQuote(dir)},
+				"offset":      {strconv.Itoa(off)},
+				"limit":       {strconv.Itoa(page)},
+			}, &data); err != nil {
+				return false, err
+			}
+			for _, f := range data.Files {
+				if seen++; seen > emptyCheckMax {
+					return false, tooManyToCheck()
+				}
+				if f.IsDir {
+					skip, reject := innerDir(f.Name)
+					if reject {
+						return false, nil
+					}
+					if !skip {
+						todo = append(todo, dir+"/"+f.Name)
+					}
+					continue
+				}
+				if !isTempName(f.Name) {
 					return false, nil
 				}
-				continue
 			}
-			if !isTempName(f.Name) {
-				return false, nil
+			off += len(data.Files)
+			if len(data.Files) == 0 || off >= data.Total {
+				break
 			}
-		}
-		if len(data.Files) == 0 || off+len(data.Files) >= data.Total {
-			return true, nil
 		}
 	}
-	return false, nil
+	return true, nil
 }
 
 // mayBeRenamed reports whether a destination's file system may be unable to

@@ -14,6 +14,11 @@
 #                   intact, survives a restart, and can be moved and verified
 #                   (Linux only: macOS refuses to create such a name)
 #   Stop            /api/cancel ends a running scan
+#   empty folders   a folder holding only empty folders (or junk) is listed and
+#                   moves, verified, to another volume; a hidden folder or a
+#                   real file at any depth keeps it off the list, the empty
+#                   folders beside one are still listed, and a file that
+#                   arrives two levels down after the scan stops its move
 #   free space      a move onto a volume that cannot hold the files is refused
 #                   before anything is created; a move within the volume is not
 #   moved copies    a copy the app moved, rescanned beside its original, is
@@ -152,6 +157,245 @@ for g in d["groups"]:
 ' || fail "per-group reclaim/alloc wrong"
 pass "sparse duplicates add nothing to the reclaimable figure (total and per group)"
 
+ALL_TOOLS='["duplicates","empty_folders","empty_files","temp_files","corrupted_files"]'
+
+echo "== a scan only reads"
+# Every entry on both volumes is fingerprinted before and after a scan with
+# all five tools: type, permissions, size, modified time, inode change time
+# (which any write, rename, chmod or extended-attribute change moves, and no
+# program can set back), link count, inode and content. The fixture gives
+# each tool something to read: a temporary file, empty folders, a hard link,
+# and a pair of ZIPs sharing size and modified time with one damaged, so the
+# Conflicting Files check opens and decodes both.
+mkdir -p "$SHARE/e9/empty dir" "$SHARE/e9/deep/er"
+printf 'half a download' > "$SHARE/e9/film.part"
+ln "$SHARE/a.txt" "$SHARE/e9/a-link.txt"
+python3 - "$SHARE/e9" <<'PY'
+import os,sys,zipfile
+d=sys.argv[1]
+z1=os.path.join(d,"z1.zip"); z2=os.path.join(d,"z2.zip")
+with zipfile.ZipFile(z1,"w",zipfile.ZIP_STORED) as z: z.writestr("notes.txt", "a line of notes\n"*300)
+b=bytearray(open(z1,"rb").read()); b[2000]^=1; open(z2,"wb").write(b)
+st=os.stat(z1); os.utime(z2, ns=(st.st_atime_ns, st.st_mtime_ns))
+PY
+fingerprint() { # fingerprint <out>
+	python3 - "$V" "$USB" > "$1" <<'PY'
+import hashlib,os,stat,sys
+for top in sys.argv[1:]:
+    for d,dirs,files in os.walk(top):
+        dirs.sort()
+        for n in sorted(dirs+files):
+            p=os.path.join(d,n); st=os.lstat(p); h=""
+            if stat.S_ISREG(st.st_mode) and st.st_size<=64<<20:
+                with open(p,"rb") as f: h=hashlib.sha256(f.read()).hexdigest()
+            print(repr(p), stat.S_IFMT(st.st_mode), oct(st.st_mode&0o7777), st.st_size,
+                  st.st_mtime_ns, st.st_ctime_ns, st.st_nlink, st.st_ino, h)
+PY
+}
+fingerprint "$WORK/fp-before"
+scan "$ALL_TOOLS"
+fingerprint "$WORK/fp-after"
+diff "$WORK/fp-before" "$WORK/fp-after" > "$WORK/fp-diff" || fail "a scan changed something on disk: $(head -6 "$WORK/fp-diff")"
+api GET '/api/results?tool=temp_files' | grep -q 'film.part' || fail "fixture: the temporary file was not found, so the scan did not read the fixture"
+api GET '/api/results?tool=empty_folders' | grep -q 'empty dir' || fail "fixture: the empty folder was not found"
+api GET '/api/results?tool=corrupted_files' | grep -q 'z2.zip' || fail "fixture: the ZIP pair was not checked"
+pass "a scan with every tool changes nothing on disk ($(wc -l < "$WORK/fp-before" | tr -d ' ') entries fingerprinted)"
+rm -rf "$SHARE/e9"
+
+echo "== recycle bin and snapshots"
+# Copies in the recycle bin or a snapshot disappear on their own. Met inside
+# a scanned folder they are skipped, so the one live copy is not a duplicate
+# of anything; chosen directly — as a scan folder, a reference folder, or
+# through a shortcut — they are refused.
+SNAP="$SHARE/#snapshot/GMT+00_2026.11.01-00.00.00"
+mkdir -p "$SHARE/#recycle/old/emptydir" "$SNAP/sub"
+printf 'one live copy, two that will vanish' > "$SHARE/r1.txt"
+cp -p "$SHARE/r1.txt" "$SHARE/#recycle/old/r1.txt"
+cp -p "$SHARE/r1.txt" "$SNAP/sub/r1.txt"
+: > "$SHARE/#recycle/old/empty.txt"
+printf 'x' > "$SHARE/#recycle/old/junk.tmp"
+scan "$ALL_TOOLS"
+for tool in duplicates empty_folders empty_files temp_files corrupted_files; do
+	out=$(api GET "/api/results?tool=$tool")
+	echo "$out" | grep -q -e '#recycle' -e '#snapshot' && fail "$tool lists something inside the recycle bin or a snapshot: $out"
+done
+api GET '/api/results?tool=duplicates' | grep -q 'r1.txt' && fail "the live copy was paired with its copies in the bin or a snapshot"
+ln -s "$SHARE/#recycle/old" "$SHARE/binlink"
+for body in \
+	"{\"tool\":\"duplicates\",\"tools\":[\"duplicates\"],\"dirs\":[\"$SHARE/#recycle\"],\"recurse\":true,\"match\":{}}" \
+	"{\"tool\":\"duplicates\",\"tools\":[\"duplicates\"],\"dirs\":[\"$SNAP/sub\"],\"recurse\":true,\"match\":{}}" \
+	"{\"tool\":\"duplicates\",\"tools\":[\"duplicates\"],\"dirs\":[\"$SHARE/binlink\"],\"recurse\":true,\"match\":{}}" \
+	"{\"tool\":\"duplicates\",\"tools\":[\"duplicates\"],\"dirs\":[\"$SHARE\"],\"refDirs\":[\"$SNAP\"],\"recurse\":true,\"match\":{}}"; do
+	r=$(api POST /api/scan "$body")
+	echo "$r" | grep -q 'never scanned' || fail "a scan reaching into the recycle bin or a snapshot was not refused: $body → $r"
+done
+r=$(api POST /api/refs "{\"refDirs\":[\"$SNAP\"]}")
+echo "$r" | grep -q 'never scanned' || fail "a snapshot was accepted as a reference folder: $r"
+rm -rf "$SHARE/#recycle" "$SHARE/#snapshot" "$SHARE/binlink" "$SHARE/r1.txt"
+pass "the recycle bin and snapshots are never scanned, met inside a folder or chosen directly"
+
+echo "== moves into a reference folder"
+# The reference folder is read-only both ways: nothing is moved into it,
+# directly, into a folder inside it, or through a shortcut to it — and the
+# refusal comes before anything is created there.
+mkdir -p "$SHARE/master/inner"
+ln -s "$SHARE/master" "$SHARE/masterlink"
+r=$(api POST /api/scan "{\"tool\":\"duplicates\",\"tools\":[\"duplicates\"],\"dirs\":[\"$SHARE\"],\"refDirs\":[\"$SHARE/master\"],\"recurse\":true,\"match\":{}}")
+echo "$r" | grep -q '"started":true' || fail "scan refused: $r"
+wait_idle
+for dest in master master/inner masterlink; do
+	for preserve in false true; do
+		r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/b.txt\"],\"dest\":\"$SHARE/$dest\",\"verify\":true,\"preserve\":$preserve}")
+		echo "$r" | grep -q 'inside a read-only reference folder' || fail "a move into the reference folder ($dest, preserve $preserve) was not refused: $r"
+	done
+done
+[ -f "$SHARE/b.txt" ] || fail "the file moved despite the refusal"
+[ -z "$(find "$SHARE/master" -mindepth 1 ! -path "$SHARE/master/inner")" ] || fail "something was created inside the reference folder: $(find "$SHARE/master")"
+r=$(api POST /api/refs '{"refDirs":[]}')
+echo "$r" | grep -q -e '"refDirs":\[\]' -e '"refDirs":null' || fail "the reference folder could not be cleared: $r"
+rm -rf "$SHARE/master" "$SHARE/masterlink"
+pass "nothing is moved into a reference folder, a folder inside it, or through a shortcut to it"
+
+echo "== a folder moved into itself"
+# Moving an empty folder into itself is refused before any batch folder is
+# made; so is moving it into a folder made inside it after the scan.
+# (TestMoveRefusesADestinationInsideTheFolderBeingMoved proves the guard
+# itself for a folder already holding the destination.)
+mkdir -p "$SHARE/ef"
+scan '["empty_folders"]'
+api GET '/api/results?tool=empty_folders' | grep -q '"name":"ef"' || fail "fixture: the empty folder was not listed: $(api GET '/api/results?tool=empty_folders')"
+for preserve in false true; do
+	r=$(api POST /api/move "{\"tool\":\"empty_folders\",\"files\":[\"$SHARE/ef\"],\"dest\":\"$SHARE/ef\",\"verify\":true,\"preserve\":$preserve}")
+	echo "$r" | grep -q 'inside the folder being moved' || fail "moving a folder into itself (preserve $preserve) was not refused: $r"
+done
+[ -z "$(ls -A "$SHARE/ef")" ] || fail "something was created inside the folder: $(find "$SHARE/ef")"
+mkdir "$SHARE/ef/inner"
+for preserve in false true; do
+	r=$(api POST /api/move "{\"tool\":\"empty_folders\",\"files\":[\"$SHARE/ef\"],\"dest\":\"$SHARE/ef/inner\",\"verify\":true,\"preserve\":$preserve}")
+	echo "$r" | grep -q '"moved":\[\]\|"moved":null' || fail "moving a folder into a folder inside it (preserve $preserve) was not refused: $r"
+done
+[ -d "$SHARE/ef/inner" ] && [ -z "$(ls -A "$SHARE/ef/inner")" ] || fail "the folder moved, or something was created inside it: $(find "$SHARE/ef")"
+rm -rf "$SHARE/ef"
+pass "a folder is never moved into itself or a folder inside it"
+
+echo "== the destination fills up mid-move"
+# Something else fills the destination partway through: the mock writes half
+# of each file there and fails the copy, with File Station's "no space left"
+# code or with the bare failure code. Verified or not, the original stays
+# byte for byte, its row stays listed and is not taken for a moved copy, no
+# staging folder is left, and the report says where any incomplete copy is.
+sha() { python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"; }
+for f in g5-fills-dest g5-fills-dest-generic; do
+	python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(256*1024))' "$SHARE/$f.bin"
+	cp -p "$SHARE/$f.bin" "$SHARE/$f-twin.bin"
+done
+sum1=$(sha "$SHARE/g5-fills-dest.bin"); sum2=$(sha "$SHARE/g5-fills-dest-generic.bin")
+scan '["duplicates"]'
+for verify in true false; do
+	for f in g5-fills-dest g5-fills-dest-generic; do
+		r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/$f.bin\"],\"dest\":\"$USB/usbshare\",\"verify\":$verify,\"preserve\":false}")
+		echo "$r" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); verify=sys.argv[1]=="true"; name=sys.argv[2]
+e=r["errors"][0]["error"] if len(r.get("errors") or [])==1 else ""
+ok=not r.get("moved") and "original" in e and "parked" not in e
+if not verify: ok=ok and ("incomplete copy at /usbshare1/"+name+".bin") in e
+sys.exit(0 if ok else 1)' "$verify" "$f" || fail "a move onto a destination that filled up (verify $verify, $f) was not reported as not done: $r"
+		[ "$(sha "$SHARE/$f.bin")" = "$([ $f = g5-fills-dest ] && echo "$sum1" || echo "$sum2")" ] || fail "the original changed or left (verify $verify, $f)"
+		[ -z "$(find "$USB/usbshare" -name '.dupfinder-*')" ] || fail "a staging folder was left behind: $(find "$USB/usbshare")"
+		if [ "$verify" = true ]; then
+			[ -e "$USB/usbshare/$f.bin" ] && fail "a verified move left an incomplete copy at the destination"
+		else
+			rm "$USB/usbshare/$f.bin" || fail "fixture: the mock left no incomplete copy"
+		fi
+	done
+done
+api GET '/api/results?tool=duplicates' | grep -q 'g5-fills-dest-generic.bin' || fail "the row of a file that never left was dropped"
+scan '["duplicates"]'
+api POST /api/results '{"tool":"duplicates","offset":0,"limit":100}' | python3 -c '
+import json,sys
+rows={f["name"]: f.get("out",False) for g in json.load(sys.stdin)["groups"] for f in g["files"] if f["name"].startswith("g5-")}
+sys.exit(0 if len(rows)==4 and not any(rows.values()) else "rows wrong: %r" % rows)' || fail "after a failed move, the pairs are not intact originals"
+rm -f "$SHARE"/g5-*
+pass "a destination that fills up mid-move loses nothing, verified or not, and the report says so"
+
+echo "== folders holding the last copy"
+# A folder holding nothing but junk is offered as empty, and moving it takes
+# the junk along. When that junk is a duplicate, the folder counts as moving
+# its copy: two such folders holding the same file never both leave — not in
+# one request, not one after the other, and not with a rescan in between that
+# pairs the moved copy with the one left behind.
+for d in j1 j2 j3 j4 j5 j6; do mkdir -p "$SHARE/jf/$d"; done
+printf 'a real file, so each folder below is offered on its own' > "$SHARE/jf/keep.txt"
+printf 'thumbnail cache, pair one' > "$SHARE/jf/j1/Thumbs.db"; cp -p "$SHARE/jf/j1/Thumbs.db" "$SHARE/jf/j2/Thumbs.db"
+printf 'thumbnail cache, pair two!' > "$SHARE/jf/j3/Thumbs.db"; cp -p "$SHARE/jf/j3/Thumbs.db" "$SHARE/jf/j4/Thumbs.db"
+printf 'thumbnail cache, pair three!!' > "$SHARE/jf/j5/Thumbs.db"; cp -p "$SHARE/jf/j5/Thumbs.db" "$SHARE/jf/j6/Thumbs.db"
+mkdir -p "$SHARE/jfdest"
+scan '["duplicates","empty_folders"]'
+listed=$(api GET '/api/results?tool=empty_folders' | python3 -c 'import json,sys; print(" ".join(sorted(f["name"] for f in json.load(sys.stdin)["files"] if f["name"].startswith("j") and f["name"][1:].isdigit())))')
+[ "$listed" = "j1 j2 j3 j4 j5 j6" ] || fail "fixture: the junk-only folders are not all offered as empty: $listed"
+efmove() { # efmove <folder>... — one empty_folders request into jfdest
+	local files="" f
+	for f in "$@"; do files="$files${files:+,}\"$SHARE/jf/$f\""; done
+	api POST /api/move "{\"tool\":\"empty_folders\",\"files\":[$files],\"dest\":\"$SHARE/jfdest\",\"verify\":false,\"preserve\":false}"
+}
+r=$(efmove j1 j2)
+echo "$r" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+ok=len(r.get("moved") or [])==1 and len(r["errors"])==1 and "keeping one copy" in r["errors"][0]["error"]
+sys.exit(0 if ok else 1)' || fail "moving both folders of a pair in one request did not hold one back: $r"
+[ "$(ls "$SHARE"/jf/j1/Thumbs.db "$SHARE"/jf/j2/Thumbs.db 2>/dev/null | wc -l | tr -d ' ')" = 1 ] || fail "the pair's copies did not end with exactly one in place"
+r=$(efmove j3); echo "$r" | grep -q '"moved":\["' || fail "fixture: the first folder of pair two did not move: $r"
+r=$(efmove j4); echo "$r" | grep -q 'keeping' || fail "after one folder moved, the folder holding the last copy moved too: $r"
+[ -f "$SHARE/jf/j4/Thumbs.db" ] || fail "the last copy of pair two left its folder"
+r=$(efmove j5); echo "$r" | grep -q '"moved":\["' || fail "fixture: the first folder of pair three did not move: $r"
+scan '["duplicates","empty_folders"]'
+r=$(efmove j6); echo "$r" | grep -q 'keeping' || fail "after a rescan, the folder holding the last copy moved too: $r"
+[ -f "$SHARE/jf/j6/Thumbs.db" ] || fail "the last copy of pair three left its folder"
+rm -rf "$SHARE/jf" "$SHARE/jfdest"
+pass "a folder holding the last copy of a duplicate is held back, in one request, one after another, and after a rescan"
+
+echo "== copies that went away after the scan"
+# Which copies still exist is asked of File Station at move time. A copy
+# deleted since the scan, or rewritten so it no longer has the scan's size
+# and modified time, does not count as the copy that stays. Verification is
+# off, so this is the existence check alone, not the read of B5.
+printf 'b7 pair one' > "$SHARE/b7a.txt"; cp -p "$SHARE/b7a.txt" "$SHARE/b7b.txt"
+printf 'b7 pair two' > "$SHARE/b7c.txt"; cp -p "$SHARE/b7c.txt" "$SHARE/b7d.txt"
+scan '["duplicates"]'
+rm "$SHARE/b7b.txt"
+printf 'b7 pair two, since rewritten' > "$SHARE/b7d.txt"
+for f in b7a b7c; do
+	r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/$f.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":false}")
+	echo "$r" | grep -q 'keeping one copy' || fail "$f.txt moved although its only other copy changed or went away after the scan: $r"
+	[ -f "$SHARE/$f.txt" ] || fail "$f.txt left despite the refusal"
+done
+rm -f "$SHARE"/b7*.txt
+pass "a copy deleted or rewritten after the scan never counts as the copy that stays"
+
+echo "== a name too long for ' (1)'"
+# A clash at the destination is settled with " (1)", but a name already at
+# the length limit has no room for it. The file must end up somewhere it can
+# be found — a holding folder at the destination, named in the report — and
+# the file already there must stay as it was.
+LONG=$(python3 -c 'print("n"*251 + ".bin")')
+mkdir -p "$SHARE/longdest" "$SHARE/longsrc"
+printf 'already at the destination' > "$SHARE/longdest/$LONG"
+printf 'the file being moved, with a long name' > "$SHARE/longsrc/$LONG"; cp -p "$SHARE/longsrc/$LONG" "$SHARE/longtwin.bin"
+want=$(sha "$SHARE/longsrc/$LONG")
+scan '["duplicates"]'
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/longsrc/$LONG\"],\"dest\":\"$SHARE/longdest\",\"verify\":true,\"preserve\":false}")
+echo "$r" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); e=r["errors"][0]["error"] if len(r.get("errors") or [])==1 else ""
+sys.exit(0 if "parked in /share/longdest/.dupfinder-tmp-" in e and "verified intact" in e else 1)' || fail "the file with no room for \" (1)\" was not reported in a holding folder: $r"
+[ "$(cat "$SHARE/longdest/$LONG")" = 'already at the destination' ] || fail "the file already at the destination changed"
+held=$(find "$SHARE/longdest" -path '*/.dupfinder-tmp-*' -name "$LONG")
+[ -n "$held" ] && [ "$(sha "$held")" = "$want" ] || fail "the moved file is not intact in the holding folder: $(find "$SHARE/longdest")"
+rm -rf "$SHARE/longdest" "$SHARE/longsrc" "$SHARE/longtwin.bin"
+pass "a file with no room for \" (1)\" is kept, intact, in a holding folder the report names"
+
 echo "== names outside UTF-8"
 if [ "$(uname)" = Linux ]; then
 	BAD="$SHARE/$(printf 'caf\351.txt')"
@@ -200,6 +444,53 @@ if echo "$c" | grep -q '"cancelled":true'; then
 else
 	pass "Stop answered (the scan had already finished; nothing to end)"
 fi
+
+echo "== folders holding only empty folders"
+# A folder whose only content is another, empty folder is listed as one row:
+# the walk offers only the topmost folder whose subtree holds no file, so a
+# confirmation that refused any folder inside would list neither it nor the
+# folder inside. Beside it, junk two folders down (listed), and what must
+# still keep a folder off the list at any depth: a real file, a hidden folder
+# (.git), and a folder with a junk name (.DS_Store/) holding a real file.
+# Then the moves: across volumes with verification on (copy, check every
+# level, remove), and a folder that gained a file two levels down since the
+# scan, which must be refused.
+mkdir -p "$SHARE/efnest/inner" "$SHARE/efjunk/a/b" "$SHARE/efreal/inner" \
+	"$SHARE/efgit/inner/.git" "$SHARE/efds/inner/.DS_Store"
+printf 'junk two folders down' > "$SHARE/efjunk/a/b/Thumbs.db"
+printf 'a real file' > "$SHARE/efreal/inner/keep.txt"
+printf '[core]' > "$SHARE/efgit/inner/.git/config"
+printf 'a photo in a folder with a junk name' > "$SHARE/efds/inner/.DS_Store/precious.jpg"
+# An empty folder BESIDE what keeps its parent off the list is listed on its
+# own: beside a hidden folder holding a file, beside a folder with a junk
+# name (itself empty, so listed too), and beside a symlink. The walk passes
+# over or walks into each of these without finding a file, so it has to
+# count them as content itself; leaving that to the confirmation offers the
+# parent, refuses it, and never offers the empty folder beside it.
+mkdir -p "$SHARE/efside/a" "$SHARE/efside/b/.git" "$SHARE/efside2/a" "$SHARE/efside2/cache.tmp" "$SHARE/efside3/a"
+printf '[core]' > "$SHARE/efside/b/.git/config"
+ln -s "$SHARE/dest" "$SHARE/efside3/link"
+scan '["empty_folders"]'
+api POST /api/results '{"tool":"empty_folders","offset":0,"limit":100}' | python3 -c '
+import json,sys
+share=sys.argv[1]
+d=json.load(sys.stdin)
+rows={f["path"]+"/"+f["name"] for f in d.get("files") or []}
+mine={r for r in rows if r.startswith(share+"/ef")}
+want={share+"/efnest", share+"/efjunk", share+"/efside/a", share+"/efside2/a",
+      share+"/efside2/cache.tmp", share+"/efside3/a"}
+if mine!=want: sys.exit("listed %r, want %r; errors %r" % (sorted(mine), sorted(want), d.get("errors")))' "$SHARE" || fail "folders holding only empty folders are not listed as they should be"
+r=$(api POST /api/move "{\"tool\":\"empty_folders\",\"files\":[\"$SHARE/efnest\"],\"dest\":\"$USB/usbshare\",\"verify\":true,\"preserve\":false}")
+echo "$r" | grep -q '"moved":\["' || fail "a verified move of a folder of empty folders to another volume failed: $r"
+[ -d "$USB/usbshare/efnest/inner" ] || fail "the folder inside did not arrive at the other volume"
+[ -e "$SHARE/efnest" ] && fail "the original is still in place after the verified move"
+printf 'arrived after the scan' > "$SHARE/efjunk/a/b/late.txt"
+r=$(api POST /api/move "{\"tool\":\"empty_folders\",\"files\":[\"$SHARE/efjunk\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":false}")
+echo "$r" | grep -q 'no longer empty' || fail "a folder that gained a file two levels down since the scan was not refused: $r"
+[ -f "$SHARE/efjunk/a/b/late.txt" ] || fail "the late file moved despite the refusal"
+rm -rf "$SHARE/efnest" "$SHARE/efjunk" "$SHARE/efreal" "$SHARE/efgit" "$SHARE/efds" \
+	"$SHARE/efside" "$SHARE/efside2" "$SHARE/efside3" "$USB/usbshare/efnest"
+pass "a folder holding only empty folders (or junk) is listed and moves, verified, across volumes; hidden or real content at any depth keeps it off the list, and the empty folders beside such content are listed"
 
 echo "== free space"
 stop_daemon
@@ -356,6 +647,14 @@ CPID=$!
 for _ in $(seq 1 80); do api GET /api/state | grep -q 'never-lands' && break; sleep 0.25; done
 api GET /api/state | grep -q 'never-lands' || fail "fixture: the second move never started: $(api GET /api/state)"
 [ -f "$SHARE/cut/c1-copy.txt" ] || fail "fixture: the first file did not move"
+# While that move runs, the daemon itself refuses a second one — not only the
+# app's window — and the refusal comes before anything moves.
+r=$(curl -s -m 20 -X POST -H 'Content-Type: application/json' \
+	-d "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/c2.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}" \
+	"http://127.0.0.1:$PORT/api/move") || fail "a second move waited for the running one instead of being refused (no answer in 20s)"
+echo "$r" | grep -q 'a move is already running' || fail "a second move was not refused while one was running: $r"
+[ -f "$SHARE/c2.txt" ] && [ -z "$(find "$SHARE/dest" -name c2.txt)" ] || fail "the refused second move moved its file"
+pass "a second move is refused while one is running, and moves nothing"
 kill -TERM "$DPID"; wait "$DPID" 2>/dev/null || true; DPID=""
 wait "$CPID" 2>/dev/null || true
 [ -f "$STATE/moves.journal" ] || fail "the cut-short move left no journal"
@@ -376,6 +675,44 @@ r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/c1.txt\"],\
 echo "$r" | grep -q 'already moved' || fail "the original of a file moved before the stop was not protected: $r"
 [ -f "$SHARE/c1.txt" ] || fail "the original moved despite the refusal"
 pass "a move cut short by a stop keeps the record of what it moved, prunes it, and reports what was in flight"
+
+echo "== move records gone entirely"
+# Package Center's Repair, or the files carried to a new NAS: every record the
+# app keeps is gone, which it cannot tell from a fresh install. A flat move's
+# own record, left in the folder the files landed in, is what still says the
+# copy there is one Duplicate Finder moved — so its original stays put.
+printf 'kept by the record in its folder' > "$SHARE/w1.txt"; cp -p "$SHARE/w1.txt" "$SHARE/w1-copy.txt"
+printf 'a file of the user'"'"'s own' > "$SHARE/w2.txt"
+mkdir -p "$SHARE/flatdest"; cp -p "$SHARE/w2.txt" "$SHARE/flatdest/w2.txt"
+scan '["duplicates"]'
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/w1-copy.txt\"],\"dest\":\"$SHARE/flatdest\",\"verify\":true,\"preserve\":false}")
+echo "$r" | grep -q '"moved":\["' || fail "the flat move for the records check failed: $r"
+echo "$r" | grep -q 'recordError' && fail "the record was not left: $r"
+python3 - "$SHARE/flatdest" <<'PY' || fail "the destination holds no record of the move"
+import glob,json,os,sys
+recs=[json.load(open(p)) for p in glob.glob(os.path.join(sys.argv[1], ".duplicate-finder-moved", "*.json"))]
+assert [e["name"] for r in recs for e in r["moved"]]==["w1-copy.txt"], recs
+PY
+stop_daemon
+rm -rf "$STATE"; mkdir -p "$STATE"
+FREESPACE=1000 start_daemon "$WORK/daemon3.log"
+[ -z "$(api GET /api/state | field recordsWarning)" ] || fail "fixture: a wiped state was announced as damaged records"
+scan '["duplicates"]'
+api POST /api/results '{"tool":"duplicates","offset":0,"limit":100}' | python3 -c '
+import json,sys
+share=sys.argv[1]
+out={f["path"]+"/"+f["name"]: f.get("out",False) for g in json.load(sys.stdin)["groups"] for f in g["files"]}
+want={share+"/w1.txt":False, share+"/flatdest/w1-copy.txt":True, share+"/w2.txt":False, share+"/flatdest/w2.txt":False}
+bad={p:(out.get(p),w) for p,w in want.items() if out.get(p)!=w}
+if bad: sys.exit("flags wrong after the records were lost (got, want): %r" % bad)' "$SHARE" || fail "the folder record did not identify the moved copy"
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/w1.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")
+echo "$r" | grep -q 'already moved' || fail "with every record lost, the original was allowed to follow its moved copy: $r"
+[ -f "$SHARE/w1.txt" ] || fail "the original moved despite the refusal"
+stop_daemon
+FREESPACE=1000 start_daemon "$WORK/daemon3.log"
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/w1.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")
+echo "$r" | grep -q 'already moved' || fail "what the folder record restored was not kept across a restart: $r"
+pass "with every record of the app's lost, the record a flat move left in its folder keeps the original in place"
 
 echo "== SIGTERM"
 kill -TERM "$DPID"

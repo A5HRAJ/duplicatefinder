@@ -4,6 +4,48 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
+## [Unreleased]
+
+### Added
+- A move straight into a folder (not the default "keep folder structure")
+  now also leaves a small hidden record in that folder,
+  `.duplicate-finder-moved`, listing the files it put there. The app's own
+  record of the copies it moved lives in the package's data, which Package
+  Center's Repair can erase and which stays behind when the files go to a
+  new NAS; without it, a copy moved straight into a folder looked like an
+  original again, and the last real copy could then be moved after it. The
+  record travels with the folder, and a scan reads it, so those copies stay
+  known as moved. Delete the hidden folder if you no longer want that.
+
+### Fixed
+- A folder inside the recycle bin (`#recycle`) or a snapshot (`#snapshot`)
+  could be added to the scan scope, or as a reference folder, and its files
+  then counted as copies that stay — though they disappear when the bin is
+  emptied or the snapshot expires. Such folders are now refused, as they
+  already were when met inside a scanned folder.
+- When the destination filled up partway through a move without
+  verification, the app could report the file as "parked" in a hidden
+  staging folder and drop it from the list, although the original never
+  left; the parked file was an incomplete copy. The app now says the
+  original is untouched, removes an incomplete copy it can prove is one,
+  and says where File Station may have left another. "No space left" and
+  "quota used up" are named as such instead of by error number.
+- Empty Folders never listed a folder whose only content was another empty
+  folder, and never listed the folder inside it either: a skeleton of empty
+  folders left behind after moving files out (2015/01, 2015/02, …) did not
+  appear at all. Such a folder is now listed as one row, and the folders
+  inside it go with it when it is moved. It is still left off the list when
+  anything inside it, at any depth, is a real file, a hidden folder such as
+  `.git`, a folder with a junk name such as `.DS_Store`, or a folder that
+  cannot be read. The move checks every level again before anything moves,
+  and a move to another volume with Verify on now checks the copy at every
+  level before the original is removed.
+- An empty folder sitting next to a hidden folder (such as `.git`), a
+  folder with a junk name, or a shortcut (symlink) was never listed. The
+  app checked the folder holding them as a whole, rightly refused it, and
+  never looked at the empty folder beside them on its own. That empty
+  folder is now listed by itself; the folder holding it still is not.
+
 ## [1.1.11] - 2026-11-17
 
 ### Added

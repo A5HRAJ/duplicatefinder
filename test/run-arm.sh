@@ -77,6 +77,10 @@ run_one() {
 	# Persistence on too: the state file, hash store and marker are exactly
 	# the binary-layout code a 32-bit runner exists to exercise.
 	mkdir -p "$WORK/state"
+	# Where the mock's sync services read the folders they keep in step
+	# (dev.go), as in run.sh: absent until the smoke suite writes it, and the
+	# same path inside the container as on the host.
+	local SYNCED="$WORK/synced.json"
 
 	CID="$(docker run -d --rm --platform "$PLATFORM" \
 		-v "$WORK:$WORK" \
@@ -86,6 +90,7 @@ run_one() {
 		-e DUPFINDER_DSM_URL="http://127.0.0.1:$PORT" \
 		-e DUPFINDER_BIND_HOST="0.0.0.0" \
 		-e DUPFINDER_STATE="$WORK/state" \
+		-e DUPFINDER_DEV_SYNCED="$SYNCED" \
 		"$IMAGE" "$WORK/dupfinder-dev" -mode daemon -port "$PORT")"
 	CIDS="$CIDS $CID"
 
@@ -102,7 +107,7 @@ run_one() {
 		return
 	fi
 	echo "-- daemon up, running smoke suite"
-	if ! DUPFINDER_TEST_PORT="$PORT" node smoke.js; then
+	if ! DUPFINDER_TEST_PORT="$PORT" DUPFINDER_DEV_SYNCED="$SYNCED" node smoke.js; then
 		FAILED=1
 	fi
 	docker rm -f "$CID" >/dev/null 2>&1

@@ -50,9 +50,11 @@ type transitRef struct {
 	man   manifest
 }
 
-// manEnt is one entry of a folder manifest. Directories never appear: the
-// folders this flow moves are junk-only empty-folder rows, which hold files
-// and Synology's @eaDir cache and nothing else.
+// manEnt is one entry of a folder manifest, keyed by its path inside the
+// folder ("sub/y.tmp"). The folders this flow moves are empty-folder rows:
+// junk files, Synology's @eaDir cache, and folders holding only the same.
+// A folder inside is an entry of its own, its size and modified time
+// standing for what it holds.
 type manEnt struct {
 	typ   fs.FileMode // the type bits only
 	size  int64
@@ -63,22 +65,42 @@ type manEnt struct {
 
 type manifest map[string]manEnt
 
-// maxManifest bounds a folder manifest, as folderHoldsOnlyJunk bounds its
-// listing: past it the folder is refused rather than half-checked.
+// maxManifest bounds a folder manifest, every depth together, as
+// emptyCheckMax bounds the empty-folder confirmation: past it the folder is
+// refused rather than half-checked.
 const maxManifest = 10000
 
-// takeManifest reads every entry of dir except @eaDir — Synology's thumbnail
-// cache, regenerated on demand and not reliably carried by a copy — with each
-// regular file's content hash when hashed is set. A subfolder is refused: a
-// junk-only folder holds none, so one appearing means the folder gained
-// content since it was confirmed empty.
+// takeManifest reads every entry of dir at every depth except @eaDir —
+// Synology's thumbnail cache, regenerated on demand and not reliably carried
+// by a copy — with each regular file's content hash when hashed is set. A
+// folder inside is recorded and then read in turn, so a copy must reproduce
+// every level, and an original whose folders gained or lost anything since
+// no longer matches. Symlinks are recorded, never followed. Each folder is
+// closed before the ones inside it are opened.
 func takeManifest(dir string, hashed bool) (manifest, error) {
-	d, err := os.Open(dir)
+	m := manifest{}
+	todo := []string{""}
+	for len(todo) > 0 {
+		rel := todo[len(todo)-1]
+		todo = todo[:len(todo)-1]
+		subs, err := readManifestDir(dir, rel, hashed, m)
+		if err != nil {
+			return nil, err
+		}
+		todo = append(todo, subs...)
+	}
+	return m, nil
+}
+
+// readManifestDir adds the entries of the folder at rel inside dir to m,
+// and returns the folders inside it, as keys, still to be read.
+func readManifestDir(dir, rel string, hashed bool, m manifest) ([]string, error) {
+	d, err := os.Open(filepath.Join(dir, rel))
 	if err != nil {
 		return nil, err
 	}
 	defer d.Close()
-	m := manifest{}
+	var subs []string
 	for {
 		ents, rerr := d.ReadDir(256)
 		for _, e := range ents {
@@ -88,7 +110,11 @@ func takeManifest(dir string, hashed bool) (manifest, error) {
 			if len(m) >= maxManifest {
 				return nil, fmt.Errorf("the folder holds more than %d entries", maxManifest)
 			}
-			p := filepath.Join(dir, e.Name())
+			key := e.Name()
+			if rel != "" {
+				key = rel + "/" + key
+			}
+			p := filepath.Join(dir, key)
 			fi, err := os.Lstat(p)
 			if err != nil {
 				return nil, err
@@ -96,7 +122,7 @@ func takeManifest(dir string, hashed bool) (manifest, error) {
 			me := manEnt{typ: fi.Mode().Type(), size: fi.Size(), mtime: fi.ModTime().Unix()}
 			switch {
 			case fi.IsDir():
-				return nil, errors.New("the folder is no longer empty — it now holds a folder")
+				subs = append(subs, key)
 			case fi.Mode().IsRegular() && hashed:
 				if me.hash, err = verifyRead(p); err != nil {
 					return nil, err
@@ -106,10 +132,10 @@ func takeManifest(dir string, hashed bool) (manifest, error) {
 					return nil, err
 				}
 			}
-			m[e.Name()] = me
+			m[key] = me
 		}
 		if rerr == io.EOF {
-			return m, nil
+			return subs, nil
 		}
 		if rerr != nil {
 			return nil, rerr
@@ -305,16 +331,11 @@ func transitViaFS(s *fsSession, cp, srcShare, outShare, outFS string, want entId
 // holds nothing that exists nowhere else. Otherwise it is left — visible by
 // path in the report — because it may be the only copy there is.
 func (s *fsSession) discardCopy(tmpShare, srcShare string, want entIdent, why error) error {
-	info, err := s.getInfo([]string{srcShare}, []string{"size", "time"})
-	if err == nil {
-		if e, ok := info[srcShare]; ok && e.exists() {
-			if _, same := identMatches(e, []entIdent{want}); same {
-				if derr := s.removeTree(tmpShare); derr == nil {
-					return why
-				}
-				return fmt.Errorf("%v (the unused copy could not be removed from %s)", why, tmpShare)
-			}
+	if s.sourceIntact(srcShare, want) {
+		if derr := s.removeTree(tmpShare); derr == nil {
+			return why
 		}
+		return fmt.Errorf("%v (the unused copy could not be removed from %s)", why, tmpShare)
 	}
 	return fmt.Errorf("%v (a copy was left in %s — the original could not be confirmed in place, so it was kept)", why, tmpShare)
 }
