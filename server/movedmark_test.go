@@ -46,7 +46,11 @@ func TestFlatMoveLeavesARecordInItsDestination(t *testing.T) {
 	a := put("a.bin", "first")
 	b := put("b (1).bin", "second!")
 	deeper := put("sub/c.bin", "not directly in the destination")
-	if err := leaveMovedMark(sess, "/Backups/dest", dest, []string{a, b, deeper, filepath.Join(dest, "never-landed.bin")}); err != nil {
+	// A folder the move landed (an Empty Folders row) takes its junk along.
+	os.MkdirAll(filepath.Join(dest, "j1", "inner"), 0o755)
+	put("j1/Thumbs.db", "cache")
+	put("j1/inner/x.part", "partial")
+	if err := leaveMovedMark(sess, "/Backups/dest", dest, []string{a, b, deeper, filepath.Join(dest, "j1"), filepath.Join(dest, "never-landed.bin")}); err != nil {
 		t.Fatal(err)
 	}
 	recs := readMarks(t, dest)
@@ -54,9 +58,15 @@ func TestFlatMoveLeavesARecordInItsDestination(t *testing.T) {
 		t.Fatalf("want one record, got %d", len(recs))
 	}
 	got := recs[0].Moved
-	want := []movedMarkEntry{{"a.bin", 5, when.Unix()}, {"b (1).bin", 7, when.Unix()}}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	want := []movedMarkEntry{{"a.bin", 5, when.Unix()}, {"b (1).bin", 7, when.Unix()},
+		{"j1/Thumbs.db", 5, when.Unix()}, {"j1/inner/x.part", 7, when.Unix()}}
+	if len(got) != len(want) {
 		t.Fatalf("record lists %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("record lists %+v, want %+v", got, want)
+		}
 	}
 	if recs[0].Folder != markFolderKey(dest) {
 		t.Fatalf("the record names folder %q, want %q", recs[0].Folder, markFolderKey(dest))
@@ -92,6 +102,7 @@ func TestRecordedFilesAreRecognisedAndNothingElse(t *testing.T) {
 	mtime := int64(1700000000)
 	rec := movedMarkRecord{Moved: []movedMarkEntry{
 		{"a.bin", 5, mtime}, {"b.bin", 7, mtime}, {"../escape.bin", 1, mtime}, {"sub/x.bin", 1, mtime},
+		{"sub/../../out.bin", 1, mtime}, {"/abs.bin", 1, mtime}, {"a//b.bin", 1, mtime}, {strings.Repeat("n", 256), 1, mtime},
 	}}
 	body, _ := json.Marshal(rec)
 	os.WriteFile(filepath.Join(recDir, "r1.json"), body, 0o644)
@@ -136,8 +147,15 @@ func TestRecordedFilesAreRecognisedAndNothingElse(t *testing.T) {
 	if _, ok := m.match("/volume1/share/elsewhere", "a.bin", 5, at); ok {
 		t.Error("a record recognised a file in another folder")
 	}
-	if m.n != 2 {
-		t.Errorf("held %d entries, want 2", m.n)
+	// A file inside a folder the move landed is recognised in that folder.
+	if c, ok := m.match("/volume1/share/dest/sub", "x.bin", 1, at); !ok || c != "/canon/share/dest/sub/x.bin" {
+		t.Errorf("the file inside a moved folder was not recognised there: %q %v", c, ok)
+	}
+	if _, ok := m.match("/volume1/share/dest", "sub/x.bin", 1, at); ok {
+		t.Error("a nested entry was matched by its whole path in the record's folder")
+	}
+	if m.n != 3 {
+		t.Errorf("held %d entries, want 3 (the escapes, the absolute path, the empty component and the over-long name refused)", m.n)
 	}
 }
 

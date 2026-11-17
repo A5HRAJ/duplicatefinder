@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -70,25 +71,59 @@ func markFolderKey(canon string) string {
 	return canon
 }
 
-// leaveMovedMark writes the record of the regular files a flat move landed
-// directly in the destination folder (landed holds canonical landing paths;
-// anything not directly in destCanon is skipped). Each move writes a record
-// of its own under a fresh name, so no record is ever overwritten.
+// leaveMovedMark writes the record of what a flat move landed directly in
+// the destination folder (landed holds canonical landing paths; anything not
+// directly in destCanon is skipped): each regular file by its name, and for a
+// folder moved flat — an Empty Folders row, which takes its junk files along
+// — every regular file inside it by its path below the destination
+// ("j1/Thumbs.db"), so a copy among them is still known as moved. Each move
+// writes a record of its own under a fresh name, so no record is ever
+// overwritten.
 func leaveMovedMark(sess *fsSession, destShare, destCanon string, landed []string) error {
 	var ents []movedMarkEntry
+	add := func(rel string, fi os.FileInfo) {
+		if _, _, ok := markName(rel); ok && utf8.ValidString(rel) {
+			ents = append(ents, movedMarkEntry{Name: rel, Size: fi.Size(), MTime: fi.ModTime().Unix()})
+		}
+	}
 	for _, at := range landed {
 		if filepath.Dir(at) != destCanon {
 			continue
 		}
 		fi, err := os.Lstat(at)
-		if err != nil || !fi.Mode().IsRegular() {
-			continue // not landed yet (an unsettled move), or not a file
+		if err != nil {
+			continue // not landed yet (an unsettled move)
 		}
-		name := filepath.Base(at)
-		if !utf8.ValidString(name) {
-			continue
+		switch {
+		case fi.Mode().IsRegular():
+			add(filepath.Base(at), fi)
+		case fi.IsDir():
+			n := 0
+			filepath.WalkDir(at, func(p string, d fs.DirEntry, werr error) error {
+				if werr != nil {
+					return nil
+				}
+				if d.IsDir() {
+					if d.Name() == "@eaDir" || d.Name() == movedMarkDir {
+						return fs.SkipDir
+					}
+					return nil
+				}
+				if !d.Type().IsRegular() {
+					return nil
+				}
+				if n >= maxManifest {
+					return fs.SkipAll
+				}
+				if info, ierr := d.Info(); ierr == nil {
+					if rel, rerr := filepath.Rel(destCanon, p); rerr == nil {
+						add(filepath.ToSlash(rel), info)
+						n++
+					}
+				}
+				return nil
+			})
 		}
-		ents = append(ents, movedMarkEntry{Name: name, Size: fi.Size(), MTime: fi.ModTime().Unix()})
 	}
 	if len(ents) == 0 {
 		return nil
@@ -172,22 +207,48 @@ func (m *movedMarks) load(h *dirhandle.Handle, rel, display, canon string) {
 			continue // written for another folder, and copied here
 		}
 		for _, ent := range rec.Moved {
-			if ent.Name == "" || ent.Name == "." || ent.Name == ".." || strings.Contains(ent.Name, "/") {
+			sub, base, ok := markName(ent.Name)
+			if !ok {
 				continue
 			}
 			if m.n >= movedMarkCap {
 				m.over = true
 				return
 			}
-			md := m.dirs[display]
-			if md == nil {
-				md = &markedDir{canon: canon, ents: map[string]movedMarkEntry{}}
-				m.dirs[display] = md
+			// A file inside a folder the move landed is registered under
+			// that folder, which the walk enters after this one.
+			key, c := display, canon
+			if sub != "" {
+				key, c = filepath.Join(display, sub), filepath.Join(canon, sub)
 			}
-			md.ents[ent.Name] = ent
+			md := m.dirs[key]
+			if md == nil {
+				md = &markedDir{canon: c, ents: map[string]movedMarkEntry{}}
+				m.dirs[key] = md
+			}
+			ent.Name = base
+			md.ents[base] = ent
 			m.n++
 		}
 	}
+}
+
+// markName splits a record entry's name — a file name, or a path below the
+// record's folder for a file inside a folder the move landed — into that
+// path's folders and its base name. It refuses anything that could reach
+// outside the record's folder or that no filesystem would hold: an absolute
+// path, an empty, "." or ".." component, a component over 255 bytes.
+func markName(name string) (sub, base string, ok bool) {
+	if name == "" || strings.HasPrefix(name, "/") || len(name) > 4096 {
+		return "", "", false
+	}
+	parts := strings.Split(name, "/")
+	for _, p := range parts {
+		if p == "" || p == "." || p == ".." || len(p) > 255 {
+			return "", "", false
+		}
+	}
+	return strings.Join(parts[:len(parts)-1], "/"), parts[len(parts)-1], true
 }
 
 // match reports the canonical path of the file at display path dir/name when

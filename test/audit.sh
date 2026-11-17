@@ -712,30 +712,40 @@ echo "== move records gone entirely"
 printf 'kept by the record in its folder' > "$SHARE/w1.txt"; cp -p "$SHARE/w1.txt" "$SHARE/w1-copy.txt"
 printf 'a file of the user'"'"'s own' > "$SHARE/w2.txt"
 mkdir -p "$SHARE/flatdest"; cp -p "$SHARE/w2.txt" "$SHARE/flatdest/w2.txt"
-scan '["duplicates"]'
+# And a junk-only folder moved flat (an Empty Folders row): its Thumbs.db is
+# a duplicate of one left in place, and must still be known as moved.
+mkdir -p "$SHARE/wj" "$SHARE/wtwin"
+printf 'thumbnail cache carried by a folder move' > "$SHARE/wj/Thumbs.db"; cp -p "$SHARE/wj/Thumbs.db" "$SHARE/wtwin/Thumbs.db"
+scan '["duplicates","empty_folders"]'
+r=$(api POST /api/move "{\"tool\":\"empty_folders\",\"files\":[\"$SHARE/wj\"],\"dest\":\"$SHARE/flatdest\",\"verify\":true,\"preserve\":false}")
+echo "$r" | grep -q '"moved":\["' || fail "fixture: the flat folder move failed: $r"
 r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/w1-copy.txt\"],\"dest\":\"$SHARE/flatdest\",\"verify\":true,\"preserve\":false}")
 echo "$r" | grep -q '"moved":\["' || fail "the flat move for the records check failed: $r"
 echo "$r" | grep -q 'recordError' && fail "the record was not left: $r"
 python3 - "$SHARE/flatdest" <<'PY' || fail "the destination holds no record of the move"
 import glob,json,os,sys
 recs=[json.load(open(p)) for p in glob.glob(os.path.join(sys.argv[1], ".duplicate-finder-moved", "*.json"))]
-assert [e["name"] for r in recs for e in r["moved"]]==["w1-copy.txt"], recs
+assert sorted(e["name"] for r in recs for e in r["moved"])==["w1-copy.txt","wj/Thumbs.db"], recs
 PY
 stop_daemon
 rm -rf "$STATE"; mkdir -p "$STATE"
 FREESPACE=1000 start_daemon "$WORK/daemon3.log"
 [ -z "$(api GET /api/state | field recordsWarning)" ] || fail "fixture: a wiped state was announced as damaged records"
-scan '["duplicates"]'
+scan '["duplicates","empty_folders"]'
 api POST /api/results '{"tool":"duplicates","offset":0,"limit":100}' | python3 -c '
 import json,sys
 share=sys.argv[1]
 out={f["path"]+"/"+f["name"]: f.get("out",False) for g in json.load(sys.stdin)["groups"] for f in g["files"]}
-want={share+"/w1.txt":False, share+"/flatdest/w1-copy.txt":True, share+"/w2.txt":False, share+"/flatdest/w2.txt":False}
+want={share+"/w1.txt":False, share+"/flatdest/w1-copy.txt":True, share+"/w2.txt":False, share+"/flatdest/w2.txt":False,
+      share+"/flatdest/wj/Thumbs.db":True, share+"/wtwin/Thumbs.db":False}
 bad={p:(out.get(p),w) for p,w in want.items() if out.get(p)!=w}
 if bad: sys.exit("flags wrong after the records were lost (got, want): %r" % bad)' "$SHARE" || fail "the folder record did not identify the moved copy"
 r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/w1.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")
 echo "$r" | grep -q 'already moved' || fail "with every record lost, the original was allowed to follow its moved copy: $r"
 [ -f "$SHARE/w1.txt" ] || fail "the original moved despite the refusal"
+r=$(api POST /api/move "{\"tool\":\"empty_folders\",\"files\":[\"$SHARE/wtwin\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")
+echo "$r" | grep -q 'keeping' || fail "with every record lost, the folder holding the last copy followed its moved twin: $r"
+[ -f "$SHARE/wtwin/Thumbs.db" ] || fail "the last copy left its folder"
 stop_daemon
 FREESPACE=1000 start_daemon "$WORK/daemon3.log"
 r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/w1.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")

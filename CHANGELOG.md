@@ -33,6 +33,11 @@ package versions shown in Package Center.
   last emptiness check and its copying of the folder to another disk was
   copied along and left with the folder. What is copied is now checked
   against the same rule, and the folder stays.
+- The hidden record a move straight into a folder leaves there listed
+  only the files moved; when a folder was moved (an Empty Folders row),
+  the junk files it carried were not listed. Should the app's own records
+  be lost, a copy among them could look like an original again. The
+  record now lists every file inside a moved folder too.
 
 ## [1.1.12] - 2026-11-17
 
