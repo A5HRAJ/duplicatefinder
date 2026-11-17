@@ -63,6 +63,9 @@ package versions shown in Package Center.
   program on the NAS taken its port, that program would have received the
   session. The gateway now checks that the listener belongs to the
   package's own user, and sends nothing otherwise.
+- The gateway accepted a request carrying a valid sign-in token followed by
+  an empty second one as if it carried one. It still needed a valid
+  administrator's token, but it now refuses any request with more than one.
 
 ## [1.1.12] - 2026-11-17
 
