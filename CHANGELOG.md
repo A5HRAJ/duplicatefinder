@@ -6,6 +6,17 @@ package versions shown in Package Center.
 
 ## [Unreleased]
 
+### Added
+- A move straight into a folder (not the default "keep folder structure")
+  now also leaves a small hidden record in that folder,
+  `.duplicate-finder-moved`, listing the files it put there. The app's own
+  record of the copies it moved lives in the package's data, which Package
+  Center's Repair can erase and which stays behind when the files go to a
+  new NAS; without it, a copy moved straight into a folder looked like an
+  original again, and the last real copy could then be moved after it. The
+  record travels with the folder, and a scan reads it, so those copies stay
+  known as moved. Delete the hidden folder if you no longer want that.
+
 ### Fixed
 - A folder inside the recycle bin (`#recycle`) or a snapshot (`#snapshot`)
   could be added to the scan scope, or as a reference folder, and its files

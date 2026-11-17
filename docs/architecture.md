@@ -349,7 +349,16 @@ symlink-resolved paths so an alias cannot slip past a prefix test:
    and each landed file's data (shared folder, inode, size, modified time),
    so a copy stays recognised after the user renames or reorganises the
    folder it was moved into, and is an original again once put back where it
-   came from. A path inside a network mount whose server is this NAS
+   came from. Because that record lives in the package's data folder, which
+   Package Center's Repair can erase and a move to a new NAS leaves behind, a
+   flat move also leaves a record in the folder the files landed in
+   (`server/movedmark.go`): a hidden `.duplicate-finder-moved` folder holding
+   one small JSON file per move — written through File Station Upload under a
+   fresh name, so nothing is ever overwritten — that lists each landed file's
+   name, size and modified time. A scan reads these as it enters each folder,
+   before the folder's files, and a file a record lists with that size and
+   time joins the app's own record. A preserve-mode move needs none: its
+   batch folder's layout identifies it. A path inside a network mount whose server is this NAS
    (`server/selfmount.go`, from `/proc/mounts` and the mount's `addr=`) is
    never a copy that stays, never moves, and is never a destination; scans
    skip such mounts and list them as issues.

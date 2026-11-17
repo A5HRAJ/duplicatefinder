@@ -3794,6 +3794,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				// user can still learn WHICH file needs their attention.
 				this.showMoveIssues(requested, n, j.errors, lead);
 				if (j.saveError) this.notify(j.saveError);
+				if (j.recordError) this.notify(j.recordError);
 			} else {
 				// Under preserve the files are NOT at `dest` — the daemon
 				// created a folder inside it and may have had to number
@@ -3802,7 +3803,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				// failed after the prune rides on the same toast: the
 				// pruned rows would be back after a restart.
 				this.notify((lead || '') + 'Moved ' + n + ' ' + itemNoun(tool, n).toLowerCase() + ' to ' + (j.folder || j.dest) +
-					(j.saveError ? ' — ' + j.saveError : ''));
+					(j.saveError ? ' — ' + j.saveError : '') + (j.recordError ? ' — ' + j.recordError : ''));
 			}
 			if (j.id) api('/move/report', 'POST', { id: j.id }, function () {});
 		},

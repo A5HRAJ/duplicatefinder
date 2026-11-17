@@ -539,6 +539,44 @@ echo "$r" | grep -q 'already moved' || fail "the original of a file moved before
 [ -f "$SHARE/c1.txt" ] || fail "the original moved despite the refusal"
 pass "a move cut short by a stop keeps the record of what it moved, prunes it, and reports what was in flight"
 
+echo "== move records gone entirely"
+# Package Center's Repair, or the files carried to a new NAS: every record the
+# app keeps is gone, which it cannot tell from a fresh install. A flat move's
+# own record, left in the folder the files landed in, is what still says the
+# copy there is one Duplicate Finder moved — so its original stays put.
+printf 'kept by the record in its folder' > "$SHARE/w1.txt"; cp -p "$SHARE/w1.txt" "$SHARE/w1-copy.txt"
+printf 'a file of the user'"'"'s own' > "$SHARE/w2.txt"
+mkdir -p "$SHARE/flatdest"; cp -p "$SHARE/w2.txt" "$SHARE/flatdest/w2.txt"
+scan '["duplicates"]'
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/w1-copy.txt\"],\"dest\":\"$SHARE/flatdest\",\"verify\":true,\"preserve\":false}")
+echo "$r" | grep -q '"moved":\["' || fail "the flat move for the records check failed: $r"
+echo "$r" | grep -q 'recordError' && fail "the record was not left: $r"
+python3 - "$SHARE/flatdest" <<'PY' || fail "the destination holds no record of the move"
+import glob,json,os,sys
+recs=[json.load(open(p)) for p in glob.glob(os.path.join(sys.argv[1], ".duplicate-finder-moved", "*.json"))]
+assert [e["name"] for r in recs for e in r["moved"]]==["w1-copy.txt"], recs
+PY
+stop_daemon
+rm -rf "$STATE"; mkdir -p "$STATE"
+FREESPACE=1000 start_daemon "$WORK/daemon3.log"
+[ -z "$(api GET /api/state | field recordsWarning)" ] || fail "fixture: a wiped state was announced as damaged records"
+scan '["duplicates"]'
+api POST /api/results '{"tool":"duplicates","offset":0,"limit":100}' | python3 -c '
+import json,sys
+share=sys.argv[1]
+out={f["path"]+"/"+f["name"]: f.get("out",False) for g in json.load(sys.stdin)["groups"] for f in g["files"]}
+want={share+"/w1.txt":False, share+"/flatdest/w1-copy.txt":True, share+"/w2.txt":False, share+"/flatdest/w2.txt":False}
+bad={p:(out.get(p),w) for p,w in want.items() if out.get(p)!=w}
+if bad: sys.exit("flags wrong after the records were lost (got, want): %r" % bad)' "$SHARE" || fail "the folder record did not identify the moved copy"
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/w1.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")
+echo "$r" | grep -q 'already moved' || fail "with every record lost, the original was allowed to follow its moved copy: $r"
+[ -f "$SHARE/w1.txt" ] || fail "the original moved despite the refusal"
+stop_daemon
+FREESPACE=1000 start_daemon "$WORK/daemon3.log"
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/w1.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")
+echo "$r" | grep -q 'already moved' || fail "what the folder record restored was not kept across a restart: $r"
+pass "with every record of the app's lost, the record a flat move left in its folder keeps the original in place"
+
 echo "== SIGTERM"
 kill -TERM "$DPID"
 for i in $(seq 1 20); do kill -0 "$DPID" 2>/dev/null || break; sleep 0.25; done

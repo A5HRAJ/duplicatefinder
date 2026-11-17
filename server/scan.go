@@ -375,6 +375,12 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 	s.mu.Lock()
 	moved := s.moveOut
 	s.mu.Unlock()
+	// The records flat moves left in their destination folders (movedmark.go)
+	// are read as the walk enters each folder, before its files: a file one
+	// lists is a copy Duplicate Finder moved, whether or not the app's own
+	// record of it survived.
+	marks := newMovedMarks()
+	var marked []string
 	walkErrs, hs, rootOf := s.walkStream(safeRoots, req.Recurse, ef != nil, cancel, func(idx int, f fEnt) {
 		if ef != nil {
 			ef.visit(idx, f)
@@ -383,11 +389,16 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 			return
 		}
 		out := -1 // unknown until a flat tool wants the file
+		markedOut := false
+		if c, ok := marks.match(f.dir, f.name, f.size, f.mod); ok {
+			marked = append(marked, c)
+			markedOut = true
+		}
 		for t, top := range tops {
 			if flatKeep[t](&f) {
 				if out < 0 {
 					out = 0
-					if rowIsOut(moved, base.Roots, f.dir, f.name) {
+					if markedOut || rowIsOut(moved, base.Roots, f.dir, f.name) {
 						out = 1
 					}
 				}
@@ -403,9 +414,23 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 				spillErr = sp.add(idx, &f)
 			}
 		}
-	}, unreadable)
+	}, unreadable, marks.load)
 	handles = hs
 	base.Errors = append(base.Errors, walkErrs...)
+	if w := marks.overflow(); w != "" {
+		base.Errors = append(base.Errors, w)
+	}
+	// What the records identified joins the app's own record — kept even if
+	// the scan is then stopped, since each entry is a fact about a file, not
+	// about this scan — and is saved with the results. Moves are refused
+	// while a scan runs, so nothing else changes the set meanwhile.
+	if len(marked) > 0 {
+		add := outKeys(marked)
+		s.mu.Lock()
+		s.moveOut = s.moveOut.with(add)
+		moved = s.moveOut
+		s.mu.Unlock()
+	}
 	if cancelled(cancel) {
 		return // the walk is shared: a stop here has nothing complete to keep
 	}

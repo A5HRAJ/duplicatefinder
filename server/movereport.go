@@ -32,6 +32,9 @@ type moveReport struct {
 	Errors    []map[string]string `json:"errors"`
 	Folder    string              `json:"folder,omitempty"`
 	SaveError string              `json:"saveError,omitempty"`
+	// RecordError says the record a flat move leaves in its destination
+	// folder (movedmark.go) could not be written. The move itself is done.
+	RecordError string `json:"recordError,omitempty"`
 	// Interrupted marks the report of a move Duplicate Finder did not live
 	// to finish, rebuilt from its journal at the next start (journal.go).
 	Interrupted bool `json:"interrupted,omitempty"`

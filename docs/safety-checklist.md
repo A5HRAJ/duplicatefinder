@@ -60,7 +60,7 @@ would take away the only copy of something.
 | B9 | Never move anything into a reference folder | ✅ | Audit "moves into a reference folder": refused into the folder, a folder inside it, and through a shortcut, in both layouts, with nothing created there |
 | B10 | Warn you if the record of moved copies is lost or damaged, rather than quietly dropping the protection | ✅ | `TestLostRecordsWarnUntilAcknowledged`, `TestDamagedRecordsRecoveredFromResults`, audit "move records lost" |
 | B11 | Keep the record of moved copies through an uninstall and reinstall | ✅ | Measured on the DS916+ (DSM 7.4), 2026-10-14: a throwaway package's data survived uninstall and reinstall. This is how DSM behaves, not app code, so one measurement is the proof. Re-measure after a major DSM upgrade |
-| B12 | Behave safely when the record of moved copies is gone entirely (Package Center's Repair can reportedly erase it, or a move to a new NAS). The app can't tell that apart from a fresh install, so a copy it moved flat would look like an original again. Copies moved into a batch folder are still recognised by that folder | ❌ | No protection yet. Remedy to be decided |
+| B12 | Behave safely when the record of moved copies is gone entirely (Package Center's Repair can reportedly erase it, or a move to a new NAS). The app can't tell that apart from a fresh install, so a copy it moved flat would look like an original again. Copies moved into a batch folder are still recognised by that folder | ✅ | Decided 2026-11-17: a flat move leaves a record in the folder the files landed in (`.duplicate-finder-moved`). `TestFlatMoveLeavesARecordInItsDestination`, `TestRecordedFilesAreRecognisedAndNothingElse`; audit "move records gone entirely": with the app's whole state deleted, the moved copy is still recognised and its original is refused, also after a restart. Protects flat moves made from 1.1.12 on |
 
 ## C. Moving only what you chose
 
@@ -154,9 +154,9 @@ would take away the only copy of something.
 
 | | Count |
 |---|---|
-| ✅ Proven | 58 |
+| ✅ Proven | 59 |
 | 🟡 Partly proven | 14 |
-| ❌ Protected but unproven, or not yet protected | 1 (B12) |
+| ❌ Protected but unproven, or not yet protected | 0 |
 | ❓ Undecided | 0 |
 | Decided against | 1 (I2) |
 | **Total** | **74** |

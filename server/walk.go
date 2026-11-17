@@ -40,7 +40,11 @@ func scannable(d fs.DirEntry) bool {
 	return t.IsRegular() || t.IsDir()
 }
 
-func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan struct{}, visit func(rootIdx int, f fEnt), unreadable func(path string)) (errs []string, handles []*dirhandle.Handle, rootOf []string) {
+// walkStream's enterDir, when set, is called for each directory the walk
+// enters, before any of its entries is visited — the root (rel ".")
+// included — with the pinned root handle, the directory's path relative to
+// it, its display path and its canonical path.
+func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan struct{}, visit func(rootIdx int, f fEnt), unreadable func(path string), enterDir func(h *dirhandle.Handle, rel, display, canon string)) (errs []string, handles []*dirhandle.Handle, rootOf []string) {
 	count := 0
 	// The error list is bounded — at the same figure as the flat tools' row
 	// lists, so a volume full of permission-denied subtrees cannot grow it
@@ -139,6 +143,9 @@ func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan 
 		idx := len(handles) - 1
 		scrub := map[string]string{h.Path(): root}
 		if !recurse {
+			if enterDir != nil {
+				enterDir(h, ".", root, canon)
+			}
 			ents, err := os.ReadDir(h.Path())
 			if err != nil {
 				addErr(root + ": " + scrubErr(err, scrub).Error())
@@ -194,6 +201,9 @@ func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan 
 						noteUnreadable(display)
 						return fs.SkipDir
 					}
+				}
+				if enterDir != nil {
+					enterDir(h, rel, display, filepath.Join(canon, rel))
 				}
 				if withDirs && rel != "." {
 					emit(idx, display, rel, h, d)

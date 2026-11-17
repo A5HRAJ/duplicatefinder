@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -66,6 +67,8 @@ type moveVerifyFake struct {
 	// destination that cannot store every name, as File Station does onto
 	// an exFAT disk ("what?.bin" arrives as "what-.bin"), silently.
 	storeAs func(name string) string
+	// uploads counts the files Upload wrote.
+	uploads int
 	// fillDest, when nonzero, is a destination that fills up partway: every
 	// CopyMove writes half of each file there, leaves the source where it
 	// is, and answers with this error code.
@@ -127,10 +130,39 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 	t.Helper()
 	f := &moveVerifyFake{root: t.TempDir()}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.ParseForm()
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+			r.ParseMultipartForm(32 << 20)
+		} else {
+			r.ParseForm()
+		}
 		switch r.FormValue("api") {
 		case "SYNO.API.Info":
 			fakeInfo(w, r.FormValue("query"))
+		case "SYNO.FileStation.Upload":
+			// Never overwrites, like File Station without the overwrite
+			// parameter: an existing name is 1805.
+			src, hdr, err := r.FormFile("file")
+			if err != nil {
+				fakeEnv(w, 1800, nil)
+				return
+			}
+			defer src.Close()
+			out, err := os.OpenFile(filepath.Join(f.real(r.FormValue("path")), hdr.Filename), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+			if err != nil {
+				code := 1800
+				if os.IsExist(err) {
+					code = 1805
+				}
+				fakeEnv(w, code, nil)
+				return
+			}
+			defer out.Close()
+			if _, err := io.Copy(out, src); err != nil {
+				fakeEnv(w, 1800, nil)
+				return
+			}
+			f.uploads++
+			fakeEnv(w, 0, nil)
 		case "SYNO.FileStation.List":
 			switch r.FormValue("method") {
 			case "list_share":
