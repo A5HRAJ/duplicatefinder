@@ -58,6 +58,11 @@ package versions shown in Package Center.
   browser start a scan or a move, or clear the reference folders. The app
   now accepts such requests only in the form it sends them itself, which a
   browser will not send to another site without its consent.
+- The app's gateway passed the administrator's DSM session to whatever was
+  listening on the service's port. Had the service stopped and another
+  program on the NAS taken its port, that program would have received the
+  session. The gateway now checks that the listener belongs to the
+  package's own user, and sends nothing otherwise.
 
 ## [1.1.12] - 2026-11-17
 
