@@ -54,8 +54,8 @@ would take away the only copy of something.
 | B3 | Keep that rule when copies are named through a different route | ✅ | `TestKeepOneDropsAlias`, smoke keep-one via alias |
 | B4 | Never count a copy the app already moved as the copy that stays, even after its folder is renamed or the NAS restarts | ✅ | `TestKeepOneNeverLetsTheLastOriginalFollowItsMovedCopy`, `TestMovedCopyIsRecognisedByItsData`, audit "moved copies" (three sections) |
 | B5 | With Verify on, re-read the copy that stays first, and refuse if it changed since the scan | ✅ | `TestKeepOneReadsTheCopyThatStays`, audit "a changed copy that would stay" |
-| B6 | Count duplicates inside a folder being moved as moving too | 🟡 | Designed in. Find or write a test that moves a folder holding the last copy |
-| B7 | Check which copies exist now, not when the scan ran (one deleted outside the app since doesn't count as staying) | 🟡 | Designed in. Find or write a test that deletes a copy after the scan, then moves the other |
+| B6 | Count duplicates inside a folder being moved as moving too | ✅ | Audit "folders holding the last copy": two junk-only folders holding the same file never both leave — in one request, one after the other, or with a rescan between |
+| B7 | Check which copies exist now, not when the scan ran (one deleted outside the app since doesn't count as staying) | ✅ | Audit "copies that went away after the scan": a copy deleted, or rewritten to another size, after the scan never counts as the copy that stays (verification off, so the existence check alone); `TestKeepOneDrops` for the decision itself |
 | B8 | Never move anything out of a read-only reference folder, including through a shortcut | ✅ | `TestRefMatcherProtectsThroughAlias`, smoke reference refusals |
 | B9 | Never move anything into a reference folder | ✅ | Audit "moves into a reference folder": refused into the folder, a folder inside it, and through a shortcut, in both layouts, with nothing created there |
 | B10 | Warn you if the record of moved copies is lost or damaged, rather than quietly dropping the protection | ✅ | `TestLostRecordsWarnUntilAcknowledged`, `TestDamagedRecordsRecoveredFromResults`, audit "move records lost" |
@@ -76,9 +76,9 @@ would take away the only copy of something.
 | C8 | Count a hidden folder (e.g. `.git`), a zero-byte file, or a folder named like junk as real content, at any depth inside a folder of empty folders | ✅ | `TestNativeJunkCheckRejectsJunkNamedDirectories`, `TestConfirmEmptyLooksInsideFolders`, `TestPassedOverIsContentMatchesTheConfirmation`, `TestJunkNamedFolderIsContentForItsParent`, `TestZeroByteFileIsNotJunk`, smoke "hiddenonly", audit "folders holding only empty folders" |
 | C9 | Not call a folder empty just because it, or a folder inside it, couldn't be read, or held too much to read in full | ✅ | smoke "unreadable folder not reported as empty", `TestConfirmEmptyIsBoundedAndFailsClosed` |
 | C10 | Never list backup files (`.bak` etc.) as junk, and refuse a temporary-file row that no longer looks like junk | ✅ | `TestBackupNamesAreNotJunk`, `TestMoveRefusesATempRowNoLongerJunk` |
-| C11 | Let only NAS administrators move anything | 🟡 | The app's internal lock is tested (`TestAuthMiddleware`). The administrator check at the front door has no automated test |
+| C11 | Let only NAS administrators move anything | ✅ | `test/gateway.sh` runs the real front door (`spk/ui/api.cgi`) against stand-ins for DSM's sign-in module and group lookup: no session, a non-administrator, a group merely named like administrators, a token that fails (never falling back to the cookie), a helper that fails after printing a name, and an empty, duplicated or smuggled token are all refused before the app is reached; `TestAuthMiddleware` for the daemon's own lock |
 | C12 | Never run a scan and a move at once | ✅ | `TestScanRefusedWhileMoveActive`, `TestBeginMoveRefusesAScanThatStartedAfterThePrecheck` |
-| C13 | Never run two moves at once | 🟡 | The window refuses it (smoke). The app's own refusal isn't tested directly |
+| C13 | Never run two moves at once | ✅ | Audit "a move cut short by a stop": while a move runs, the daemon refuses a second one at once and moves nothing; smoke for the window |
 
 ## D. Where files land
 
@@ -89,7 +89,7 @@ would take away the only copy of something.
 | D3 | Refuse a destination inside the folder being moved | ✅ | `TestMoveRefusesADestinationInsideTheFolderBeingMoved`; audit "a folder moved into itself" (both layouts, nothing created) |
 | D4 | Refuse moving a file into the folder it's already in | ✅ | smoke "plain move into the folder the file already sits in" |
 | D5 | Give each batch its own folder, never mixing into an earlier batch's | ✅ | `TestAllocBatchFolder*`, smoke "second batch gets its own numbered folder" |
-| D6 | When a name gets too long to add " (1)", leave the file in a clearly reported holding folder, never lose it | 🟡 | The reported holding folder is tested (`TestStagedMoveLostReplyParksInsteadOfDeleting`). The too-long name that causes it isn't |
+| D6 | When a name gets too long to add " (1)", leave the file in a clearly reported holding folder, never lose it | ✅ | Audit "a name too long for ' (1)'": a 255-byte name clashing at the destination ends in a holding folder the report names, verified intact, with the file already there untouched; `TestStagedMoveLostReplyParksInsteadOfDeleting` |
 | D7 | Tell you where every file went, and keep that report until you've seen it, across a restart | ✅ | `TestMoveReportIsKeptUntilShownAndSurvivesARestart`, smoke kept report |
 | D8 | Refuse before starting if the destination doesn't have room | ✅ | audit "free space" |
 | D9 | Put files on USB and external shares where you chose, even when the folder name differs from the share name | ✅ | `TestShareSpacePathUsesShareNamesNotDirectories`, smoke USB move |
@@ -154,8 +154,8 @@ would take away the only copy of something.
 
 | | Count |
 |---|---|
-| ✅ Proven | 59 |
-| 🟡 Partly proven | 14 |
+| ✅ Proven | 64 |
+| 🟡 Partly proven | 9 |
 | ❌ Protected but unproven, or not yet protected | 0 |
 | ❓ Undecided | 0 |
 | Decided against | 1 (I2) |

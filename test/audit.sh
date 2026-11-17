@@ -319,6 +319,83 @@ sys.exit(0 if len(rows)==4 and not any(rows.values()) else "rows wrong: %r" % ro
 rm -f "$SHARE"/g5-*
 pass "a destination that fills up mid-move loses nothing, verified or not, and the report says so"
 
+echo "== folders holding the last copy"
+# A folder holding nothing but junk is offered as empty, and moving it takes
+# the junk along. When that junk is a duplicate, the folder counts as moving
+# its copy: two such folders holding the same file never both leave — not in
+# one request, not one after the other, and not with a rescan in between that
+# pairs the moved copy with the one left behind.
+for d in j1 j2 j3 j4 j5 j6; do mkdir -p "$SHARE/jf/$d"; done
+printf 'a real file, so each folder below is offered on its own' > "$SHARE/jf/keep.txt"
+printf 'thumbnail cache, pair one' > "$SHARE/jf/j1/Thumbs.db"; cp -p "$SHARE/jf/j1/Thumbs.db" "$SHARE/jf/j2/Thumbs.db"
+printf 'thumbnail cache, pair two!' > "$SHARE/jf/j3/Thumbs.db"; cp -p "$SHARE/jf/j3/Thumbs.db" "$SHARE/jf/j4/Thumbs.db"
+printf 'thumbnail cache, pair three!!' > "$SHARE/jf/j5/Thumbs.db"; cp -p "$SHARE/jf/j5/Thumbs.db" "$SHARE/jf/j6/Thumbs.db"
+mkdir -p "$SHARE/jfdest"
+scan '["duplicates","empty_folders"]'
+listed=$(api GET '/api/results?tool=empty_folders' | python3 -c 'import json,sys; print(" ".join(sorted(f["name"] for f in json.load(sys.stdin)["files"] if f["name"].startswith("j") and f["name"][1:].isdigit())))')
+[ "$listed" = "j1 j2 j3 j4 j5 j6" ] || fail "fixture: the junk-only folders are not all offered as empty: $listed"
+efmove() { # efmove <folder>... — one empty_folders request into jfdest
+	local files="" f
+	for f in "$@"; do files="$files${files:+,}\"$SHARE/jf/$f\""; done
+	api POST /api/move "{\"tool\":\"empty_folders\",\"files\":[$files],\"dest\":\"$SHARE/jfdest\",\"verify\":false,\"preserve\":false}"
+}
+r=$(efmove j1 j2)
+echo "$r" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+ok=len(r.get("moved") or [])==1 and len(r["errors"])==1 and "keeping one copy" in r["errors"][0]["error"]
+sys.exit(0 if ok else 1)' || fail "moving both folders of a pair in one request did not hold one back: $r"
+[ "$(ls "$SHARE"/jf/j1/Thumbs.db "$SHARE"/jf/j2/Thumbs.db 2>/dev/null | wc -l | tr -d ' ')" = 1 ] || fail "the pair's copies did not end with exactly one in place"
+r=$(efmove j3); echo "$r" | grep -q '"moved":\["' || fail "fixture: the first folder of pair two did not move: $r"
+r=$(efmove j4); echo "$r" | grep -q 'keeping' || fail "after one folder moved, the folder holding the last copy moved too: $r"
+[ -f "$SHARE/jf/j4/Thumbs.db" ] || fail "the last copy of pair two left its folder"
+r=$(efmove j5); echo "$r" | grep -q '"moved":\["' || fail "fixture: the first folder of pair three did not move: $r"
+scan '["duplicates","empty_folders"]'
+r=$(efmove j6); echo "$r" | grep -q 'keeping' || fail "after a rescan, the folder holding the last copy moved too: $r"
+[ -f "$SHARE/jf/j6/Thumbs.db" ] || fail "the last copy of pair three left its folder"
+rm -rf "$SHARE/jf" "$SHARE/jfdest"
+pass "a folder holding the last copy of a duplicate is held back, in one request, one after another, and after a rescan"
+
+echo "== copies that went away after the scan"
+# Which copies still exist is asked of File Station at move time. A copy
+# deleted since the scan, or rewritten so it no longer has the scan's size
+# and modified time, does not count as the copy that stays. Verification is
+# off, so this is the existence check alone, not the read of B5.
+printf 'b7 pair one' > "$SHARE/b7a.txt"; cp -p "$SHARE/b7a.txt" "$SHARE/b7b.txt"
+printf 'b7 pair two' > "$SHARE/b7c.txt"; cp -p "$SHARE/b7c.txt" "$SHARE/b7d.txt"
+scan '["duplicates"]'
+rm "$SHARE/b7b.txt"
+printf 'b7 pair two, since rewritten' > "$SHARE/b7d.txt"
+for f in b7a b7c; do
+	r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/$f.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":false}")
+	echo "$r" | grep -q 'keeping one copy' || fail "$f.txt moved although its only other copy changed or went away after the scan: $r"
+	[ -f "$SHARE/$f.txt" ] || fail "$f.txt left despite the refusal"
+done
+rm -f "$SHARE"/b7*.txt
+pass "a copy deleted or rewritten after the scan never counts as the copy that stays"
+
+echo "== a name too long for ' (1)'"
+# A clash at the destination is settled with " (1)", but a name already at
+# the length limit has no room for it. The file must end up somewhere it can
+# be found — a holding folder at the destination, named in the report — and
+# the file already there must stay as it was.
+LONG=$(python3 -c 'print("n"*251 + ".bin")')
+mkdir -p "$SHARE/longdest" "$SHARE/longsrc"
+printf 'already at the destination' > "$SHARE/longdest/$LONG"
+printf 'the file being moved, with a long name' > "$SHARE/longsrc/$LONG"; cp -p "$SHARE/longsrc/$LONG" "$SHARE/longtwin.bin"
+want=$(sha "$SHARE/longsrc/$LONG")
+scan '["duplicates"]'
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/longsrc/$LONG\"],\"dest\":\"$SHARE/longdest\",\"verify\":true,\"preserve\":false}")
+echo "$r" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); e=r["errors"][0]["error"] if len(r.get("errors") or [])==1 else ""
+sys.exit(0 if "parked in /share/longdest/.dupfinder-tmp-" in e and "verified intact" in e else 1)' || fail "the file with no room for \" (1)\" was not reported in a holding folder: $r"
+[ "$(cat "$SHARE/longdest/$LONG")" = 'already at the destination' ] || fail "the file already at the destination changed"
+held=$(find "$SHARE/longdest" -path '*/.dupfinder-tmp-*' -name "$LONG")
+[ -n "$held" ] && [ "$(sha "$held")" = "$want" ] || fail "the moved file is not intact in the holding folder: $(find "$SHARE/longdest")"
+rm -rf "$SHARE/longdest" "$SHARE/longsrc" "$SHARE/longtwin.bin"
+pass "a file with no room for \" (1)\" is kept, intact, in a holding folder the report names"
+
 echo "== names outside UTF-8"
 if [ "$(uname)" = Linux ]; then
 	BAD="$SHARE/$(printf 'caf\351.txt')"
@@ -570,6 +647,14 @@ CPID=$!
 for _ in $(seq 1 80); do api GET /api/state | grep -q 'never-lands' && break; sleep 0.25; done
 api GET /api/state | grep -q 'never-lands' || fail "fixture: the second move never started: $(api GET /api/state)"
 [ -f "$SHARE/cut/c1-copy.txt" ] || fail "fixture: the first file did not move"
+# While that move runs, the daemon itself refuses a second one — not only the
+# app's window — and the refusal comes before anything moves.
+r=$(curl -s -m 20 -X POST -H 'Content-Type: application/json' \
+	-d "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/c2.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}" \
+	"http://127.0.0.1:$PORT/api/move") || fail "a second move waited for the running one instead of being refused (no answer in 20s)"
+echo "$r" | grep -q 'a move is already running' || fail "a second move was not refused while one was running: $r"
+[ -f "$SHARE/c2.txt" ] && [ -z "$(find "$SHARE/dest" -name c2.txt)" ] || fail "the refused second move moved its file"
+pass "a second move is refused while one is running, and moves nothing"
 kill -TERM "$DPID"; wait "$DPID" 2>/dev/null || true; DPID=""
 wait "$CPID" 2>/dev/null || true
 [ -f "$STATE/moves.journal" ] || fail "the cut-short move left no journal"
