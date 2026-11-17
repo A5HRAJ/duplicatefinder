@@ -4,6 +4,14 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
+## [Unreleased]
+
+### Fixed
+- A folder name containing HTML could run as code in the administrator's
+  DSM page when the mouse rested on that folder in the sidebar's scan
+  scope. Its tooltip now shows the name as plain text, like every other
+  tooltip in the app.
+
 ## [1.1.12] - 2026-11-17
 
 ### Added

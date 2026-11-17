@@ -79,6 +79,7 @@ would take away the only copy of something.
 | C11 | Let only NAS administrators move anything | ✅ | `test/gateway.sh` runs the real front door (`spk/ui/api.cgi`) against stand-ins for DSM's sign-in module and group lookup: no session, a non-administrator, a group merely named like administrators, a token that fails (never falling back to the cookie), a helper that fails after printing a name, and an empty, duplicated or smuggled token are all refused before the app is reached; `TestAuthMiddleware` for the daemon's own lock |
 | C12 | Never run a scan and a move at once | ✅ | `TestScanRefusedWhileMoveActive`, `TestBeginMoveRefusesAScanThatStartedAfterThePrecheck` |
 | C13 | Never run two moves at once | ✅ | Audit "a move cut short by a stop": while a move runs, the daemon refuses a second one at once and moves nothing; smoke for the window |
+| C14 | Never let a file or folder name run as code in the administrator's DSM page — a script there could move or delete anything | ✅ | smoke "tooltips are TEXT": evidence, status and scope-list tooltips decode to text, never markup (the scope list's did not until 2026-11-17) |
 
 ## D. Where files land
 
@@ -154,9 +155,9 @@ would take away the only copy of something.
 
 | | Count |
 |---|---|
-| ✅ Proven | 64 |
+| ✅ Proven | 65 |
 | 🟡 Partly proven | 9 |
 | ❌ Protected but unproven, or not yet protected | 0 |
 | ❓ Undecided | 0 |
 | Decided against | 1 (I2) |
-| **Total** | **74** |
+| **Total** | **75** |

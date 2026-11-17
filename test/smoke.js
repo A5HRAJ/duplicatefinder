@@ -1004,6 +1004,15 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     vR('corrupt', meta, fakeRec);
     const vTip = decodeAttr(meta.attr || '');
     check('status tooltip decodes to text, never markup', vTip.indexOf('<') < 0 && /&lt;img/.test(vTip));
+    // The scope list in the sidebar: a folder's name is whatever someone with
+    // write access to a share typed, and the admin adding that folder to the
+    // scope must not run it by hovering over the row.
+    win.scopeList.getStore().loadData([['/volume1/share/' + hostile, false], ['/volume1/share/ref' + hostile, true]]);
+    const scopeTips = Array.from(win.scopeList.getEl().dom.querySelectorAll('[ext\\:qtip]')).map((el) => el.getAttribute('ext:qtip') || '');
+    check('scope list tooltips decode to text, never markup',
+      scopeTips.length === 2 && scopeTips.every((t) => t.indexOf('<') < 0 && /&lt;img/.test(t)));
+    check('scope list text is escaped', !win.scopeList.getEl().dom.querySelector('img'));
+    win.syncScopeList();
   }
 
   // ---- a failed page load still ENDS the load ----------------------------

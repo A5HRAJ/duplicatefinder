@@ -1127,9 +1127,11 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			this.scopeList = new Ext.list.ListView({
 				store: new Ext.data.ArrayStore({ fields: ['path', 'ro'], data: [] }),
 				// {path:htmlEncode}: folder names are user-created data and
-				// XTemplate does not escape by default (stored-XSS hazard)
+				// XTemplate does not escape by default (stored-XSS hazard). The
+				// tooltip is encoded TWICE, as qtipText does: QuickTips reads the
+				// attribute back already decoded and renders it as HTML.
 				columns: [{ header: 'Folder', dataIndex: 'path', tpl:
-					'<span class="df-mono" ext:qtip="{path:htmlEncode}{[values.ro ? \' — read-only reference folder: its files are scanned but never selected or moved\' : \'\']}">' +
+					'<span class="df-mono" ext:qtip="{[Ext.util.Format.htmlEncode(Ext.util.Format.htmlEncode(values.path))]}{[values.ro ? \' — read-only reference folder: its files are scanned but never selected or moved\' : \'\']}">' +
 					'{[values.ro ? \'\\ud83d\\udd12 \' : \'\']}{path:htmlEncode}</span>' }],
 				hideHeaders: true,
 				singleSelect: true,
