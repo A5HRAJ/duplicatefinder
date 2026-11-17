@@ -69,6 +69,16 @@ func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan 
 			unreadable(p)
 		}
 	}
+	// What the walk passes over — a folder it does not enter, a symlink or
+	// a special file — goes the same way when the empty-folder rule counts
+	// it as content (passedOverIsContent): the folder holding it is then
+	// never offered as empty, which leaves the empty folders beside it to be
+	// offered instead.
+	notePassedOver := func(p string, d fs.DirEntry) {
+		if unreadable != nil && passedOverIsContent(d.Name(), d.IsDir()) {
+			unreadable(p)
+		}
+	}
 	// path is the user-facing location stored in results; rel/rh address the
 	// same entry through its pinned root for later content reads. created is
 	// left zero on purpose: Created Dates come from File Station only (see
@@ -179,10 +189,12 @@ func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan 
 				return nil
 			}
 			if !scannable(d) {
+				notePassedOver(display, d)
 				return nil
 			}
 			if d.IsDir() {
 				if rel != "." && skipName(d.Name()) {
+					notePassedOver(display, d)
 					return fs.SkipDir
 				}
 				if rel != "." && len(selfm) > 0 {

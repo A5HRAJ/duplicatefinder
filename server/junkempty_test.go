@@ -469,3 +469,49 @@ func TestConfirmEmptyIsBoundedAndFailsClosed(t *testing.T) {
 		t.Fatalf("the native half on an unreadable folder: want an error, got %v %v", ok, err)
 	}
 }
+
+// The confirmation refuses a folder holding a folder with a junk name, so the
+// walk has to count one as content for the folder around it. Otherwise that
+// folder is offered as the topmost candidate, refused, and the genuinely
+// empty folders beside it — the junk-named one included — are never offered.
+func TestJunkNamedFolderIsContentForItsParent(t *testing.T) {
+	offered, reported := driveEF(t, []fEnt{
+		efDir("/r/ef"),
+		efDir("/r/ef/a"),
+		efDir("/r/ef/cache.tmp"),
+	}, func(string) bool { return true })
+	want := []string{"/r/ef/a", "/r/ef/cache.tmp"}
+	if strings.Join(offered, " ") != strings.Join(want, " ") {
+		t.Fatalf("want %v offered, got %v", want, offered)
+	}
+	if strings.Join(reported, " ") != strings.Join(want, " ") {
+		t.Fatalf("want %v reported, got %v", want, reported)
+	}
+}
+
+// What the walk passes over without visiting is content for the folder
+// holding it exactly when the confirmation would refuse that folder: every
+// folder the walk does not enter except @eaDir, and every symlink, pipe,
+// socket or device whose name is not junk.
+func TestPassedOverIsContentMatchesTheConfirmation(t *testing.T) {
+	cases := []struct {
+		name  string
+		isDir bool
+		want  bool
+	}{
+		{"@eaDir", true, false},
+		{".git", true, true},
+		{".DS_Store", true, true},
+		{"@tmp", true, true},
+		{"#recycle", true, true},
+		{"#snapshot", true, true},
+		{"lost+found", true, true},
+		{"photos", false, true}, // a symlink, pipe or socket named like content
+		{"x.tmp", false, false}, // the same under a junk name: junk, as the confirmation reads it
+	}
+	for _, c := range cases {
+		if got := passedOverIsContent(c.name, c.isDir); got != c.want {
+			t.Errorf("%q (dir %v): got %v, want %v", c.name, c.isDir, got, c.want)
+		}
+	}
+}

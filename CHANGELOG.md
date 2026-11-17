@@ -17,6 +17,11 @@ package versions shown in Package Center.
   cannot be read. The move checks every level again before anything moves,
   and a move to another volume with Verify on now checks the copy at every
   level before the original is removed.
+- An empty folder sitting next to a hidden folder (such as `.git`), a
+  folder with a junk name, or a shortcut (symlink) was never listed. The
+  app checked the folder holding them as a whole, rightly refused it, and
+  never looked at the empty folder beside them on its own. That empty
+  folder is now listed by itself; the folder holding it still is not.
 
 ## [1.1.11] - 2026-11-17
 

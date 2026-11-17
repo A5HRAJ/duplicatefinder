@@ -158,11 +158,15 @@ func readJunkDir(dir string, seen *int) (subs []string, ok bool, err error) {
 // is junk or a folder holding only junk. A folder holding nothing but an
 // empty folder is therefore offered and listed as the one row: the folder
 // inside rides along when it moves. The walker skips hidden/system
-// DIRECTORIES (".*", "@eaDir", "#recycle", …), so a candidate may hold one
-// at any depth — confirmation accepts @eaDir (Synology's thumbnail cache,
-// regenerated on demand) and rejects every other (innerDir): a folder whose
-// only child is .git is a repository, not clutter. Directories whose
-// contents could not be read have unknown contents
+// DIRECTORIES (".*", "@eaDir", "#recycle", …) — confirmation accepts @eaDir
+// (Synology's thumbnail cache, regenerated on demand) and rejects every
+// other (innerDir): a folder whose only child is .git is a repository, not
+// clutter. The walk reports each one it passes over, and every symlink or
+// special file with a name that is not junk (passedOverIsContent), so the
+// folder holding one has content here too and is never offered: offered,
+// it would be refused, and the empty folders beside it never offered at
+// all. A folder with a junk name counts as content the same way.
+// Directories whose contents could not be read have unknown contents
 // — e.g. a Hyper Backup .hbk vault the package user cannot open — so they
 // and their ancestors count as non-empty rather than being offered for
 // moving.
@@ -322,6 +326,12 @@ func (e *emptyFolderScan) visit(rootIdx int, f fEnt) {
 		e.stack = append(e.stack, efFrame{path: filepath.Dir(f.path), isRoot: true})
 	}
 	if f.isDir {
+		// A folder with a junk name is content for the folder holding it, as
+		// the confirmation judges it (innerDir): junk names describe files.
+		// It is still a folder of its own, offered if it holds nothing.
+		if isTempName(f.name) {
+			e.markHasFile(&e.stack[len(e.stack)-1])
+		}
 		e.stack = append(e.stack, efFrame{path: f.path, mod: f.mod})
 		return
 	}
@@ -351,7 +361,9 @@ func (e *emptyFolderScan) visit(rootIdx int, f fEnt) {
 
 // noteUnreadable marks the directory the walk could not read — and with it
 // every ancestor, once they pop — as holding content. Unknown contents must
-// never read as empty.
+// never read as empty. The walk also calls it for an entry it passes over
+// that the confirmation would refuse (passedOverIsContent): p then has no
+// frame of its own, and the folder holding it is the one marked.
 func (e *emptyFolderScan) noteUnreadable(p string) {
 	e.popTo(p)
 	if len(e.stack) == 0 {
@@ -420,4 +432,19 @@ func (e *emptyFolderScan) finish(s *Server, cancel chan struct{}, confirm func(s
 		errs = append(errs, fmt.Sprintf("%d empty-folder candidates could not be confirmed empty and were left out (%s)", failed, firstErr))
 	}
 	return out, trunc, errs
+}
+
+// passedOverIsContent reports whether an entry the walk passes over without
+// visiting it holds content as far as empty folders go: exactly what the
+// confirmation would refuse. That is every folder the walk does not enter
+// except @eaDir (innerDir), and every symlink, pipe, socket or device whose
+// name is not junk. The walk reports these through the unreadable callback
+// (noteUnreadable), so the folder holding one is never a candidate and the
+// empty folders beside it are offered in its place.
+func passedOverIsContent(name string, isDir bool) bool {
+	if isDir {
+		skip, _ := innerDir(name)
+		return !skip
+	}
+	return !isTempName(name)
 }

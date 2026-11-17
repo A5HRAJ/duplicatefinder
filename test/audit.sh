@@ -16,8 +16,9 @@
 #   Stop            /api/cancel ends a running scan
 #   empty folders   a folder holding only empty folders (or junk) is listed and
 #                   moves, verified, to another volume; a hidden folder or a
-#                   real file at any depth keeps it off the list, and a file
-#                   that arrives two levels down after the scan stops its move
+#                   real file at any depth keeps it off the list, the empty
+#                   folders beside one are still listed, and a file that
+#                   arrives two levels down after the scan stops its move
 #   free space      a move onto a volume that cannot hold the files is refused
 #                   before anything is created; a move within the volume is not
 #   moved copies    a copy the app moved, rescanned beside its original, is
@@ -221,6 +222,15 @@ printf 'junk two folders down' > "$SHARE/efjunk/a/b/Thumbs.db"
 printf 'a real file' > "$SHARE/efreal/inner/keep.txt"
 printf '[core]' > "$SHARE/efgit/inner/.git/config"
 printf 'a photo in a folder with a junk name' > "$SHARE/efds/inner/.DS_Store/precious.jpg"
+# An empty folder BESIDE what keeps its parent off the list is listed on its
+# own: beside a hidden folder holding a file, beside a folder with a junk
+# name (itself empty, so listed too), and beside a symlink. The walk passes
+# over or walks into each of these without finding a file, so it has to
+# count them as content itself; leaving that to the confirmation offers the
+# parent, refuses it, and never offers the empty folder beside it.
+mkdir -p "$SHARE/efside/a" "$SHARE/efside/b/.git" "$SHARE/efside2/a" "$SHARE/efside2/cache.tmp" "$SHARE/efside3/a"
+printf '[core]' > "$SHARE/efside/b/.git/config"
+ln -s "$SHARE/dest" "$SHARE/efside3/link"
 scan '["empty_folders"]'
 api POST /api/results '{"tool":"empty_folders","offset":0,"limit":100}' | python3 -c '
 import json,sys
@@ -228,7 +238,8 @@ share=sys.argv[1]
 d=json.load(sys.stdin)
 rows={f["path"]+"/"+f["name"] for f in d.get("files") or []}
 mine={r for r in rows if r.startswith(share+"/ef")}
-want={share+"/efnest", share+"/efjunk"}
+want={share+"/efnest", share+"/efjunk", share+"/efside/a", share+"/efside2/a",
+      share+"/efside2/cache.tmp", share+"/efside3/a"}
 if mine!=want: sys.exit("listed %r, want %r; errors %r" % (sorted(mine), sorted(want), d.get("errors")))' "$SHARE" || fail "folders holding only empty folders are not listed as they should be"
 r=$(api POST /api/move "{\"tool\":\"empty_folders\",\"files\":[\"$SHARE/efnest\"],\"dest\":\"$USB/usbshare\",\"verify\":true,\"preserve\":false}")
 echo "$r" | grep -q '"moved":\["' || fail "a verified move of a folder of empty folders to another volume failed: $r"
@@ -238,8 +249,9 @@ printf 'arrived after the scan' > "$SHARE/efjunk/a/b/late.txt"
 r=$(api POST /api/move "{\"tool\":\"empty_folders\",\"files\":[\"$SHARE/efjunk\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":false}")
 echo "$r" | grep -q 'no longer empty' || fail "a folder that gained a file two levels down since the scan was not refused: $r"
 [ -f "$SHARE/efjunk/a/b/late.txt" ] || fail "the late file moved despite the refusal"
-rm -rf "$SHARE/efnest" "$SHARE/efjunk" "$SHARE/efreal" "$SHARE/efgit" "$SHARE/efds" "$USB/usbshare/efnest"
-pass "a folder holding only empty folders (or junk) is listed and moves, verified, across volumes; hidden or real content at any depth keeps it off the list"
+rm -rf "$SHARE/efnest" "$SHARE/efjunk" "$SHARE/efreal" "$SHARE/efgit" "$SHARE/efds" \
+	"$SHARE/efside" "$SHARE/efside2" "$SHARE/efside3" "$USB/usbshare/efnest"
+pass "a folder holding only empty folders (or junk) is listed and moves, verified, across volumes; hidden or real content at any depth keeps it off the list, and the empty folders beside such content are listed"
 
 echo "== free space"
 stop_daemon
