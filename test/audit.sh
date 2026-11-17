@@ -742,6 +742,31 @@ r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/w1.txt\"],\
 echo "$r" | grep -q 'already moved' || fail "what the folder record restored was not kept across a restart: $r"
 pass "with every record of the app's lost, the record a flat move left in its folder keeps the original in place"
 
+echo "== a folder record copied beside the original"
+# A record speaks for the folder it was written in. Copied anywhere else —
+# beside the original, say, by copying a cleanup folder's contents back — it
+# must not mark the original as moved: with every copy marked, any copy may
+# stay, and the last original could follow the others.
+mkdir -p "$SHARE/lib" "$SHARE/other" "$SHARE/clean"
+printf 'the library photo' > "$SHARE/lib/p.jpg"; cp -p "$SHARE/lib/p.jpg" "$SHARE/other/p.jpg"
+scan '["duplicates"]'
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/other/p.jpg\"],\"dest\":\"$SHARE/clean\",\"verify\":false,\"preserve\":false}")
+echo "$r" | grep -q '"moved":\["' || fail "fixture: the flat move failed: $r"
+cp -Rp "$SHARE/clean/.duplicate-finder-moved" "$SHARE/lib/"
+scan '["duplicates"]'
+api POST /api/results '{"tool":"duplicates","offset":0,"limit":100}' | python3 -c '
+import json,sys
+share=sys.argv[1]
+out={f["path"]+"/"+f["name"]: f.get("out",False) for g in json.load(sys.stdin)["groups"] for f in g["files"]}
+want={share+"/lib/p.jpg":False, share+"/clean/p.jpg":True}
+bad={p:(out.get(p),w) for p,w in want.items() if out.get(p)!=w}
+if bad: sys.exit("flags wrong (got, want): %r" % bad)' "$SHARE" || fail "a record copied beside the original marked the original as moved"
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/lib/p.jpg\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")
+echo "$r" | grep -q 'already moved' || fail "the original moved past its moved copy: $r"
+[ -f "$SHARE/lib/p.jpg" ] || fail "the original left despite the refusal"
+rm -rf "$SHARE/lib" "$SHARE/other" "$SHARE/clean"
+pass "a folder record copied into another folder does not speak for that folder"
+
 echo "== SIGTERM"
 kill -TERM "$DPID"
 for i in $(seq 1 20); do kill -0 "$DPID" 2>/dev/null || break; sleep 0.25; done

@@ -47,9 +47,27 @@ type movedMarkEntry struct {
 }
 
 type movedMarkRecord struct {
-	About string           `json:"about"`
-	At    string           `json:"at"`
-	Moved []movedMarkEntry `json:"moved"`
+	About string `json:"about"`
+	At    string `json:"at"`
+	// Folder is the folder the record was written in, as its shared folder
+	// and path with the volume left off ("/Photos/cleanup", see
+	// markFolderKey). A record speaks for that folder alone: copied anywhere
+	// else, beside the original say, it must not mark the original as moved —
+	// with every copy of a group marked, keep-one lets any copy stay. Records
+	// written before this field existed carry none and are honoured where
+	// they are found.
+	Folder string           `json:"folder,omitempty"`
+	Moved  []movedMarkEntry `json:"moved"`
+}
+
+// markFolderKey names the folder at canonical path canon the way a record
+// does: without its volume root, so a record still matches after the files
+// are carried to another NAS whose volume numbers differ.
+func markFolderKey(canon string) string {
+	if v := volumeOf(canon, volumeRootsResolved()); v != "" {
+		return canon[len(v):]
+	}
+	return canon
 }
 
 // leaveMovedMark writes the record of the regular files a flat move landed
@@ -75,7 +93,7 @@ func leaveMovedMark(sess *fsSession, destShare, destCanon string, landed []strin
 	if len(ents) == 0 {
 		return nil
 	}
-	body, err := json.MarshalIndent(movedMarkRecord{About: movedMarkAbout, At: time.Now().UTC().Format(time.RFC3339), Moved: ents}, "", " ")
+	body, err := json.MarshalIndent(movedMarkRecord{About: movedMarkAbout, At: time.Now().UTC().Format(time.RFC3339), Folder: markFolderKey(destCanon), Moved: ents}, "", " ")
 	if err != nil {
 		return err
 	}
@@ -149,6 +167,9 @@ func (m *movedMarks) load(h *dirhandle.Handle, rel, display, canon string) {
 		var rec movedMarkRecord
 		if json.Unmarshal(b, &rec) != nil {
 			continue
+		}
+		if rec.Folder != "" && rec.Folder != markFolderKey(canon) {
+			continue // written for another folder, and copied here
 		}
 		for _, ent := range rec.Moved {
 			if ent.Name == "" || ent.Name == "." || ent.Name == ".." || strings.Contains(ent.Name, "/") {

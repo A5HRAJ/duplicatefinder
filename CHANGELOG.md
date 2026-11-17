@@ -17,6 +17,12 @@ package versions shown in Package Center.
   folder selected too, both copies of a file could leave. Such a folder is
   no longer offered, and is refused at move time if the reference folder
   was set after the scan.
+- The hidden record a move straight into a folder leaves there could be
+  copied into another folder, for example by copying a cleanup folder's
+  contents back, hidden folder included. Beside the original it then
+  marked the original as moved too, and with every copy marked as moved,
+  the last original could be moved after them. A record now names the
+  folder it was written for and counts only there.
 
 ## [1.1.12] - 2026-11-17
 

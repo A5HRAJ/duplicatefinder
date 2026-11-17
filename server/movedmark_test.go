@@ -58,6 +58,9 @@ func TestFlatMoveLeavesARecordInItsDestination(t *testing.T) {
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("record lists %+v, want %+v", got, want)
 	}
+	if recs[0].Folder != markFolderKey(dest) {
+		t.Fatalf("the record names folder %q, want %q", recs[0].Folder, markFolderKey(dest))
+	}
 	if !strings.Contains(recs[0].About, "Duplicate Finder moved") {
 		t.Fatalf("the record does not say what it is: %q", recs[0].About)
 	}
@@ -155,5 +158,39 @@ func TestRecordEntriesAreBoundedAndTheBoundReported(t *testing.T) {
 	}
 	if newMovedMarks().overflow() != "" {
 		t.Fatal("an unbounded scan reported an overflow")
+	}
+}
+
+// A record speaks for the folder it was written in. One whose folder is
+// another folder's — copied here, beside an original — is ignored; one
+// written for this folder is honoured; one from before records named their
+// folder is honoured where it lies.
+func TestARecordSpeaksOnlyForItsOwnFolder(t *testing.T) {
+	mtime := int64(1700000000)
+	at := time.Unix(mtime, 0)
+	for _, tc := range []struct {
+		name, folder string
+		want         bool
+	}{
+		{"written for this folder", "/canon/share/lib", true},
+		{"copied from another folder", "/canon/share/clean", false},
+		{"written before records named their folder", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			os.Mkdir(filepath.Join(dir, movedMarkDir), 0o755)
+			body, _ := json.Marshal(movedMarkRecord{Folder: tc.folder, Moved: []movedMarkEntry{{"p.jpg", 9, mtime}}})
+			os.WriteFile(filepath.Join(dir, movedMarkDir, "r.json"), body, 0o644)
+			h, err := dirhandle.Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer h.Close()
+			m := newMovedMarks()
+			m.load(h, ".", "/volume1/share/lib", "/canon/share/lib")
+			if _, ok := m.match("/volume1/share/lib", "p.jpg", 9, at); ok != tc.want {
+				t.Fatalf("recognised=%v, want %v", ok, tc.want)
+			}
+		})
 	}
 }
