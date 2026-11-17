@@ -70,6 +70,10 @@ package versions shown in Package Center.
   user's folder of the same name gave no warning, though it removed the file
   from the first user's synced copy. It now warns, as any other move out of
   a synced folder does.
+- Choosing Move Anyway after the synced-folder warning agreed to every
+  synced folder, including one that became synced while the question was
+  open. It now agrees only to the folders the question named; any other is
+  asked about first, and nothing moves until then.
 
 ## [1.1.12] - 2026-11-17
 

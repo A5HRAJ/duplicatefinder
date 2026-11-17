@@ -278,3 +278,25 @@ func TestSyncHitsSeesThroughTheTwoNamesOfAHome(t *testing.T) {
 		t.Errorf("hits = %+v, want both homes matched", h)
 	}
 }
+
+// Agreeing to move out of the synced folders shown covers those folders
+// only: one that is synced now and was not shown — by another service, or
+// newly — must be asked about first.
+func TestSyncConsentCoversOnlyWhatWasShown(t *testing.T) {
+	shown := []syncHit{{Folder: "/Photos", By: byCloudSync, Files: 2}}
+	if !syncAgreedCovers(shown, []syncHit{{Folder: "/Photos", By: byCloudSync, Files: 5}}) {
+		t.Fatal("the folder that was shown is not covered (file counts may change)")
+	}
+	if syncAgreedCovers(shown, []syncHit{{Folder: "/Photos", By: byCloudSync}, {Folder: "/Photos", By: byDrive}}) {
+		t.Fatal("a second service on the same folder was covered without being shown")
+	}
+	if syncAgreedCovers(shown, []syncHit{{Folder: "/Work", By: byCloudSync}}) {
+		t.Fatal("another folder was covered without being shown")
+	}
+	if syncAgreedCovers(nil, []syncHit{{Folder: "/Photos", By: byCloudSync}}) {
+		t.Fatal("agreeing to nothing covered a synced folder")
+	}
+	if syncAgreedCovers(shown, []syncHit{{By: byDrive, Unchecked: true}}) {
+		t.Fatal("a service that could not be checked was covered without being shown")
+	}
+}

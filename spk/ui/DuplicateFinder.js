@@ -3644,7 +3644,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		// stays clickable while the folder chooser is up — see the capture
 		// there. It only ever labels the folder the daemon creates; the move's
 		// vetting is unaffected by it.
-		doMove: function (recs, dest, preserve, tool, verify, syncOK) {
+		doMove: function (recs, dest, preserve, tool, verify, syncAgreed) {
 			var me = this;
 			var paths = [];
 			Ext.each(recs, function (r) { paths.push(r.get('path') + '/' + r.get('name')); });
@@ -3674,7 +3674,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// verify defaults ON when the caller does not say otherwise — the
 			// dialog always says, so this covers programmatic callers, and the
 			// default lands on the safe side.
-			api('/move', 'POST', { files: paths, dest: dest, preserve: preserve, tool: tool, verify: verify !== false, id: id, syncOK: syncOK === true }, function (err, j, meta) {
+			api('/move', 'POST', { files: paths, dest: dest, preserve: preserve, tool: tool, verify: verify !== false, id: id, syncOK: !!syncAgreed, syncAgreed: syncAgreed || [] }, function (err, j, meta) {
 				if (err && meta && meta.transport) {
 					// The connection died — DSM's web server gave up on the
 					// request long before the 12-hour timeout here — while the
@@ -3692,10 +3692,12 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				busy.close();
 				// Some of the files are in folders another service keeps in
 				// step elsewhere, and nothing has moved: ask, and send the
-				// same move again only on the user's say-so.
-				if (err && j && j.synced && j.synced.length && syncOK !== true) {
+				// same move again only on the user's say-so, naming the
+				// folders they agreed to. A folder that became synced while
+				// the question was open comes back here, and is asked about.
+				if (err && j && j.synced && j.synced.length) {
 					me.confirmSyncedMove(j.synced, paths.length, function () {
-						me.doMove(recs, dest, preserve, tool, verify, true);
+						me.doMove(recs, dest, preserve, tool, verify, j.synced);
 					});
 					return;
 				}

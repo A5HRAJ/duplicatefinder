@@ -377,6 +377,25 @@ func syncHits(areas []syncedArea, unchecked []string, files []string, dest strin
 	return hits
 }
 
+// syncAgreedCovers reports whether every synced folder a move would take
+// files out of was among those the user agreed to (matched by folder,
+// service and whether it could be checked; the file counts may differ).
+func syncAgreedCovers(agreed, hits []syncHit) bool {
+	for _, h := range hits {
+		found := false
+		for _, a := range agreed {
+			if a.Folder == h.Folder && a.By == h.By && a.Unchecked == h.Unchecked {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 // moveSyncHits asks which of the request's files, given by their canonical
 // volume paths, would leave a synced folder by moving to destCanon. Without
 // the share table the folders cannot be located — and File Station can

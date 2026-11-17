@@ -1575,12 +1575,22 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     msg2 = null;
     await pickTo();
     check('the question comes back for a second try', await syncAsked());
+    // While the question is open, Synology Drive starts keeping the same
+    // folder in step too. Agreeing to Cloud Sync is not agreeing to that.
+    fsm.writeFileSync(syncedConf, JSON.stringify({ cloudsync: [shareDir], drive: [shareDir.split('/')[1]] })); // Drive syncs whole shared folders, by name
+    clickBtn(/^Move Anyway$/);
+    for (let i = 0; i < 50 && bodies.length < 3; i++) await sleep(100);
+    check('Move Anyway names the folders it agreed to',
+      bodies.length === 3 && bodies[2].syncOK === true &&
+      JSON.stringify(bodies[2].syncAgreed.map((h) => h.by)) === JSON.stringify(['Cloud Sync']));
+    check('a folder that became synced meanwhile is asked about, and nothing moved',
+      await syncAsked() && /Synology Drive/.test(doc.body.textContent) && fsm.existsSync(srcS));
     clickBtn(/^Move Anyway$/);
     for (let i = 0; i < 50 && !/Moved 1 file/.test(msg2 || ''); i++) await sleep(200);
     check('Move Anyway sends the same move with syncOK',
-      bodies.length === 3 && bodies[2].syncOK === true &&
-      JSON.stringify(bodies[2].files) === JSON.stringify(bodies[1].files) &&
-      bodies[2].dest === bodies[1].dest);
+      bodies.length === 4 && bodies[3].syncOK === true &&
+      JSON.stringify(bodies[3].files) === JSON.stringify(bodies[1].files) &&
+      bodies[3].dest === bodies[1].dest && bodies[3].syncAgreed.length === 2);
     check('and the file moved (' + JSON.stringify(msg2) + ')', !fsm.existsSync(srcS));
 
     // A service that is installed but does not answer cannot be ruled out:

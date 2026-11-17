@@ -46,6 +46,11 @@ type MoveReq struct {
 	// service keeps in step elsewhere (synced.go). Without it such a move is
 	// answered 409 with the folders listed under "synced", and nothing moves.
 	SyncOK bool `json:"syncOK"`
+	// SyncAgreed lists the synced folders the user was shown when they
+	// agreed. The move goes ahead only if every folder it would now take
+	// files out of is among them: one that became synced while the question
+	// was open is asked about in its turn.
+	SyncAgreed []syncHit `json:"syncAgreed"`
 }
 
 func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
@@ -134,12 +139,12 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	// places too — the user's cloud account, their laptop, another NAS. That
 	// is the user's call, so it is asked before anything is created, and the
 	// app sends the move again with syncOK once they have agreed.
-	if !req.SyncOK {
+	{
 		canon := make([]string, 0, len(req.Files))
 		for _, f := range req.Files {
 			canon = append(canon, v.canon.path(filepath.Clean(f)))
 		}
-		if hits := moveSyncHits(sess, canon, destCanon); len(hits) > 0 {
+		if hits := moveSyncHits(sess, canon, destCanon); len(hits) > 0 && !(req.SyncOK && syncAgreedCovers(req.SyncAgreed, hits)) {
 			writeJSON(w, 409, map[string]any{"error": syncHitsMessage(hits), "synced": hits})
 			return
 		}
