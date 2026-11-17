@@ -49,6 +49,10 @@ package versions shown in Package Center.
   folder's record, before it showed any results, threw that away: after
   the package restarted, results from earlier could treat a moved copy as
   an original again. What a scan recognises this way is now saved at once.
+- Results saved before 1.1.12 could still list a copy inside the recycle
+  bin or a snapshot, from when such a folder could be scanned directly, and
+  that copy could count as the one that stays. It never does now, even
+  before the next scan.
 
 ## [1.1.12] - 2026-11-17
 

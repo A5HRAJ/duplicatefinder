@@ -121,3 +121,27 @@ func TestMoveRefusesADestinationInsideTheFolderBeingMoved(t *testing.T) {
 		t.Fatalf("something was created inside the folder: %v", ents)
 	}
 }
+
+// Results saved before 1.1.12 may hold a group member inside the recycle bin
+// or a snapshot (such a folder could then be scanned directly). That copy
+// disappears on its own, so it must never be the copy that stays: moving the
+// one live copy is held back.
+func TestACopyInTheRecycleBinNeverStays(t *testing.T) {
+	f, sess := newMoveVerifyFake(t)
+	live := filepath.Join(f.root, "photo.jpg")
+	bin := filepath.Join(f.root, "#recycle", "photo.jpg")
+	os.MkdirAll(filepath.Dir(bin), 0o755)
+	for _, p := range []string{live, bin} {
+		os.WriteFile(p, []byte("the only live copy"), 0o644)
+	}
+	ent := func(p string) FileEnt {
+		fi, _ := os.Stat(p)
+		return FileEnt{Dir: filepath.Dir(p), Name: filepath.Base(p), Size: fi.Size(), Mod: fmtTime(fi.ModTime()), ModUnix: fi.ModTime().Unix()}
+	}
+	s := &Server{results: map[string]*toolResult{"duplicates": {Tool: "duplicates",
+		Groups: []Group{{ID: "g0", Files: []FileEnt{ent(live), ent(bin)}}}}}}
+	v := s.newMoveVet(MoveReq{Tool: "duplicates", Files: []string{live}}, sess)
+	if !v.drops[v.canon.path(live)] {
+		t.Fatalf("the live copy may move while its only other copy sits in the recycle bin (drops %v)", v.drops)
+	}
+}

@@ -562,6 +562,12 @@ func (s *Server) newMoveVet(req MoveReq, sess *fsSession) *moveVet {
 		if _, in := selfm.under(p); in {
 			delete(exists, p)
 		}
+		// Nor is a copy in the recycle bin or a snapshot, which disappears
+		// on its own. Results saved before such folders were refused as scan
+		// folders can still hold one.
+		if inSelfEmptying(p) {
+			delete(exists, p)
+		}
 	}
 	drops, outHeld, _ := keepOneDropsWhy(groups, requested, canonRefs, canon, exists, moveOut.isOut, nil)
 	return &moveVet{
