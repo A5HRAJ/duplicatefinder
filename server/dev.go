@@ -209,6 +209,20 @@ func mockCopyMove(srcShare, dstShare string, removeSrc bool) int {
 	if strings.Contains(filepath.Base(src), "never-lands") {
 		return mockRunning
 	}
+	// Test hook: a file whose NAME carries this marker meets a destination
+	// that fills up partway — something else writing to it. Half the file is
+	// written, the source stays, and the task fails with File Station's "no
+	// space left on device" (416), or for "fills-dest-generic" with the bare
+	// copy-failure code DSM gives when it names no cause.
+	if strings.Contains(filepath.Base(src), "fills-dest") {
+		if b, err := os.ReadFile(src); err == nil {
+			os.WriteFile(target, b[:len(b)/2], 0o644)
+		}
+		if strings.Contains(filepath.Base(src), "fills-dest-generic") {
+			return 1000
+		}
+		return 416
+	}
 	if removeSrc {
 		if err := os.Rename(src, target); err != nil {
 			return 1001

@@ -12,6 +12,13 @@ package versions shown in Package Center.
   then counted as copies that stay — though they disappear when the bin is
   emptied or the snapshot expires. Such folders are now refused, as they
   already were when met inside a scanned folder.
+- When the destination filled up partway through a move without
+  verification, the app could report the file as "parked" in a hidden
+  staging folder and drop it from the list, although the original never
+  left; the parked file was an incomplete copy. The app now says the
+  original is untouched, removes an incomplete copy it can prove is one,
+  and says where File Station may have left another. "No space left" and
+  "quota used up" are named as such instead of by error number.
 
 ## [1.1.11] - 2026-11-17
 

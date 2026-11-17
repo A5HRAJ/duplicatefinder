@@ -305,16 +305,11 @@ func transitViaFS(s *fsSession, cp, srcShare, outShare, outFS string, want entId
 // holds nothing that exists nowhere else. Otherwise it is left — visible by
 // path in the report — because it may be the only copy there is.
 func (s *fsSession) discardCopy(tmpShare, srcShare string, want entIdent, why error) error {
-	info, err := s.getInfo([]string{srcShare}, []string{"size", "time"})
-	if err == nil {
-		if e, ok := info[srcShare]; ok && e.exists() {
-			if _, same := identMatches(e, []entIdent{want}); same {
-				if derr := s.removeTree(tmpShare); derr == nil {
-					return why
-				}
-				return fmt.Errorf("%v (the unused copy could not be removed from %s)", why, tmpShare)
-			}
+	if s.sourceIntact(srcShare, want) {
+		if derr := s.removeTree(tmpShare); derr == nil {
+			return why
 		}
+		return fmt.Errorf("%v (the unused copy could not be removed from %s)", why, tmpShare)
 	}
 	return fmt.Errorf("%v (a copy was left in %s — the original could not be confirmed in place, so it was kept)", why, tmpShare)
 }

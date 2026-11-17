@@ -376,7 +376,15 @@ a partial move rather than staged, which would split it across two names. A
 move that ends with the file parked in the staging folder reports the full
 path, and with verification on the parked copy is verified there. Failures
 that happen after the source is gone still prune the row, so it can never
-linger as a phantom survivor.
+linger as a phantom survivor. A refused move whose source file is still in
+place as the scan recorded it is never reported as parked: what reached the
+staging folder is then a copy, and one smaller than the file — cut short,
+most often by the destination filling up — is deleted (a single
+`recursive=false` delete of that file, then the empty folder); anything else
+is left and reported by path. When the destination name was free as the
+move began and is taken once File Station refuses it, the report says an
+incomplete copy may be there; that file is not deleted, since another writer
+may have taken the name.
 
 A verified move that leaves one filesystem for another — another volume, a
 USB disk, a remote folder mounted in a share, or another shared folder on

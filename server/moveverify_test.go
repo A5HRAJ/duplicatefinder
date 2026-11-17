@@ -66,6 +66,10 @@ type moveVerifyFake struct {
 	// destination that cannot store every name, as File Station does onto
 	// an exFAT disk ("what?.bin" arrives as "what-.bin"), silently.
 	storeAs func(name string) string
+	// fillDest, when nonzero, is a destination that fills up partway: every
+	// CopyMove writes half of each file there, leaves the source where it
+	// is, and answers with this error code.
+	fillDest int
 }
 
 type fakeTask struct {
@@ -231,6 +235,12 @@ func newMoveVerifyFake(t *testing.T) (*moveVerifyFake, *fsSession) {
 						name = f.storeAs(name)
 					}
 					dst := f.real(destDir + "/" + name)
+					if f.fillDest != 0 {
+						b, _ := os.ReadFile(f.real(sp))
+						os.WriteFile(dst, b[:len(b)/2], 0o644)
+						fakeEnv(w, f.fillDest, nil)
+						return
+					}
 					if r.FormValue("remove_src") == "false" {
 						f.copies++
 						if err := copyTree(f.real(sp), dst); err != nil {

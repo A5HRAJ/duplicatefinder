@@ -273,6 +273,47 @@ done
 rm -rf "$SHARE/ef"
 pass "a folder is never moved into itself or a folder inside it"
 
+echo "== the destination fills up mid-move"
+# Something else fills the destination partway through: the mock writes half
+# of each file there and fails the copy, with File Station's "no space left"
+# code or with the bare failure code. Verified or not, the original stays
+# byte for byte, its row stays listed and is not taken for a moved copy, no
+# staging folder is left, and the report says where any incomplete copy is.
+sha() { python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"; }
+for f in g5-fills-dest g5-fills-dest-generic; do
+	python3 -c 'import os,sys; open(sys.argv[1],"wb").write(os.urandom(256*1024))' "$SHARE/$f.bin"
+	cp -p "$SHARE/$f.bin" "$SHARE/$f-twin.bin"
+done
+sum1=$(sha "$SHARE/g5-fills-dest.bin"); sum2=$(sha "$SHARE/g5-fills-dest-generic.bin")
+scan '["duplicates"]'
+for verify in true false; do
+	for f in g5-fills-dest g5-fills-dest-generic; do
+		r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/$f.bin\"],\"dest\":\"$USB/usbshare\",\"verify\":$verify,\"preserve\":false}")
+		echo "$r" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); verify=sys.argv[1]=="true"; name=sys.argv[2]
+e=r["errors"][0]["error"] if len(r.get("errors") or [])==1 else ""
+ok=not r.get("moved") and "original" in e and "parked" not in e
+if not verify: ok=ok and ("incomplete copy at /usbshare1/"+name+".bin") in e
+sys.exit(0 if ok else 1)' "$verify" "$f" || fail "a move onto a destination that filled up (verify $verify, $f) was not reported as not done: $r"
+		[ "$(sha "$SHARE/$f.bin")" = "$([ $f = g5-fills-dest ] && echo "$sum1" || echo "$sum2")" ] || fail "the original changed or left (verify $verify, $f)"
+		[ -z "$(find "$USB/usbshare" -name '.dupfinder-*')" ] || fail "a staging folder was left behind: $(find "$USB/usbshare")"
+		if [ "$verify" = true ]; then
+			[ -e "$USB/usbshare/$f.bin" ] && fail "a verified move left an incomplete copy at the destination"
+		else
+			rm "$USB/usbshare/$f.bin" || fail "fixture: the mock left no incomplete copy"
+		fi
+	done
+done
+api GET '/api/results?tool=duplicates' | grep -q 'g5-fills-dest-generic.bin' || fail "the row of a file that never left was dropped"
+scan '["duplicates"]'
+api POST /api/results '{"tool":"duplicates","offset":0,"limit":100}' | python3 -c '
+import json,sys
+rows={f["name"]: f.get("out",False) for g in json.load(sys.stdin)["groups"] for f in g["files"] if f["name"].startswith("g5-")}
+sys.exit(0 if len(rows)==4 and not any(rows.values()) else "rows wrong: %r" % rows)' || fail "after a failed move, the pairs are not intact originals"
+rm -f "$SHARE"/g5-*
+pass "a destination that fills up mid-move loses nothing, verified or not, and the report says so"
+
 echo "== names outside UTF-8"
 if [ "$(uname)" = Linux ]; then
 	BAD="$SHARE/$(printf 'caf\351.txt')"
