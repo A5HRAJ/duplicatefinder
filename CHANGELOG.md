@@ -30,6 +30,21 @@ package versions shown in Package Center.
   original is untouched, removes an incomplete copy it can prove is one,
   and says where File Station may have left another. "No space left" and
   "quota used up" are named as such instead of by error number.
+- Empty Folders never listed a folder whose only content was another empty
+  folder, and never listed the folder inside it either: a skeleton of empty
+  folders left behind after moving files out (2015/01, 2015/02, …) did not
+  appear at all. Such a folder is now listed as one row, and the folders
+  inside it go with it when it is moved. It is still left off the list when
+  anything inside it, at any depth, is a real file, a hidden folder such as
+  `.git`, a folder with a junk name such as `.DS_Store`, or a folder that
+  cannot be read. The move checks every level again before anything moves,
+  and a move to another volume with Verify on now checks the copy at every
+  level before the original is removed.
+- An empty folder sitting next to a hidden folder (such as `.git`), a
+  folder with a junk name, or a shortcut (symlink) was never listed. The
+  app checked the folder holding them as a whole, rightly refused it, and
+  never looked at the empty folder beside them on its own. That empty
+  folder is now listed by itself; the folder holding it still is not.
 
 ## [1.1.11] - 2026-11-17
 

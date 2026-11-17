@@ -739,7 +739,7 @@ func (s *Server) moveOne(v *moveVet, batch func() (string, error), sess *fsSessi
 	// again, now, whether it still holds nothing but junk: content that
 	// arrived since the scan must not ride along into the cleanup folder.
 	if v.tool == "empty_folders" && isDirIdent(v.idents[cp]) {
-		empty, cerr := confirmEmpty(cp, sess)
+		empty, cerr := confirmEmpty(cp, sess, nil)
 		if cerr != nil {
 			return cp, "", false, errors.New("could not confirm the folder is still empty — " + cerr.Error())
 		}
