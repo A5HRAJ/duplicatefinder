@@ -356,6 +356,34 @@ r=$(efmove j6); echo "$r" | grep -q 'keeping' || fail "after a rescan, the folde
 rm -rf "$SHARE/jf" "$SHARE/jfdest"
 pass "a folder holding the last copy of a duplicate is held back, in one request, one after another, and after a rescan"
 
+echo "== a reference folder inside a folder offered as empty"
+# A folder holding nothing but a junk-only folder is offered as empty. When
+# that inner folder is a read-only reference folder, the outer one must not
+# be offered, and must not move if the reference was set after the scan —
+# not even alongside a twin folder whose copy the reference was keeping.
+mkdir -p "$SHARE/rf/A/reference" "$SHARE/rf/B"
+printf 'a real file, so A and B are offered on their own' > "$SHARE/rf/keep.txt"
+printf 'thumbnail cache kept by a reference' > "$SHARE/rf/A/reference/Thumbs.db"; cp -p "$SHARE/rf/A/reference/Thumbs.db" "$SHARE/rf/B/Thumbs.db"
+mkdir -p "$SHARE/rfdest"
+r=$(api POST /api/scan "{\"tool\":\"duplicates\",\"tools\":[\"duplicates\",\"empty_folders\"],\"dirs\":[\"$SHARE\"],\"refDirs\":[\"$SHARE/rf/A/reference\"],\"recurse\":true,\"match\":{}}")
+echo "$r" | grep -q '"started":true' || fail "scan refused: $r"
+wait_idle
+api GET '/api/results?tool=empty_folders' | python3 -c '
+import json,sys
+rows=[f["path"]+"/"+f["name"] for f in json.load(sys.stdin)["files"]]
+sys.exit(1 if any(r.endswith("/rf/A") for r in rows) else 0)' || fail "a folder holding a reference folder was offered as empty"
+api POST /api/refs '{"refDirs":[]}' >/dev/null
+scan '["duplicates","empty_folders"]'
+api GET '/api/results?tool=empty_folders' | grep -q '"name":"A"' || fail "fixture: without a reference, A is not offered"
+r=$(api POST /api/refs "{\"refDirs\":[\"$SHARE/rf/A/reference\"]}")
+echo "$r" | grep -q 'reference' || fail "fixture: the reference could not be set: $r"
+r=$(api POST /api/move "{\"tool\":\"empty_folders\",\"files\":[\"$SHARE/rf/A\",\"$SHARE/rf/B\"],\"dest\":\"$SHARE/rfdest\",\"verify\":false,\"preserve\":false}")
+echo "$r" | grep -q 'read-only reference folder' || fail "a folder holding a reference folder was not refused: $r"
+[ -f "$SHARE/rf/A/reference/Thumbs.db" ] || fail "the reference folder's file left with its parent"
+api POST /api/refs '{"refDirs":[]}' >/dev/null
+rm -rf "$SHARE/rf" "$SHARE/rfdest"
+pass "a folder holding a reference folder is neither offered as empty nor moved"
+
 echo "== copies that went away after the scan"
 # Which copies still exist is asked of File Station at move time. A copy
 # deleted since the scan, or rewritten so it no longer has the scan's size

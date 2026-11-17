@@ -645,6 +645,12 @@ func (v *moveVet) refuse(cp string) error {
 		return errors.New("keeping one copy of a duplicate group that lives inside this folder")
 	case isUnder(cp, v.canonRefs):
 		return errors.New("read-only reference file")
+	// A folder offered as empty can hold a junk-only folder that is a
+	// reference folder; moving it would carry the reference away, and with it
+	// a copy keep-one counted as staying. Checked against the live list, so a
+	// reference set after the scan is honoured too.
+	case isDirIdent(v.idents[cp]) && holdsAny(cp, v.canonRefs):
+		return errors.New("this folder holds a read-only reference folder, so it stays where it is")
 	// Refused BEFORE File Station is asked, because asking produces "no
 	// such file or folder" for a file that plainly exists — a refusal
 	// that sends the user looking for a vanished file instead of telling

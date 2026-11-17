@@ -11,6 +11,12 @@ package versions shown in Package Center.
   DSM page when the mouse rested on that folder in the sidebar's scan
   scope. Its tooltip now shows the name as plain text, like every other
   tooltip in the app.
+- Since 1.1.12, a folder holding nothing but a read-only reference folder
+  (one that held only junk files such as Thumbs.db) was offered as an
+  empty folder, and moving it took the reference folder along. With a twin
+  folder selected too, both copies of a file could leave. Such a folder is
+  no longer offered, and is refused at move time if the reference folder
+  was set after the scan.
 
 ## [1.1.12] - 2026-11-17
 

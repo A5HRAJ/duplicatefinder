@@ -200,6 +200,17 @@ func uniquePaths(in []string) []string {
 	return out
 }
 
+// holdsAny reports whether some path in inner lies strictly inside folder p:
+// moving p would carry it along. A path equal to p is isUnder's business.
+func holdsAny(p string, inner []string) bool {
+	for _, q := range inner {
+		if strings.HasPrefix(q, p+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 func isUnder(p string, roots []string) bool {
 	for _, r := range roots {
 		if p == r || strings.HasPrefix(p, r+"/") {

@@ -461,7 +461,17 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 		s.setBand(bands["empty_folders"][0], bands["empty_folders"][1])
 		res := newResult("empty_folders")
 		var confirmErrs []string
+		// A folder holding a reference folder is never offered: the reference
+		// is read-only, and moving its parent would take it along.
+		efCanon := newDirResolver()
+		var refCanon []string
+		for _, d := range req.RefDirs {
+			refCanon = append(refCanon, filepath.Clean(d), efCanon.dir(d))
+		}
 		res.Files, res.Truncated, confirmErrs = ef.finish(s, cancel, func(p string) (bool, error) {
+			if holdsAny(filepath.Clean(p), refCanon) || holdsAny(efCanon.dir(p), refCanon) {
+				return false, nil
+			}
 			return confirmEmpty(p, sess, cancel)
 		})
 		if cancelled(cancel) {
