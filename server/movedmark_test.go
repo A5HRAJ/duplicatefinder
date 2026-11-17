@@ -3,6 +3,7 @@ package main
 import (
 	"dupfinder/internal/dirhandle"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,7 +120,7 @@ func TestRecordedFilesAreRecognisedAndNothingElse(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer h.Close()
-	m := newMovedMarks()
+	m := newMovedMarks(nil)
 	m.load(h, ".", "/volume1/share/dest", "/canon/share/dest")
 	at := time.Unix(mtime, 0)
 	for _, tc := range []struct {
@@ -162,7 +163,7 @@ func TestRecordedFilesAreRecognisedAndNothingElse(t *testing.T) {
 // The entries a scan can hold are bounded, and reaching the bound is
 // reported rather than silent.
 func TestRecordEntriesAreBoundedAndTheBoundReported(t *testing.T) {
-	m := newMovedMarks()
+	m := newMovedMarks(nil)
 	m.n = movedMarkCap
 	dir := t.TempDir()
 	os.Mkdir(filepath.Join(dir, movedMarkDir), 0o755)
@@ -171,11 +172,11 @@ func TestRecordEntriesAreBoundedAndTheBoundReported(t *testing.T) {
 	h, _ := dirhandle.Open(dir)
 	defer h.Close()
 	m.load(h, ".", "/d", "/d")
-	if !m.over || !strings.Contains(m.overflow(), "were not recognised") {
-		t.Fatalf("reaching the bound was not reported: over=%v %q", m.over, m.overflow())
+	if !m.over || !strings.Contains(strings.Join(m.report(), "\n"), "were not recognised") {
+		t.Fatalf("reaching the bound was not reported: over=%v %q", m.over, m.report())
 	}
-	if newMovedMarks().overflow() != "" {
-		t.Fatal("an unbounded scan reported an overflow")
+	if len(newMovedMarks(nil).report()) != 0 {
+		t.Fatal("a scan that read no records reported something")
 	}
 }
 
@@ -204,11 +205,87 @@ func TestARecordSpeaksOnlyForItsOwnFolder(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer h.Close()
-			m := newMovedMarks()
+			m := newMovedMarks(nil)
 			m.load(h, ".", "/volume1/share/lib", "/canon/share/lib")
 			if _, ok := m.match("/volume1/share/lib", "p.jpg", 9, at); ok != tc.want {
 				t.Fatalf("recognised=%v, want %v", ok, tc.want)
 			}
 		})
+	}
+}
+
+// A big move writes several records, each one readable in full: a reader
+// never refuses a record the app itself wrote.
+func TestABigMoveIsRecordedInSeveralRecords(t *testing.T) {
+	old := movedMarkChunk
+	movedMarkChunk = 3
+	t.Cleanup(func() { movedMarkChunk = old })
+	f, sess := newMoveVerifyFake(t)
+	dest := filepath.Join(f.root, "dest")
+	os.Mkdir(dest, 0o755)
+	var landed []string
+	for i := 0; i < 7; i++ {
+		p := filepath.Join(dest, fmt.Sprintf("f%d & more.bin", i))
+		os.WriteFile(p, []byte("x"), 0o644)
+		landed = append(landed, p)
+	}
+	if err := leaveMovedMark(sess, "/Backups/dest", dest, landed); err != nil {
+		t.Fatal(err)
+	}
+	recs := readMarks(t, dest)
+	if len(recs) != 3 {
+		t.Fatalf("7 files in records of 3: want 3 records, got %d", len(recs))
+	}
+	raw, _ := os.ReadDir(filepath.Join(dest, movedMarkDir))
+	b, _ := os.ReadFile(filepath.Join(dest, movedMarkDir, raw[0].Name()))
+	if strings.Contains(string(b), `\u0026`) {
+		t.Fatal("names are HTML-escaped, inflating the record")
+	}
+	h, _ := dirhandle.Open(dest)
+	defer h.Close()
+	m := newMovedMarks(nil)
+	m.load(h, ".", "/d", dest) // the same path the writer was given
+	if m.n != 7 || len(m.report()) != 0 {
+		t.Fatalf("read back %d of 7 entries, problems %v", m.n, m.report())
+	}
+}
+
+// A record that cannot be used is reported by folder, never skipped silently.
+func TestAnUnusableRecordIsReported(t *testing.T) {
+	dir := t.TempDir()
+	os.Mkdir(filepath.Join(dir, movedMarkDir), 0o755)
+	os.WriteFile(filepath.Join(dir, movedMarkDir, "damaged.json"), []byte("{not json"), 0o644)
+	big := make([]byte, movedMarkFileMax+10)
+	os.WriteFile(filepath.Join(dir, movedMarkDir, "huge.json"), big, 0o644)
+	h, _ := dirhandle.Open(dir)
+	defer h.Close()
+	m := newMovedMarks(nil)
+	m.load(h, ".", "/volume1/share/clean", "/canon/share/clean")
+	rep := strings.Join(m.report(), "\n")
+	if !strings.Contains(rep, "damaged.json is damaged") || !strings.Contains(rep, "huge.json is larger") || !strings.Contains(rep, "/volume1/share/clean") {
+		t.Fatalf("unusable records not reported by folder: %q", rep)
+	}
+}
+
+// The names a scan holds from records are bounded in bytes, not only in
+// count, and reaching the bound is reported.
+func TestRecordNamesAreBoundedInBytes(t *testing.T) {
+	old := movedMarkBytesMax
+	movedMarkBytesMax = 300
+	t.Cleanup(func() { movedMarkBytesMax = old })
+	dir := t.TempDir()
+	os.Mkdir(filepath.Join(dir, movedMarkDir), 0o755)
+	var ents []movedMarkEntry
+	for i := 0; i < 20; i++ {
+		ents = append(ents, movedMarkEntry{Name: fmt.Sprintf("%s-%d", strings.Repeat("n", 200), i), Size: 1, MTime: 1})
+	}
+	body, _ := json.Marshal(movedMarkRecord{Moved: ents})
+	os.WriteFile(filepath.Join(dir, movedMarkDir, "r.json"), body, 0o644)
+	h, _ := dirhandle.Open(dir)
+	defer h.Close()
+	m := newMovedMarks(nil)
+	m.load(h, ".", "/d", "/d")
+	if !m.over || m.bytes > 300 || m.n >= 20 {
+		t.Fatalf("held %d entries, %d bytes, over=%v", m.n, m.bytes, m.over)
 	}
 }

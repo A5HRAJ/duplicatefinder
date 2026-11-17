@@ -38,6 +38,13 @@ package versions shown in Package Center.
   the junk files it carried were not listed. Should the app's own records
   be lost, a copy among them could look like an original again. The
   record now lists every file inside a moved folder too.
+- A very large move wrote its whole list as one hidden record, which
+  could be bigger than the app would read back, and a record that was
+  damaged or too big was passed over without a word. A large move now
+  writes several records, and a record that cannot be read is listed as
+  an issue of the scan, naming its folder. How much a scan reads from
+  such records is bounded, so a planted or damaged one cannot exhaust a
+  small NAS's memory.
 
 ## [1.1.12] - 2026-11-17
 

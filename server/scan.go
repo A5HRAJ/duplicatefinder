@@ -379,7 +379,7 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 	// are read as the walk enters each folder, before its files: a file one
 	// lists is a copy Duplicate Finder moved, whether or not the app's own
 	// record of it survived.
-	marks := newMovedMarks()
+	marks := newMovedMarks(cancel)
 	var marked []string
 	walkErrs, hs, rootOf := s.walkStream(safeRoots, req.Recurse, ef != nil, cancel, func(idx int, f fEnt) {
 		if ef != nil {
@@ -417,9 +417,7 @@ func (s *Server) runScan(req ScanReq, roots []string, sess *fsSession, cancel ch
 	}, unreadable, marks.load)
 	handles = hs
 	base.Errors = append(base.Errors, walkErrs...)
-	if w := marks.overflow(); w != "" {
-		base.Errors = append(base.Errors, w)
-	}
+	base.Errors = append(base.Errors, marks.report()...)
 	// What the records identified joins the app's own record — kept even if
 	// the scan is then stopped, since each entry is a fact about a file, not
 	// about this scan — and is saved with the results. Moves are refused

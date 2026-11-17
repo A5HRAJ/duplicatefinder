@@ -11,6 +11,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"dupfinder/internal/dirhandle"
 	"encoding/hex"
@@ -37,9 +38,23 @@ const movedMarkAbout = "Duplicate Finder moved the files listed here into the fo
 	"Delete this folder if you no longer want that."
 
 const (
-	movedMarkFileMax = 8 << 20 // bytes read from one record
-	movedMarkCap     = 200000  // record entries one scan holds
+	movedMarkFileMax  = 8 << 20   // bytes read from one record
+	movedMarkCap      = 200000    // record entries one scan holds
+	movedMarkReadMax  = 256 << 20 // record bytes one scan reads, every folder together
+	movedMarkFilesMax = 1000      // records read from one folder
+	movedMarkIssueMax = 100       // record problems one scan lists by folder
 )
+
+// movedMarkChunk is how many entries one record holds; a bigger move writes
+// several. Small enough that a record stays far below movedMarkFileMax
+// whatever the names, so a reader never has to refuse one the app wrote. A
+// variable only so a test can make it small.
+var movedMarkChunk = 2000
+
+// movedMarkBytesMax bounds the names a scan holds from records, every folder
+// together: a planted record full of long names must not cost a small NAS
+// its memory. A variable only so a test can make it small.
+var movedMarkBytesMax = 64 << 20
 
 type movedMarkEntry struct {
 	Name  string `json:"name"`
@@ -128,10 +143,6 @@ func leaveMovedMark(sess *fsSession, destShare, destCanon string, landed []strin
 	if len(ents) == 0 {
 		return nil
 	}
-	body, err := json.MarshalIndent(movedMarkRecord{About: movedMarkAbout, At: time.Now().UTC().Format(time.RFC3339), Folder: markFolderKey(destCanon), Moved: ents}, "", " ")
-	if err != nil {
-		return err
-	}
 	dir := destShare + "/" + movedMarkDir
 	there, isDir, err := sess.statShare(dir)
 	if err != nil {
@@ -148,20 +159,44 @@ func leaveMovedMark(sess *fsSession, destShare, destCanon string, landed []strin
 			}
 		}
 	}
-	buf := make([]byte, 4)
-	if _, err := rand.Read(buf); err != nil {
-		return err
+	// One record per movedMarkChunk entries, so none comes near the size a
+	// reader refuses. HTML escaping is off: "&" in a name would otherwise
+	// take six bytes.
+	stamp := time.Now().UTC().Format("20060102-150405")
+	for start := 0; start < len(ents); start += movedMarkChunk {
+		end := start + movedMarkChunk
+		if end > len(ents) {
+			end = len(ents)
+		}
+		var body bytes.Buffer
+		enc := json.NewEncoder(&body)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", " ")
+		if err := enc.Encode(movedMarkRecord{About: movedMarkAbout, At: time.Now().UTC().Format(time.RFC3339), Folder: markFolderKey(destCanon), Moved: ents[start:end]}); err != nil {
+			return err
+		}
+		buf := make([]byte, 4)
+		if _, err := rand.Read(buf); err != nil {
+			return err
+		}
+		if err := sess.upload(dir, stamp+"-"+hex.EncodeToString(buf)+".json", body.Bytes()); err != nil {
+			return err
+		}
 	}
-	name := time.Now().UTC().Format("20060102-150405") + "-" + hex.EncodeToString(buf) + ".json"
-	return sess.upload(dir, name, body)
+	return nil
 }
 
 // movedMarks is what one scan read from the record folders it met, keyed by
 // the display path of the folder holding each.
 type movedMarks struct {
-	dirs map[string]*markedDir
-	n    int  // entries held
-	over bool // movedMarkCap was reached
+	dirs   map[string]*markedDir
+	n      int   // entries held
+	bytes  int   // name bytes held
+	read   int64 // record bytes read
+	over   bool  // a scan-wide bound was reached
+	issues []string
+	more   int // problems past movedMarkIssueMax
+	cancel chan struct{}
 }
 
 type markedDir struct {
@@ -169,13 +204,27 @@ type markedDir struct {
 	ents  map[string]movedMarkEntry
 }
 
-func newMovedMarks() *movedMarks { return &movedMarks{dirs: map[string]*markedDir{}} }
+func newMovedMarks(cancel chan struct{}) *movedMarks {
+	return &movedMarks{dirs: map[string]*markedDir{}, cancel: cancel}
+}
+
+// problem notes a record that could not be used. Never silent: a record that
+// is skipped is protection lost, and the user is told where to look.
+func (m *movedMarks) problem(display, why string) {
+	if len(m.issues) >= movedMarkIssueMax {
+		m.more++
+		return
+	}
+	m.issues = append(m.issues, display+": a record of files Duplicate Finder moved here could not be read ("+why+"), so they may not be recognised as moved — check this folder before deleting anything")
+}
 
 // load is the walk's enterDir hook: it reads the record folder inside the
 // directory rel (under the pinned root h; display path display, canonical
 // path canon), if it holds one. Records are opened without following any
-// symlink. One that cannot be read or parsed is passed over: a record only
-// ever adds protection, so a missing one costs what it would have added.
+// symlink. One that cannot be opened, read or parsed, or that is larger than
+// any record the app writes, is reported (problem), never silently passed
+// over. What a scan reads and holds from records is bounded, and Stop is
+// honoured between records.
 func (m *movedMarks) load(h *dirhandle.Handle, rel, display, canon string) {
 	recRel := filepath.Join(rel, movedMarkDir)
 	fi, err := os.Lstat(filepath.Join(h.Path(), recRel))
@@ -184,23 +233,44 @@ func (m *movedMarks) load(h *dirhandle.Handle, rel, display, canon string) {
 	}
 	names, err := os.ReadDir(filepath.Join(h.Path(), recRel))
 	if err != nil {
+		m.problem(display, err.Error())
 		return
 	}
+	files := 0
 	for _, e := range names {
 		if !e.Type().IsRegular() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
+		if cancelled(m.cancel) || m.over {
+			return
+		}
+		if files++; files > movedMarkFilesMax {
+			m.problem(display, "it holds more than "+strconv.Itoa(movedMarkFilesMax)+" records; the rest were not read")
+			return
+		}
+		if m.read >= movedMarkReadMax {
+			m.over = true
+			return
+		}
 		f, err := h.OpenRel(filepath.Join(recRel, e.Name()))
 		if err != nil {
+			m.problem(display, e.Name()+": "+err.Error())
 			continue
 		}
 		b, err := io.ReadAll(io.LimitReader(f, movedMarkFileMax+1))
 		f.Close()
-		if err != nil || len(b) > movedMarkFileMax {
+		m.read += int64(len(b))
+		if err != nil {
+			m.problem(display, e.Name()+": "+err.Error())
+			continue
+		}
+		if len(b) > movedMarkFileMax {
+			m.problem(display, e.Name()+" is larger than any record Duplicate Finder writes")
 			continue
 		}
 		var rec movedMarkRecord
-		if json.Unmarshal(b, &rec) != nil {
+		if jerr := json.Unmarshal(b, &rec); jerr != nil {
+			m.problem(display, e.Name()+" is damaged")
 			continue
 		}
 		if rec.Folder != "" && rec.Folder != markFolderKey(canon) {
@@ -211,7 +281,7 @@ func (m *movedMarks) load(h *dirhandle.Handle, rel, display, canon string) {
 			if !ok {
 				continue
 			}
-			if m.n >= movedMarkCap {
+			if m.n >= movedMarkCap || m.bytes+len(ent.Name) > movedMarkBytesMax {
 				m.over = true
 				return
 			}
@@ -229,6 +299,7 @@ func (m *movedMarks) load(h *dirhandle.Handle, rel, display, canon string) {
 			ent.Name = base
 			md.ents[base] = ent
 			m.n++
+			m.bytes += len(key) + len(base)
 		}
 	}
 }
@@ -265,13 +336,17 @@ func (m *movedMarks) match(dir, name string, size int64, mod time.Time) (string,
 	return filepath.Join(md.canon, name), true
 }
 
-// overflow is the issue line a scan reports when it held as many record
-// entries as it can.
-func (m *movedMarks) overflow() string {
-	if !m.over {
-		return ""
+// report is the issue lines a scan adds for its records: every one that
+// could not be used, and one line when a scan-wide bound was reached.
+func (m *movedMarks) report() []string {
+	out := append([]string(nil), m.issues...)
+	if m.more > 0 {
+		out = append(out, "… and "+strconv.Itoa(m.more)+" more records of moved files could not be read")
 	}
-	return "more files are listed in " + movedMarkDir + " records than one scan reads (" + strconv.Itoa(movedMarkCap) + "); files listed after that were not recognised as ones Duplicate Finder moved"
+	if m.over {
+		out = append(out, "more is recorded in "+movedMarkDir+" folders than one scan reads; files listed past that point were not recognised as ones Duplicate Finder moved")
+	}
+	return out
 }
 
 // outKeys returns the move-record entries for files a record identified:
