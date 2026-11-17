@@ -72,7 +72,11 @@ Every scan root is opened as a pinned directory handle
 canonical path, so a root swapped for a symlink after validation is refused
 rather than followed. Enumeration goes through the handle; symlinks below a
 root are skipped; Synology system directories (`@eaDir`, `#recycle`,
-`#snapshot`) and hidden names are skipped. Overlapping or aliased roots are
+`#snapshot`) and hidden names are skipped. A scan root or reference folder
+inside the recycle bin or a snapshot is refused outright, both when it is
+chosen and when a stored scope is scanned again: their files disappear on
+their own, so a copy there must never be the copy that stays, nor be
+protected as a reference. Overlapping or aliased roots are
 de-overlapped by canonical path first, so no file is visited twice under two
 names. Content reads (hashing, EXIF) open files through the pinned root with
 `O_NOFOLLOW` on every path component (`openrel.go` in that package), which works on

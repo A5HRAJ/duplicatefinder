@@ -531,6 +531,10 @@ func scanRoots(req ScanReq, roots []string, res *toolResult) []string {
 	var wroots []walkRoot
 	for _, r := range roots {
 		rp, err := resolveAllowedRoot(r)
+		if errors.Is(err, errSelfEmptying) {
+			res.Errors = append(res.Errors, r+": not scanned — "+errSelfEmptying.Error())
+			continue
+		}
 		if err != nil {
 			res.Errors = append(res.Errors, r+": no longer inside the allowed volumes")
 			continue

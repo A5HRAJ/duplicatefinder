@@ -152,6 +152,127 @@ for g in d["groups"]:
 ' || fail "per-group reclaim/alloc wrong"
 pass "sparse duplicates add nothing to the reclaimable figure (total and per group)"
 
+ALL_TOOLS='["duplicates","empty_folders","empty_files","temp_files","corrupted_files"]'
+
+echo "== a scan only reads"
+# Every entry on both volumes is fingerprinted before and after a scan with
+# all five tools: type, permissions, size, modified time, inode change time
+# (which any write, rename, chmod or extended-attribute change moves, and no
+# program can set back), link count, inode and content. The fixture gives
+# each tool something to read: a temporary file, empty folders, a hard link,
+# and a pair of ZIPs sharing size and modified time with one damaged, so the
+# Conflicting Files check opens and decodes both.
+mkdir -p "$SHARE/e9/empty dir" "$SHARE/e9/deep/er"
+printf 'half a download' > "$SHARE/e9/film.part"
+ln "$SHARE/a.txt" "$SHARE/e9/a-link.txt"
+python3 - "$SHARE/e9" <<'PY'
+import os,sys,zipfile
+d=sys.argv[1]
+z1=os.path.join(d,"z1.zip"); z2=os.path.join(d,"z2.zip")
+with zipfile.ZipFile(z1,"w",zipfile.ZIP_STORED) as z: z.writestr("notes.txt", "a line of notes\n"*300)
+b=bytearray(open(z1,"rb").read()); b[2000]^=1; open(z2,"wb").write(b)
+st=os.stat(z1); os.utime(z2, ns=(st.st_atime_ns, st.st_mtime_ns))
+PY
+fingerprint() { # fingerprint <out>
+	python3 - "$V" "$USB" > "$1" <<'PY'
+import hashlib,os,stat,sys
+for top in sys.argv[1:]:
+    for d,dirs,files in os.walk(top):
+        dirs.sort()
+        for n in sorted(dirs+files):
+            p=os.path.join(d,n); st=os.lstat(p); h=""
+            if stat.S_ISREG(st.st_mode) and st.st_size<=64<<20:
+                with open(p,"rb") as f: h=hashlib.sha256(f.read()).hexdigest()
+            print(repr(p), stat.S_IFMT(st.st_mode), oct(st.st_mode&0o7777), st.st_size,
+                  st.st_mtime_ns, st.st_ctime_ns, st.st_nlink, st.st_ino, h)
+PY
+}
+fingerprint "$WORK/fp-before"
+scan "$ALL_TOOLS"
+fingerprint "$WORK/fp-after"
+diff "$WORK/fp-before" "$WORK/fp-after" > "$WORK/fp-diff" || fail "a scan changed something on disk: $(head -6 "$WORK/fp-diff")"
+api GET '/api/results?tool=temp_files' | grep -q 'film.part' || fail "fixture: the temporary file was not found, so the scan did not read the fixture"
+api GET '/api/results?tool=empty_folders' | grep -q 'empty dir' || fail "fixture: the empty folder was not found"
+api GET '/api/results?tool=corrupted_files' | grep -q 'z2.zip' || fail "fixture: the ZIP pair was not checked"
+pass "a scan with every tool changes nothing on disk ($(wc -l < "$WORK/fp-before" | tr -d ' ') entries fingerprinted)"
+rm -rf "$SHARE/e9"
+
+echo "== recycle bin and snapshots"
+# Copies in the recycle bin or a snapshot disappear on their own. Met inside
+# a scanned folder they are skipped, so the one live copy is not a duplicate
+# of anything; chosen directly — as a scan folder, a reference folder, or
+# through a shortcut — they are refused.
+SNAP="$SHARE/#snapshot/GMT+00_2026.11.01-00.00.00"
+mkdir -p "$SHARE/#recycle/old/emptydir" "$SNAP/sub"
+printf 'one live copy, two that will vanish' > "$SHARE/r1.txt"
+cp -p "$SHARE/r1.txt" "$SHARE/#recycle/old/r1.txt"
+cp -p "$SHARE/r1.txt" "$SNAP/sub/r1.txt"
+: > "$SHARE/#recycle/old/empty.txt"
+printf 'x' > "$SHARE/#recycle/old/junk.tmp"
+scan "$ALL_TOOLS"
+for tool in duplicates empty_folders empty_files temp_files corrupted_files; do
+	out=$(api GET "/api/results?tool=$tool")
+	echo "$out" | grep -q -e '#recycle' -e '#snapshot' && fail "$tool lists something inside the recycle bin or a snapshot: $out"
+done
+api GET '/api/results?tool=duplicates' | grep -q 'r1.txt' && fail "the live copy was paired with its copies in the bin or a snapshot"
+ln -s "$SHARE/#recycle/old" "$SHARE/binlink"
+for body in \
+	"{\"tool\":\"duplicates\",\"tools\":[\"duplicates\"],\"dirs\":[\"$SHARE/#recycle\"],\"recurse\":true,\"match\":{}}" \
+	"{\"tool\":\"duplicates\",\"tools\":[\"duplicates\"],\"dirs\":[\"$SNAP/sub\"],\"recurse\":true,\"match\":{}}" \
+	"{\"tool\":\"duplicates\",\"tools\":[\"duplicates\"],\"dirs\":[\"$SHARE/binlink\"],\"recurse\":true,\"match\":{}}" \
+	"{\"tool\":\"duplicates\",\"tools\":[\"duplicates\"],\"dirs\":[\"$SHARE\"],\"refDirs\":[\"$SNAP\"],\"recurse\":true,\"match\":{}}"; do
+	r=$(api POST /api/scan "$body")
+	echo "$r" | grep -q 'never scanned' || fail "a scan reaching into the recycle bin or a snapshot was not refused: $body → $r"
+done
+r=$(api POST /api/refs "{\"refDirs\":[\"$SNAP\"]}")
+echo "$r" | grep -q 'never scanned' || fail "a snapshot was accepted as a reference folder: $r"
+rm -rf "$SHARE/#recycle" "$SHARE/#snapshot" "$SHARE/binlink" "$SHARE/r1.txt"
+pass "the recycle bin and snapshots are never scanned, met inside a folder or chosen directly"
+
+echo "== moves into a reference folder"
+# The reference folder is read-only both ways: nothing is moved into it,
+# directly, into a folder inside it, or through a shortcut to it — and the
+# refusal comes before anything is created there.
+mkdir -p "$SHARE/master/inner"
+ln -s "$SHARE/master" "$SHARE/masterlink"
+r=$(api POST /api/scan "{\"tool\":\"duplicates\",\"tools\":[\"duplicates\"],\"dirs\":[\"$SHARE\"],\"refDirs\":[\"$SHARE/master\"],\"recurse\":true,\"match\":{}}")
+echo "$r" | grep -q '"started":true' || fail "scan refused: $r"
+wait_idle
+for dest in master master/inner masterlink; do
+	for preserve in false true; do
+		r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/b.txt\"],\"dest\":\"$SHARE/$dest\",\"verify\":true,\"preserve\":$preserve}")
+		echo "$r" | grep -q 'inside a read-only reference folder' || fail "a move into the reference folder ($dest, preserve $preserve) was not refused: $r"
+	done
+done
+[ -f "$SHARE/b.txt" ] || fail "the file moved despite the refusal"
+[ -z "$(find "$SHARE/master" -mindepth 1 ! -path "$SHARE/master/inner")" ] || fail "something was created inside the reference folder: $(find "$SHARE/master")"
+r=$(api POST /api/refs '{"refDirs":[]}')
+echo "$r" | grep -q -e '"refDirs":\[\]' -e '"refDirs":null' || fail "the reference folder could not be cleared: $r"
+rm -rf "$SHARE/master" "$SHARE/masterlink"
+pass "nothing is moved into a reference folder, a folder inside it, or through a shortcut to it"
+
+echo "== a folder moved into itself"
+# Moving an empty folder into itself is refused before any batch folder is
+# made; so is moving it into a folder made inside it after the scan.
+# (TestMoveRefusesADestinationInsideTheFolderBeingMoved proves the guard
+# itself for a folder already holding the destination.)
+mkdir -p "$SHARE/ef"
+scan '["empty_folders"]'
+api GET '/api/results?tool=empty_folders' | grep -q '"name":"ef"' || fail "fixture: the empty folder was not listed: $(api GET '/api/results?tool=empty_folders')"
+for preserve in false true; do
+	r=$(api POST /api/move "{\"tool\":\"empty_folders\",\"files\":[\"$SHARE/ef\"],\"dest\":\"$SHARE/ef\",\"verify\":true,\"preserve\":$preserve}")
+	echo "$r" | grep -q 'inside the folder being moved' || fail "moving a folder into itself (preserve $preserve) was not refused: $r"
+done
+[ -z "$(ls -A "$SHARE/ef")" ] || fail "something was created inside the folder: $(find "$SHARE/ef")"
+mkdir "$SHARE/ef/inner"
+for preserve in false true; do
+	r=$(api POST /api/move "{\"tool\":\"empty_folders\",\"files\":[\"$SHARE/ef\"],\"dest\":\"$SHARE/ef/inner\",\"verify\":true,\"preserve\":$preserve}")
+	echo "$r" | grep -q '"moved":\[\]\|"moved":null' || fail "moving a folder into a folder inside it (preserve $preserve) was not refused: $r"
+done
+[ -d "$SHARE/ef/inner" ] && [ -z "$(ls -A "$SHARE/ef/inner")" ] || fail "the folder moved, or something was created inside it: $(find "$SHARE/ef")"
+rm -rf "$SHARE/ef"
+pass "a folder is never moved into itself or a folder inside it"
+
 echo "== names outside UTF-8"
 if [ "$(uname)" = Linux ]; then
 	BAD="$SHARE/$(printf 'caf\351.txt')"

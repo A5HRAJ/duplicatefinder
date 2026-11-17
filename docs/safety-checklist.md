@@ -39,7 +39,7 @@ would take away the only copy of something.
 | A4 | Not count one file reached by two routes (overlapping scan folders, shortcuts) as two copies | ✅ | `TestDirResolverCanonicalizesAliases`, `TestRefineGroupsNeverAliases` |
 | A5 | Not count a NAS folder mounted back into the same NAS as a second copy | ✅ | `TestFindSelfMounts`, audit "mounted into itself" |
 | A6 | Not follow shortcuts (symlinks) out of the folders you chose | ✅ | `TestDirHandleSurvivesPathSwap`, `TestOpenRelRefusesSwappedSymlink`, smoke symlink refusals |
-| A7 | Never scan the recycle bin (`#recycle`) or snapshots (`#snapshot`). Otherwise a copy in the bin could count as "the copy that stays" and vanish when the bin is emptied | ❌ | Skipped in the code, but no test |
+| A7 | Never scan the recycle bin (`#recycle`) or snapshots (`#snapshot`). Otherwise a copy in the bin could count as "the copy that stays" and vanish when the bin is emptied | ✅ | Audit "recycle bin and snapshots": copies inside both are never listed or paired, and choosing one directly — as a scan folder, a reference folder, or through a shortcut — is refused (it was accepted until 2026-11-17) |
 | A8 | Never merge different files when matching by name or created date | ✅ | `TestRefineGroupsByName`, `TestCreatedMatchUnknownNeverGroups` |
 | A9 | Compare everything even in huge collections of same-size files, and report rather than silently skip anything over a limit | ✅ | `TestSkewedKeyStillFindsDuplicatesPastTheCap`, `TestKeyCounterDegradesWithoutFalseNegatives`, `TestOversizedGroupIsCappedAndReported` |
 | A10 | Keep file names that aren't valid text (old Windows or Mac names) exactly as stored, and never mix them up with a similar-looking neighbour | ✅ | `bytesafe` tests; audit "names outside UTF-8" (runs on Linux in CI) |
@@ -57,7 +57,7 @@ would take away the only copy of something.
 | B6 | Count duplicates inside a folder being moved as moving too | 🟡 | Designed in. Find or write a test that moves a folder holding the last copy |
 | B7 | Check which copies exist now, not when the scan ran (one deleted outside the app since doesn't count as staying) | 🟡 | Designed in. Find or write a test that deletes a copy after the scan, then moves the other |
 | B8 | Never move anything out of a read-only reference folder, including through a shortcut | ✅ | `TestRefMatcherProtectsThroughAlias`, smoke reference refusals |
-| B9 | Never move anything into a reference folder | ❌ | Refused in the code, but no test |
+| B9 | Never move anything into a reference folder | ✅ | Audit "moves into a reference folder": refused into the folder, a folder inside it, and through a shortcut, in both layouts, with nothing created there |
 | B10 | Warn you if the record of moved copies is lost or damaged, rather than quietly dropping the protection | ✅ | `TestLostRecordsWarnUntilAcknowledged`, `TestDamagedRecordsRecoveredFromResults`, audit "move records lost" |
 | B11 | Keep the record of moved copies through an uninstall and reinstall | ✅ | Measured on the DS916+ (DSM 7.4), 2026-10-14: a throwaway package's data survived uninstall and reinstall. This is how DSM behaves, not app code, so one measurement is the proof. Re-measure after a major DSM upgrade |
 | B12 | Behave safely when the record of moved copies is gone entirely (Package Center's Repair can reportedly erase it, or a move to a new NAS). The app can't tell that apart from a fresh install, so a copy it moved flat would look like an original again. Copies moved into a batch folder are still recognised by that folder | ❌ | No protection yet. Remedy to be decided |
@@ -86,7 +86,7 @@ would take away the only copy of something.
 |---|---|---|---|
 | D1 | Never overwrite a file already at the destination: a clashing name gets " (1)" | ✅ | `TestMoveViaFSCollisionStagesAndRenames`, `TestTransitNameClashLandsBesideTheExistingFile` |
 | D2 | Refuse a destination outside the NAS's volumes (including through a shortcut) | ✅ | smoke "symlinked-out-of-volume dest rejected" |
-| D3 | Refuse a destination inside the folder being moved | ❌ | Refused in the code, but no test |
+| D3 | Refuse a destination inside the folder being moved | ✅ | `TestMoveRefusesADestinationInsideTheFolderBeingMoved`; audit "a folder moved into itself" (both layouts, nothing created) |
 | D4 | Refuse moving a file into the folder it's already in | ✅ | smoke "plain move into the folder the file already sits in" |
 | D5 | Give each batch its own folder, never mixing into an earlier batch's | ✅ | `TestAllocBatchFolder*`, smoke "second batch gets its own numbered folder" |
 | D6 | When a name gets too long to add " (1)", leave the file in a clearly reported holding folder, never lose it | 🟡 | The reported holding folder is tested (`TestStagedMoveLostReplyParksInsteadOfDeleting`). The too-long name that causes it isn't |
@@ -107,7 +107,7 @@ would take away the only copy of something.
 | E6 | Refuse to move a file that has decayed since the scan | ✅ | `TestMoveVerifyRefusesDeepRotBeforeMoving`, `TestMoveVerifyRefusesUnreadableSource` |
 | E7 | Never copy bytes for a move on the same disk (it's a rename) | ✅ | `TestVerifiedMoveOnOneFilesystemDoesNotCopy` |
 | E8 | Keep Verify on by default and never turn it off by itself | ✅ | smoke move dialog |
-| E9 | Never change a scanned file: a scan only reads | ❌ | Designed that way, but no test. A cheap test: fingerprint every test file before and after a full scan |
+| E9 | Never change a scanned file: a scan only reads | ✅ | Audit "a scan only reads": every entry on both volumes fingerprinted before and after a scan with all five tools — type, permissions, size, modified time, inode change time, link count, inode and content |
 
 ## F. The app's own deletes
 
@@ -154,9 +154,9 @@ would take away the only copy of something.
 
 | | Count |
 |---|---|
-| ✅ Proven | 53 |
+| ✅ Proven | 57 |
 | 🟡 Partly proven | 14 |
-| ❌ Protected but unproven, or not yet protected | 6 (A7, B9, B12, D3, E9, G5) |
+| ❌ Protected but unproven, or not yet protected | 2 (B12, G5) |
 | ❓ Undecided | 0 |
 | Decided against | 1 (I2) |
 | **Total** | **74** |

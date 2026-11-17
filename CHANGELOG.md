@@ -4,6 +4,15 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
+## [Unreleased]
+
+### Fixed
+- A folder inside the recycle bin (`#recycle`) or a snapshot (`#snapshot`)
+  could be added to the scan scope, or as a reference folder, and its files
+  then counted as copies that stay — though they disappear when the bin is
+  emptied or the snapshot expires. Such folders are now refused, as they
+  already were when met inside a scanned folder.
+
 ## [1.1.11] - 2026-11-17
 
 ### Added
