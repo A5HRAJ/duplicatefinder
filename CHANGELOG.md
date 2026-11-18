@@ -95,6 +95,9 @@ package versions shown in Package Center.
   its final name, the report of the cut-short move named only the final
   place, though the file could still be in the holding folder. It now
   names both.
+- With "Match by name" turned on, two names for one and the same file (a
+  hard link) could show as a duplicate group, and so could such names left
+  together after the real copy beside them was moved. They no longer do.
 
 ## [1.1.12] - 2026-11-17
 

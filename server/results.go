@@ -628,6 +628,38 @@ func buildView(res *toolResult, q *resultsQuery, key string, refs *refMatcher) *
 // created-date matching a file with no Created value never groups (an
 // unknown date is not a confirmed match — the scan's own rule). The result
 // never aliases the cached slices.
+// physicalRows counts the distinct files among rows: two names of one file
+// (a hard link, the same Ino) are one. A row without an Ino is its own.
+func physicalRows(files []FileEnt) int {
+	seen := map[string]bool{}
+	n := 0
+	for _, f := range files {
+		if f.Ino == "" {
+			n++
+		} else if !seen[f.Ino] {
+			seen[f.Ino] = true
+			n++
+		}
+	}
+	return n
+}
+
+// withCopies returns g with Copies set for its rows as they are now, or
+// false when they are fewer than two files: names that are all one file are
+// never a duplicate group, whether a refinement split them off or a move
+// took away the real copy beside them.
+func withCopies(g Group) (Group, bool) {
+	n := physicalRows(g.Files)
+	if n < 2 {
+		return g, false
+	}
+	g.Copies = 0
+	if n < len(g.Files) {
+		g.Copies = n
+	}
+	return g, true
+}
+
 func refineGroups(groups []Group, m MatchOpts) []Group {
 	out := make([]Group, 0, len(groups))
 	if !m.Name && !m.Modified && !m.Created {
@@ -643,7 +675,9 @@ func refineGroups(groups []Group, m MatchOpts) []Group {
 			off := len(arena)
 			arena = append(arena, g.Files...)
 			g.Files = arena[off:len(arena):len(arena)]
-			out = append(out, g)
+			if g, ok := withCopies(g); ok {
+				out = append(out, g)
+			}
 		}
 		return out
 	}
@@ -681,8 +715,10 @@ func refineGroups(groups []Group, m MatchOpts) []Group {
 			sub := g
 			sub.ID = g.ID + "-" + strconv.Itoa(n)
 			sub.Files = append([]FileEnt{}, b...)
-			out = append(out, sub)
-			n++
+			if sub, ok := withCopies(sub); ok {
+				out = append(out, sub)
+				n++
+			}
 		}
 	}
 	return out

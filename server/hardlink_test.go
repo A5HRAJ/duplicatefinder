@@ -142,3 +142,23 @@ func TestHardLinksAloneAreNotDuplicates(t *testing.T) {
 		t.Fatalf("want the three pair.bin names as two copies, got %+v", groups[0])
 	}
 }
+
+// Names that are all one file are never a duplicate group, however the
+// group came to be: split by "Match by name" into a bucket of two names of
+// one file, or left with only such names after the real copy was moved.
+func TestNamesOfOneFileAreNeverAGroupOnAPage(t *testing.T) {
+	a := FileEnt{ID: "a", Dir: "/v/a", Name: "photo.jpg", Ino: "1:10", Links: 2}
+	b := FileEnt{ID: "b", Dir: "/v/b", Name: "photo.jpg", Ino: "1:10", Links: 2}
+	c := FileEnt{ID: "c", Dir: "/v/c", Name: "backup.jpg", Ino: "1:20"}
+	g := Group{ID: "g0", Hash: "h", Files: []FileEnt{a, b, c}}
+	if got := refineGroups([]Group{g}, MatchOpts{Name: true}); len(got) != 0 {
+		t.Fatalf("matching by name made a group of two names of one file: %+v", got)
+	}
+	if got := refineGroups([]Group{{ID: "g1", Hash: "h", Files: []FileEnt{a, b}}}, MatchOpts{}); len(got) != 0 {
+		t.Fatalf("a group left with only names of one file is still listed: %+v", got)
+	}
+	got := refineGroups([]Group{g}, MatchOpts{})
+	if len(got) != 1 || got[0].Copies != 2 {
+		t.Fatalf("the real group must stay, counting 2 physical copies: %+v", got)
+	}
+}

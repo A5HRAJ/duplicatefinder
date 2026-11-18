@@ -35,7 +35,7 @@ would take away the only copy of something.
 |---|---|---|---|
 | A1 | Group two files only when every byte matches (a full fingerprint, never just size or name) | ✅ | `TestCandHashDiscriminates`, `TestWindowedScanMatchesWholeScan`. The fingerprint is 256-bit BLAKE3, so two different files matching by chance can be ignored. |
 | A2 | Read every file again on every scan, never trust a fingerprint from an earlier scan | ✅ | `TestRescanRereadsEverything`, `TestResumeMatchesExactRequestOnly` |
-| A3 | Not count two names for one file (hard links) as two copies, and never list names that are all one file as a duplicate group | ✅ | `TestHardLinksCountAsOneCopy`, `TestHardLinksAloneAreNotDuplicates`, smoke hard-link labels; checked on the DS124, 2026-11-17 |
+| A3 | Not count two names for one file (hard links) as two copies, and never list names that are all one file as a duplicate group | ✅ | `TestHardLinksCountAsOneCopy`, `TestHardLinksAloneAreNotDuplicates`, smoke hard-link labels; checked on the DS124, 2026-11-17; also when "Match by name" splits a group, or a move leaves only such names (`TestNamesOfOneFileAreNeverAGroupOnAPage`; both were listed until 2026-11-17) |
 | A4 | Not count one file reached by two routes (overlapping scan folders, shortcuts) as two copies | ✅ | `TestDirResolverCanonicalizesAliases`, `TestRefineGroupsNeverAliases` |
 | A5 | Not count a NAS folder mounted back into the same NAS as a second copy | ✅ | `TestFindSelfMounts`, audit "mounted into itself" |
 | A6 | Not follow shortcuts (symlinks) out of the folders you chose | ✅ | `TestDirHandleSurvivesPathSwap`, `TestOpenRelRefusesSwappedSymlink`, smoke symlink refusals |
