@@ -1618,6 +1618,35 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     fsm.unlinkSync(syncedConf);
   }
 
+  // ---- a move report says everything, once ---------------------------------
+  // Warnings and renamed files must not replace one another: two notices in
+  // a row leave only the second on screen. With issues they go into the
+  // Move Issues window, which stays until closed; without, into one notice.
+  {
+    const renamed = [{ from: '/volume1/share/a.txt', to: '/volume1/share/dest/a (1).txt' }];
+    let notes = [];
+    const realNotify = win.notify;
+    win.notify = function (m) { notes.push(m); };
+    const realApi = window.Ext.Ajax.request;
+    window.Ext.Ajax.request = function () { return {}; }; // the report's acknowledgement
+    win.presentMoveReport({ tool: 'duplicates', total: 2, moved: ['/volume1/share/a.txt'],
+      errors: [{ path: '/volume1/share/b.txt', error: 'could not be moved' }],
+      saveError: 'SAVE-FAILED', recordError: 'RECORD-FAILED', renamed: renamed });
+    await sleep(200);
+    const txt = doc.body.textContent;
+    check('the Move Issues window lists both warnings and the renamed file',
+      /Move Issues/.test(txt) && /SAVE-FAILED/.test(txt) && /RECORD-FAILED/.test(txt) && /a \(1\)\.txt/.test(txt) && notes.length === 0);
+    clickBtn(/^OK$/);
+    await sleep(200);
+    notes = [];
+    win.presentMoveReport({ tool: 'duplicates', total: 1, moved: ['/volume1/share/a.txt'], dest: '/volume1/share/dest',
+      errors: [], saveError: 'SAVE-FAILED', recordError: 'RECORD-FAILED', renamed: renamed });
+    check('a clean move with warnings says all of it in one notice',
+      notes.length === 1 && /SAVE-FAILED/.test(notes[0]) && /RECORD-FAILED/.test(notes[0]) && /a\.txt → a \(1\)\.txt/.test(notes[0]));
+    window.Ext.Ajax.request = realApi;
+    win.notify = realNotify;
+  }
+
   // ---- external (USB-shaped) share as destination ------------------------
   // The fixture's second volume reproduces a real USB disk's defining trap:
   // the share NAME ("usbshare1") differs from the directory it lives in

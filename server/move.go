@@ -218,6 +218,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	defer func() { jr.finish(saved) }()
 
 	moved := []string{}
+	var renamed []map[string]string
 	var movedCanon, movedDirs, allLanded, flatLanded []string
 	anyLanded, batchRecorded := false, false
 	errs := []map[string]string{}
@@ -327,6 +328,9 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		moved = append(moved, src)
+		if at != "" && filepath.Base(at) != filepath.Base(src) {
+			renamed = append(renamed, map[string]string{"from": src, "to": filepath.Join(req.Dest, strings.TrimPrefix(at, destCanon))})
+		}
 	}
 	// Every file accounted for — report the full count before the response is
 	// written, so a poll racing the last file cannot show N-1 of N and then
@@ -387,7 +391,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			saved = false
 		}
 	}
-	rep := &moveReport{ID: req.ID, Tool: req.Tool, Dest: req.Dest, Total: len(req.Files), Moved: moved, Errors: errs, RecordError: recordErr}
+	rep := &moveReport{ID: req.ID, Tool: req.Tool, Dest: req.Dest, Total: len(req.Files), Moved: moved, Errors: errs, Renamed: renamed, RecordError: recordErr}
 	s.mu.Lock()
 	// The prune above could not be saved: the moved rows would be back after
 	// a restart, and the app tells the user so.

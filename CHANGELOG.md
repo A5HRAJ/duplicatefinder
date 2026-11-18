@@ -83,6 +83,14 @@ package versions shown in Package Center.
   drop it from the list, though it had not moved. It now checks that the
   original is still in place first. And it now removes an incomplete copy
   from that hidden folder only when it carries the file's own name.
+- After a move, a file that had to be given another name, " (1)" because
+  the name was taken or a new name a USB disk chose for it, was not
+  mentioned, so you could not tell which file was yours. The report now
+  names each one with where it is.
+- A move that ended with both "the results could not be saved" and "the
+  record could not be left" showed the second warning over the first.
+  Both now appear together, in the Move Issues window when there are
+  issues, otherwise in one notice.
 
 ## [1.1.12] - 2026-11-17
 

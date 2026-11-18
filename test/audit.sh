@@ -402,6 +402,22 @@ done
 rm -f "$SHARE"/b7*.txt
 pass "a copy deleted or rewritten after the scan never counts as the copy that stays"
 
+echo "== a move under a new name is reported"
+# A clash at the destination is settled with " (1)"; the report must say so,
+# with where the file is now, so the user can tell which file is theirs.
+mkdir -p "$SHARE/rn/dest"
+printf 'already at the destination' > "$SHARE/rn/dest/n.txt"
+printf 'the one being moved' > "$SHARE/rn/n.txt"; cp -p "$SHARE/rn/n.txt" "$SHARE/rn/n-twin.txt"
+scan '["duplicates"]'
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/rn/n.txt\"],\"dest\":\"$SHARE/rn/dest\",\"verify\":false,\"preserve\":false}")
+echo "$r" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); share=sys.argv[1]
+want=[{"from": share+"/rn/n.txt", "to": share+"/rn/dest/n (1).txt"}]
+sys.exit(0 if r.get("renamed")==want else "renamed %r" % r.get("renamed"))' "$SHARE" || fail "a move under a new name was not reported with its new name: $r"
+rm -rf "$SHARE/rn"
+pass "a file moved under a new name is reported with where it is now"
+
 echo "== a name too long for ' (1)'"
 # A clash at the destination is settled with " (1)", but a name already at
 # the length limit has no room for it. The file must end up somewhere it can

@@ -139,6 +139,19 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 	   come through the daemon's evidence text and run in the tooltip.
 	   Encoding twice makes the decoded value HTML-safe text, so the tooltip
 	   shows the literal characters. */
+	/* One line for the files a move put down under another name: " (1)"
+	   because the name was taken, or the name a disk that cannot store some
+	   characters gave them. A few by name, then a count. */
+	function renamedSummary(renamed) {
+		var shown = [], i;
+		for (i = 0; i < renamed.length && i < 3; i++) {
+			var from = String(renamed[i].from || ''), to = String(renamed[i].to || '');
+			shown.push(from.substring(from.lastIndexOf('/') + 1) + ' → ' + to.substring(to.lastIndexOf('/') + 1));
+		}
+		var more = renamed.length > 3 ? ', and ' + (renamed.length - 3) + ' more' : '';
+		return (renamed.length === 1 ? '1 is' : renamed.length + ' are') +
+			' under a new name, because the name was taken or the destination cannot store it: ' + shown.join(', ') + more;
+	}
 	function qtipText(s) {
 		return esc(esc(s));
 	}
@@ -3793,6 +3806,13 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			var tool = j.tool || this.state.tool;
 			var n = (j.moved || []).length;
 			var requested = j.total || (n + (j.errors || []).length);
+			// Files that landed under another name, and the warnings a move can
+			// end with, travel together: one toast replaces another, so two in
+			// a row would leave only the second on screen.
+			var renamed = j.renamed || [];
+			var warnings = [];
+			if (j.saveError) warnings.push(j.saveError);
+			if (j.recordError) warnings.push(j.recordError);
 			if (j.errors && j.errors.length) {
 				// A persistent dialog, never only the 3.6-second toast:
 				// among these entries may sit the one message this whole
@@ -3800,9 +3820,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				// not match" — and its row has just been pruned, so this
 				// listing (plus the daemon log) is the only place the
 				// user can still learn WHICH file needs their attention.
-				this.showMoveIssues(requested, n, j.errors, lead);
-				if (j.saveError) this.notify(j.saveError);
-				if (j.recordError) this.notify(j.recordError);
+				this.showMoveIssues(requested, n, j.errors, lead, warnings, renamed);
 			} else {
 				// Under preserve the files are NOT at `dest` — the daemon
 				// created a folder inside it and may have had to number
@@ -3811,7 +3829,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				// failed after the prune rides on the same toast: the
 				// pruned rows would be back after a restart.
 				this.notify((lead || '') + 'Moved ' + n + ' ' + itemNoun(tool, n).toLowerCase() + ' to ' + (j.folder || j.dest) +
-					(j.saveError ? ' — ' + j.saveError : '') + (j.recordError ? ' — ' + j.recordError : ''));
+					(renamed.length ? ' — ' + renamedSummary(renamed) : '') +
+					(warnings.length ? ' — ' + warnings.join(' — ') : ''));
 			}
 			if (j.id) api('/move/report', 'POST', { id: j.id }, function () {});
 		},
@@ -3819,13 +3838,21 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		// The full per-file account of a move that did not end clean. Every
 		// entry is listed with its path — errors[0] alone cannot say which of
 		// forty files is the one whose destination copy failed verification.
-		showMoveIssues: function (requested, movedCount, errors, lead) {
+		showMoveIssues: function (requested, movedCount, errors, lead, warnings, renamed) {
 			var me = this;
 			var rows = [];
+			Ext.each(warnings || [], function (w) {
+				rows.push('<div style="padding:4px 0;border-bottom:1px solid rgba(128,128,128,0.25);"><b>' + esc(w) + '</b></div>');
+			});
 			Ext.each(errors, function (e) {
 				rows.push('<div style="padding:4px 0;border-bottom:1px solid rgba(128,128,128,0.25);">' +
 					'<div style="word-break:break-all;">' + esc(e.path || '') + '</div>' +
 					'<div style="color:' + FONT2 + ';">' + esc(e.error || '') + '</div></div>');
+			});
+			Ext.each(renamed || [], function (r) {
+				rows.push('<div style="padding:4px 0;border-bottom:1px solid rgba(128,128,128,0.25);">' +
+					'<div style="word-break:break-all;">' + esc(r.from || '') + '</div>' +
+					'<div style="color:' + FONT2 + ';word-break:break-all;">moved, under a new name: ' + esc(r.to || '') + '</div></div>');
 			});
 			var win = new UxModal({
 				owner: me,

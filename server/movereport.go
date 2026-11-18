@@ -24,12 +24,18 @@ const moveReportFile = "lastmove.json"
 // is never mutated once published — a change publishes a new one — so a
 // reader holds what it read without a lock.
 type moveReport struct {
-	ID        string              `json:"id"`
-	Tool      string              `json:"tool"`
-	Dest      string              `json:"dest"`
-	Total     int                 `json:"total"`
-	Moved     []string            `json:"moved"`
-	Errors    []map[string]string `json:"errors"`
+	ID     string              `json:"id"`
+	Tool   string              `json:"tool"`
+	Dest   string              `json:"dest"`
+	Total  int                 `json:"total"`
+	Moved  []string            `json:"moved"`
+	Errors []map[string]string `json:"errors"`
+	// Renamed lists the moved entries that landed under another name than
+	// their own — " (1)" because the name was taken, or the name a
+	// destination that cannot store some characters gave them — as
+	// {"from": source path, "to": where it is now}, so the user can tell
+	// which file is theirs.
+	Renamed   []map[string]string `json:"renamed,omitempty"`
 	Folder    string              `json:"folder,omitempty"`
 	SaveError string              `json:"saveError,omitempty"`
 	// RecordError says the record a flat move leaves in its destination
