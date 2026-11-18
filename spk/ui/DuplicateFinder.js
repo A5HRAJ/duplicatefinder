@@ -2763,6 +2763,10 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		// to grant access to), the daemon's closing "… and N more" line when
 		// its own list ran out, and anything else the scan had to say. Every
 		// line is escaped — they carry folder names.
+		// The explanation scrolls with the list in one body, never in a
+		// panel of its own fixed height: how many lines it takes depends on
+		// the service user's name and on DSM's font, and a fixed height cut
+		// its last words off ("then a new scan.") on a NAS where it took three.
 		openIssuesDialog: function (tool) {
 			var res = this.state.results[tool];
 			if (!res || !res.errors || !res.errors.length) return null;
@@ -2770,18 +2774,19 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			var who = this.state.serviceUser ? 'the "' + esc(this.state.serviceUser) + '" user' : "the package's user";
 			var rows = [];
 			Ext.each(res.errors, function (e) { rows.push('<div class="df-issue">' + esc(String(e)) + '</div>'); });
+			var lead = fmtCount(n) + (n === 1 ? ' issue' : ' issues') + ' from the last scan. A location that could not be read needs ' + who +
+				' granted access under Control Panel → Shared Folder → Edit → Permissions → System internal user, then a new scan.';
 			var win = new UxModal({
 				owner: this,
 				title: 'Scan Issues — ' + (TOOL_NAME[tool] || tool),
 				width: 640, height: 420, modal: false,
 				cls: 'df-app',
-				layout: 'vbox', layoutConfig: { align: 'stretch' },
-				items: [
-					{ xtype: 'panel', border: false, height: 48, bodyStyle: 'padding:10px 12px 0;font-size:' + FSMALL + ';color:' + FONT2 + ';line-height:1.4;',
-						html: fmtCount(n) + (n === 1 ? ' issue' : ' issues') + ' from the last scan. A location that could not be read needs ' + who +
-							' granted access under Control Panel → Shared Folder → Edit → Permissions → System internal user, then a new scan.' },
-					{ xtype: 'panel', border: false, flex: 1, autoScroll: true, bodyStyle: 'padding:6px 12px;', cls: 'df-mono', html: rows.join('') }
-				],
+				layout: 'fit',
+				items: [{
+					xtype: 'panel', border: false, autoScroll: true, bodyStyle: 'padding:10px 12px;',
+					html: '<div class="df-issues-lead" style="font-size:' + FSMALL + ';color:' + FONT2 + ';line-height:1.4;padding-bottom:8px;">' + lead + '</div>' +
+						'<div class="df-mono" style="display:block;">' + rows.join('') + '</div>'
+				}],
 				buttons: [new UxButton({ btnStyle: 'blue', text: 'Close', handler: function () { win.close(); } })]
 			});
 			win.show();

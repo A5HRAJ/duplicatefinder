@@ -531,6 +531,17 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     check('issue dialog lists every line, escaped',
       !!dom && dom.querySelectorAll('.df-issue').length === 3 &&
       dom.innerHTML.indexOf('&lt;img') >= 0 && !dom.querySelector('img'));
+    // The explanation's height depends on the service user's name and DSM's
+    // font, so it must never sit in a fixed-height box that can cut it
+    // short: it scrolls in the same body as the list. (jsdom has no layout;
+    // the clipping itself was measured on DSM.)
+    const lead = dom ? dom.querySelector('.df-issues-lead') : null;
+    const leadBody = lead ? lead.closest('.x-panel-body') : null;
+    const leadPanel = leadBody ? window.Ext.getCmp(leadBody.parentNode.closest('.x-panel').id) : null;
+    check('the issue explanation scrolls with the list, in no fixed-height box',
+      !!lead && /then a new scan\./.test(lead.textContent) &&
+      !!leadBody && leadBody.querySelectorAll('.df-issue').length === 3 &&
+      !!leadPanel && leadPanel.autoScroll === true && !leadPanel.initialConfig.height);
     if (dlg) dlg.close();
     // A failed state save rides on the completion toast.
     win.state.saveError = 'results could not be saved to disk (no space) — they will be lost when the package restarts';

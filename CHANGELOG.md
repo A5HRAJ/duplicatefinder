@@ -15,6 +15,10 @@ package versions shown in Package Center.
   so a changed file or a copy damaged on its way can go unnoticed.
 
 ### Fixed
+- The Scan Issues window cut off the end of its explanation on a NAS where
+  the service user's name is long (such as "sc-duplicatefinder"), hiding
+  "then a new scan." The explanation now scrolls with the list and is
+  always shown in full.
 - A folder name containing HTML could run as code in the administrator's
   DSM page when the mouse rested on that folder in the sidebar's scan
   scope. Its tooltip now shows the name as plain text, like every other
