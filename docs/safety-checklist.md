@@ -142,7 +142,7 @@ would take away the only copy of something.
 | # | The app must… | | Proof |
 |---|---|---|---|
 | H1 | Pass all of the above on an Intel NAS | 🟡 | Installed and spot-checked on the DS916+ at every release. The automated tests run on the Mac and in CI, not on the NAS |
-| H2 | …on a 64-bit ARM NAS (e.g. DS124) | 🟡 | The beta checklist walked on a DS124 (DSM 7.4.1), 2026-11-16 and 17: scans, verified moves, keep-one, reference folders, stops mid-scan and mid-move, hard links, an exFAT USB disk; the 1.1.12 changes (folder records, recycle-bin refusal, empty folders of folders) checked there by hand the same day. The automated tests run under emulation, not on the NAS |
+| H2 | …on a 64-bit ARM NAS (e.g. DS124) | 🟡 | The beta checklist walked on a DS124 (DSM 7.4.1), 2026-11-16 and 17: scans, verified moves, keep-one, reference folders, stops mid-scan and mid-move, hard links, an exFAT USB disk; the 1.1.12 changes (folder records, recycle-bin refusal, empty folders of folders) checked there by hand the same day, and the 1.1.13 fixes the same night. The automated tests run under emulation, not on the NAS |
 | H3 | …on a 32-bit ARM NAS | 🟡 | Emulation only, and no hardware planned |
 | H4 | …on both Btrfs and ext4 volumes | 🟡 | The DS916+'s main volume is Btrfs (copy-on-write shares); the DS124's is ext4, checked by hand there. USB disks checked by hand: ext4 on the DS916+, exFAT on the DS124 |
 
