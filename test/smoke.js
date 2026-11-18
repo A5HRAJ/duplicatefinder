@@ -1447,6 +1447,16 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   const verifyInput = radioFor(/Verify file contents after moving/);
   check('verification is offered as a checkbox, ticked by default',
     !!verifyInput && verifyInput.type === 'checkbox' && verifyInput.checked === true);
+  // Hovering it says what each choice gains and risks. QuickTips read the
+  // tooltip from the element under the pointer only, so the box itself and
+  // its label must each carry it, not merely an element around them.
+  const verifyLabel = Array.from(doc.querySelectorAll('label')).find((l) => /Verify file contents after moving/.test(l.textContent));
+  const verifyTip = verifyInput ? verifyInput.getAttribute('ext:qtip') || '' : '';
+  check('hovering the verification checkbox explains both choices',
+    /<b>On \(recommended\):<\/b>/.test(verifyTip) && /Safer, but slower/.test(verifyTip) &&
+    /<b>Off:<\/b>/.test(verifyTip) && /can go unnoticed/.test(verifyTip));
+  check('the same explanation shows over the checkbox label',
+    !!verifyLabel && verifyLabel.getAttribute('ext:qtip') === verifyTip);
   // The prose explaining WHEN turning verification off is reasonable (a move
   // within one shared folder only renames) is deliberately kept out of the
   // dialog and lives in the README alone — the checkbox is the whole

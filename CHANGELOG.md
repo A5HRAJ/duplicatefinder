@@ -6,6 +6,13 @@ package versions shown in Package Center.
 
 ## [Unreleased]
 
+### Added
+- Hovering over "Verify file contents after moving" in the move dialog now
+  explains the choice: with it on, each file is read again before it moves
+  and its copy read back afterwards, safer but slower; with it off, the move
+  is faster, but only a quick check is made first and nothing is read back,
+  so a changed file or a copy damaged on its way can go unnoticed.
+
 ### Fixed
 - A folder name containing HTML could run as code in the administrator's
   DSM page when the mouse rested on that folder in the sidebar's scan
