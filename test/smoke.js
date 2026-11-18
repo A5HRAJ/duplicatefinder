@@ -1447,16 +1447,21 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   const verifyInput = radioFor(/Verify file contents after moving/);
   check('verification is offered as a checkbox, ticked by default',
     !!verifyInput && verifyInput.type === 'checkbox' && verifyInput.checked === true);
-  // Hovering it says what each choice gains and risks. QuickTips read the
-  // tooltip from the element under the pointer only, so the box itself and
-  // its label must each carry it, not merely an element around them.
+  // An ⓘ after its label says what each choice gains and risks, drawn by
+  // DSM's own SYNO.ux.AddTip as File Station does for its security options:
+  // one icon, in the checkbox's own wrapper, after the label.
   const verifyLabel = Array.from(doc.querySelectorAll('label')).find((l) => /Verify file contents after moving/.test(l.textContent));
-  const verifyTip = verifyInput ? verifyInput.getAttribute('ext:qtip') || '' : '';
-  check('hovering the verification checkbox explains both choices',
+  const verifyWrap = verifyInput ? verifyInput.parentNode : null;
+  const verifyIcons = verifyWrap ? verifyWrap.querySelectorAll('.syno-ux-whitetip-icon') : [];
+  const verifyTip = verifyIcons.length ? verifyIcons[0].getAttribute('ext:wtip') || '' : '';
+  check('the verification checkbox has one DSM info icon, after its label',
+    verifyIcons.length === 1 && !!verifyLabel &&
+    !!(verifyLabel.compareDocumentPosition(verifyIcons[0]) & window.Node.DOCUMENT_POSITION_FOLLOWING));
+  check('the info icon explains both choices',
     /<b>On \(recommended\):<\/b>/.test(verifyTip) && /Safer, but slower/.test(verifyTip) &&
     /<b>Off:<\/b>/.test(verifyTip) && /can go unnoticed/.test(verifyTip));
-  check('the same explanation shows over the checkbox label',
-    !!verifyLabel && verifyLabel.getAttribute('ext:qtip') === verifyTip);
+  check('the checkbox and its label carry no tooltip of their own',
+    !!verifyWrap && !verifyWrap.querySelector('[ext\\:qtip]') && !verifyWrap.getAttribute('ext:qtip'));
   // The prose explaining WHEN turning verification off is reasonable (a move
   // within one shared folder only renames) is deliberately kept out of the
   // dialog and lives in the README alone — the checkbox is the whole

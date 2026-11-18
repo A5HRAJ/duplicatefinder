@@ -7,8 +7,9 @@ package versions shown in Package Center.
 ## [Unreleased]
 
 ### Added
-- Hovering over "Verify file contents after moving" in the move dialog now
-  explains the choice: with it on, each file is read again before it moves
+- An ⓘ after "Verify file contents after moving" in the move dialog, like
+  the ones in DSM's own settings, now explains the choice when the pointer
+  rests on it: with Verify on, each file is read again before it moves
   and its copy read back afterwards, safer but slower; with it off, the move
   is faster, but only a quick check is made first and nothing is read back,
   so a changed file or a copy damaged on its way can go unnoticed.

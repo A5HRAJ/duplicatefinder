@@ -152,10 +152,10 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		return (renamed.length === 1 ? '1 is' : renamed.length + ' are') +
 			' under a new name, because the name was taken or the destination cannot store it: ' + shown.join(', ') + more;
 	}
-	/* The Verify checkbox's tooltip: what each choice gains and risks. Fixed
-	   markup of the app's own, set through setAttribute — which stores the
-	   value as it is, with no entity decoding — so QuickTips renders the <b>
-	   and <br>. Never put file names or other outside text in it. */
+	/* What each Verify choice gains and risks, shown from the ⓘ after the
+	   checkbox's label. DSM's white tip renders it as markup, so the <b> and
+	   <br> show as such: this is fixed markup of the app's own, and file
+	   names or other outside text must never be put in it. */
 	var VERIFY_TIP = '<b>On (recommended):</b> before each file moves, it is read again and must still ' +
 		'match what the scan found; the copy that stays behind is checked too, and the moved copy is ' +
 		'read back afterwards. Moving to another disk, the original is removed only once its copy checks ' +
@@ -3588,19 +3588,14 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				hideLabel: true,
 				checked: true
 			});
-			// Hovering the box or its label explains the choice. Ext's QuickTips
-			// read the attribute from the element under the pointer only, never
-			// from its parents, so every element of the checkbox carries it:
-			// the wrapper, the box (DSM draws its own over the input) and the
-			// label.
+			// An ⓘ after the label explains the choice, the way File Station
+			// explains "Always open HTML files using plain text format":
+			// SYNO.ux.AddTip draws DSM's own icon beside the field and shows
+			// the text in DSM's white tip when it is hovered. Without that call
+			// (a DSM that lacks it) the dialog still works, unexplained.
 			verifyBox.on('afterrender', function (cb) {
-				var root = (cb.wrap || cb.getEl()).dom;
-				var els = [root].concat(Array.prototype.slice.call(root.getElementsByTagName('*')));
-				Ext.each(els, function (d) {
-					d.setAttribute('ext:qtip', VERIFY_TIP);
-					d.setAttribute('ext:qwidth', '360');
-				});
-			});
+				if (SYNO.ux.AddTip) SYNO.ux.AddTip(cb.getEl(), VERIFY_TIP);
+			}, null, { single: true });
 			var win = new UxModal({
 				owner: me,
 				title: 'Move ' + n + ' ' + noun,

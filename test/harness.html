@@ -39,6 +39,23 @@ SYNO.ux.Button = Ext.extend(Ext.Button, {
 	}
 });
 SYNO.ux.Checkbox = Ext.form.Checkbox;
+// DSM's ⓘ explanation icon, as read out of DSM 7.4 on the DS124:
+// AddTip(el, message, tipWidth, autoHide, disabled) finds the component the
+// element belongs to (Ext.getCmp(el.id)), builds a SYNO.ux.WhiteTipIcon — a
+// BoxComponent with class syno-ux-whitetip-icon whose "ext:wtip" attribute
+// holds the message, read by DSM's white QuickTip as markup — appends it to
+// the field element's parent (a checkbox's wrapper, after the label) and
+// returns its DOM node.
+SYNO.ux.AddTip = function (el, message, tipWidth) {
+	var field = Ext.getCmp(el.id) || el;
+	var fieldEl = field.el ? field.el.dom : (field.dom || field);
+	var icon = document.createElement('div');
+	icon.className = ' syno-ux-whitetip-icon';
+	icon.setAttribute('ext:wtip', message || '');
+	icon.setAttribute('ext:wwidth', tipWidth || '');
+	fieldEl.parentNode.appendChild(icon);
+	return icon;
+};
 // Verified against real DSM: SYNO.ux.RadioGroup extends checkboxgroup, renders
 // one input per item, groups them, and getValue() returns the checked radio.
 SYNO.ux.RadioGroup = Ext.form.RadioGroup;

@@ -70,7 +70,7 @@ would take away the only copy of something.
 | # | The app must… | | Proof |
 |---|---|---|---|
 | C1 | Move only files a scan actually listed | ✅ | smoke "move of a file no scan surfaced is refused" |
-| C2 | Refuse a file that changed since its scan, even if its size and date look the same | ✅ | `TestMoveIdentityCatchesSameSizeSameMtimeRewrite`, smoke "changed since its scan" |
+| C2 | Refuse a file that changed since its scan, even if its size and date look the same | ✅ | `TestMoveIdentityCatchesSameSizeSameMtimeRewrite`, smoke "changed since its scan". With Verify on, the whole file is read again. With Verify off, the size, the date and the first 64 KiB are checked: decided 2026-11-17 that this is right, because the ⓘ beside Verify tells you that a file changed since the scan can go unnoticed with it off |
 | C3 | Never move anything from the Conflicting Files list | ✅ | `TestMoveRefusesReadOnlyTool`, smoke read-only tool refusal |
 | C4 | Move exactly what's ticked. Changing the ticks while the folder picker is open moves nothing | ✅ | smoke "swapping the selection while the chooser is open"; a move made from results another scan has since replaced moves nothing (`TestMoveFromReplacedResultsIsRefused`, smoke "a move says which scan its files were chosen from"; added 2026-11-17) |
 | C5 | Never let Keep Newest or Keep Oldest tick a protected file or a copy the app already moved | ✅ | smoke "bulk select never selects protected rows", "Keep Newest never keeps or ticks a moved copy", "Keep Oldest never keeps or ticks a moved copy" |
