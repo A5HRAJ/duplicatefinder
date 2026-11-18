@@ -33,8 +33,8 @@ type MoveReq struct {
 	// source is re-read and hashed before the move (and must still match the
 	// scan's recorded hash where one exists), and the destination is read
 	// back and hashed after it. The dialog sends it explicitly (checked by
-	// default); absent means false, so a caller that does not know the field
-	// gets an unverified move. Onto another filesystem a verified move copies
+	// default); absent means true (decodeMoveRequest), so a caller that does
+	// not say gets the checked move. Onto another filesystem a verified move copies
 	// first and removes the original only once the copy matches (transit.go),
 	// and a folder's every entry is checked there; on one filesystem a folder
 	// moves as a single rename, with nothing in transit to check.
@@ -423,6 +423,9 @@ func decodeMoveRequest(w http.ResponseWriter, r *http.Request) (req MoveReq, fol
 		writeErr(w, 405, "POST required")
 		return req, "", false
 	}
+	// Verify is on unless the body turns it off: the decoder leaves a field
+	// the body does not name as it was.
+	req.Verify = true
 	if err := decodeBytesafe(r.Body, &req); err != nil {
 		writeErr(w, 400, "bad request body")
 		return req, "", false

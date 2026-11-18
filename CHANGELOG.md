@@ -98,6 +98,9 @@ package versions shown in Package Center.
 - With "Match by name" turned on, two names for one and the same file (a
   hard link) could show as a duplicate group, and so could such names left
   together after the real copy beside them was moved. They no longer do.
+- A move request that did not say whether to verify was not verified. The
+  app always says so, but the service itself now verifies unless told not
+  to.
 
 ## [1.1.12] - 2026-11-17
 

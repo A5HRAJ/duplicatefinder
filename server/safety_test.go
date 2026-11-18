@@ -1054,3 +1054,21 @@ func TestMoveFromReplacedResultsIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// Verify is on unless the request turns it off: a caller that does not say
+// gets the checked move, never the unchecked one.
+func TestAMoveThatDoesNotSayVerifies(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{`{"tool":"duplicates","files":["/volume1/x/a"],"dest":"/volume1/x/d"}`, true},
+		{`{"tool":"duplicates","files":["/volume1/x/a"],"dest":"/volume1/x/d","verify":true}`, true},
+		{`{"tool":"duplicates","files":["/volume1/x/a"],"dest":"/volume1/x/d","verify":false}`, false},
+	} {
+		req, _, ok := decodeMoveRequest(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/move", strings.NewReader(tc.body)))
+		if !ok || req.Verify != tc.want {
+			t.Errorf("%s: verify=%v (ok %v), want %v", tc.body, req.Verify, ok, tc.want)
+		}
+	}
+}

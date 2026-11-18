@@ -108,7 +108,7 @@ would take away the only copy of something.
 | E5 | Check moved folders file by file, at every depth | ✅ | `TestTransitFolderIsCheckedFileByFileThenRemoved`, `TestTransitDamagedFileInsideAFolderKeepsTheFolder`, `TestTransitFolderOfFoldersIsCheckedThenRemoved`, `TestTransitDamagedFileInANestedFolderKeepsTheFolder` |
 | E6 | Refuse to move a file that has decayed since the scan | ✅ | `TestMoveVerifyRefusesDeepRotBeforeMoving`, `TestMoveVerifyRefusesUnreadableSource` |
 | E7 | Never copy bytes for a move on the same disk (it's a rename) | ✅ | `TestVerifiedMoveOnOneFilesystemDoesNotCopy` |
-| E8 | Keep Verify on by default and never turn it off by itself | ✅ | smoke move dialog |
+| E8 | Keep Verify on by default and never turn it off by itself | ✅ | smoke move dialog; the daemon too: a request that does not say verifies (`TestAMoveThatDoesNotSayVerifies`; until 2026-11-17 it did not) |
 | E9 | Never change a scanned file: a scan only reads | ✅ | Audit "a scan only reads": every entry on both volumes fingerprinted before and after a scan with all five tools — type, permissions, size, modified time, inode change time, link count, inode and content |
 
 ## F. The app's own deletes
