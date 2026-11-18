@@ -737,3 +737,45 @@ func TestSpillDistilAndWindow(t *testing.T) {
 		}
 	}
 }
+
+// Grouping compares whole contents: two files of one size that differ only
+// far past the first 64 KiB are not duplicates; identical ones are.
+func TestFilesDifferingOnlyPastThePrefixAreNotGrouped(t *testing.T) {
+	dir := t.TempDir()
+	body := make([]byte, 300*1024)
+	for i := range body {
+		body[i] = byte(i % 251)
+	}
+	other := append([]byte(nil), body...)
+	other[len(other)-1] ^= 1
+	var files []fEnt
+	for name, b := range map[string][]byte{"a.bin": body, "b.bin": other, "c.bin": body} {
+		p := filepath.Join(dir, name)
+		os.WriteFile(p, b, 0o644)
+		fi, _ := os.Stat(p)
+		files = append(files, fEnt{path: p, name: name, dir: dir, size: fi.Size(), mod: fi.ModTime()})
+	}
+	gs, _ := (&Server{}).scanDuplicates(files, MatchOpts{}, nil, make(chan struct{}))
+	if len(gs) != 1 || len(gs[0].Files) != 2 {
+		t.Fatalf("want one group of the two identical files, got %+v", gs)
+	}
+	for _, f := range gs[0].Files {
+		if f.Name == "b.bin" {
+			t.Fatal("a file differing past the prefix was grouped")
+		}
+	}
+	// Same name and size, different content, matching by name: never merged.
+	d2 := t.TempDir()
+	os.MkdirAll(filepath.Join(d2, "x"), 0o755)
+	os.MkdirAll(filepath.Join(d2, "y"), 0o755)
+	var named []fEnt
+	for i, b := range [][]byte{body, other} {
+		p := filepath.Join(d2, []string{"x", "y"}[i], "same.bin")
+		os.WriteFile(p, b, 0o644)
+		fi, _ := os.Stat(p)
+		named = append(named, fEnt{path: p, name: "same.bin", dir: filepath.Dir(p), size: fi.Size(), mod: fi.ModTime()})
+	}
+	if gs, _ := (&Server{}).scanDuplicates(named, MatchOpts{Name: true}, nil, make(chan struct{})); len(gs) != 0 {
+		t.Fatalf("two different files sharing a name were merged: %+v", gs)
+	}
+}

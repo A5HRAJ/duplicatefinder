@@ -186,8 +186,11 @@ for top in sys.argv[1:]:
         dirs.sort()
         for n in sorted(dirs+files):
             p=os.path.join(d,n); st=os.lstat(p); h=""
-            if stat.S_ISREG(st.st_mode) and st.st_size<=64<<20:
-                with open(p,"rb") as f: h=hashlib.sha256(f.read()).hexdigest()
+            if stat.S_ISREG(st.st_mode):
+                d2=hashlib.sha256()
+                with open(p,"rb") as f:
+                    for blk in iter(lambda: f.read(8<<20), b""): d2.update(blk)
+                h=d2.hexdigest()
             print(repr(p), stat.S_IFMT(st.st_mode), oct(st.st_mode&0o7777), st.st_size,
                   st.st_mtime_ns, st.st_ctime_ns, st.st_nlink, st.st_ino, h)
 PY
@@ -201,6 +204,19 @@ api GET '/api/results?tool=empty_folders' | grep -q 'empty dir' || fail "fixture
 api GET '/api/results?tool=corrupted_files' | grep -q 'z2.zip' || fail "fixture: the ZIP pair was not checked"
 pass "a scan with every tool changes nothing on disk ($(wc -l < "$WORK/fp-before" | tr -d ' ') entries fingerprinted)"
 rm -rf "$SHARE/e9"
+
+echo "== overlapping and aliased scan folders"
+# One file reached through a folder, a folder inside it, and a shortcut to
+# it is one file: it is never listed as its own duplicate.
+mkdir -p "$SHARE/ov/in"
+printf 'one file, three routes to it' > "$SHARE/ov/in/o.txt"
+ln -s "$SHARE/ov" "$SHARE/ovlink"
+r=$(api POST /api/scan "{\"tool\":\"duplicates\",\"tools\":[\"duplicates\"],\"dirs\":[\"$SHARE\",\"$SHARE/ov/in\",\"$SHARE/ovlink\"],\"recurse\":true,\"match\":{}}")
+echo "$r" | grep -q '"started":true' || fail "scan refused: $r"
+wait_idle
+api GET '/api/results?tool=duplicates' | grep -q 'o.txt' && fail "a file reached by three routes was listed as its own duplicate"
+rm -rf "$SHARE/ov" "$SHARE/ovlink"
+pass "a file reached through overlapping folders and a shortcut is one file"
 
 echo "== recycle bin and snapshots"
 # Copies in the recycle bin or a snapshot disappear on their own. Met inside
@@ -823,6 +839,16 @@ echo "$r" | grep -q 'already moved' || fail "what a stopped scan recovered was f
 [ -f "$SHARE/sv/o.dat" ] || fail "the original moved despite the refusal"
 rm -rf "$SHARE/sv"
 pass "protection a scan recovers from a folder record survives the scan being stopped and a restart"
+
+echo "== a save that fails is announced"
+# The results of a scan that cannot be written to disk would be gone after a
+# restart: the app is told, through the daemon's own state.
+chmod a-w "$STATE"
+scan '["empty_files"]'
+w=$(api GET /api/state | field saveError)
+chmod u+w "$STATE"
+[ -n "$w" ] || fail "a scan whose results could not be saved was not announced"
+pass "a scan whose results cannot be saved says so: $w"
 
 echo "== SIGTERM"
 kill -TERM "$DPID"

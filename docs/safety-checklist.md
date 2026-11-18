@@ -17,6 +17,9 @@ new open-ended hunt.
 *First pass, 2026-10-14.* The ✅ marks come from matching test names and
 test steps to each line. Before anything else, check that each listed test
 really proves what its sentence says, and downgrade the ones that don't.
+On 2026-11-17 an adversarial review checked the proofs of the lines its
+three areas touched (moves, scanning, the front door); every one it found
+short was fixed then. The other lines still need that check.
 
 **One thing to know first:** the app never deletes your files. It moves
 them into a folder you pick, and you decide later whether to delete that
@@ -33,14 +36,14 @@ would take away the only copy of something.
 
 | # | The app must… | | Proof |
 |---|---|---|---|
-| A1 | Group two files only when every byte matches (a full fingerprint, never just size or name) | ✅ | `TestCandHashDiscriminates`, `TestWindowedScanMatchesWholeScan`. The fingerprint is 256-bit BLAKE3, so two different files matching by chance can be ignored. |
+| A1 | Group two files only when every byte matches (a full fingerprint, never just size or name) | ✅ | `TestCandHashDiscriminates`, `TestWindowedScanMatchesWholeScan`. The fingerprint is 256-bit BLAKE3, so two different files matching by chance can be ignored.; `TestFilesDifferingOnlyPastThePrefixAreNotGrouped`: same size, differing only far past the first 64 KiB, not grouped |
 | A2 | Read every file again on every scan, never trust a fingerprint from an earlier scan | ✅ | `TestRescanRereadsEverything`, `TestResumeMatchesExactRequestOnly` |
 | A3 | Not count two names for one file (hard links) as two copies, and never list names that are all one file as a duplicate group | ✅ | `TestHardLinksCountAsOneCopy`, `TestHardLinksAloneAreNotDuplicates`, smoke hard-link labels; checked on the DS124, 2026-11-17; also when "Match by name" splits a group, or a move leaves only such names (`TestNamesOfOneFileAreNeverAGroupOnAPage`; both were listed until 2026-11-17) |
-| A4 | Not count one file reached by two routes (overlapping scan folders, shortcuts) as two copies | ✅ | `TestDirResolverCanonicalizesAliases`, `TestRefineGroupsNeverAliases` |
+| A4 | Not count one file reached by two routes (overlapping scan folders, shortcuts) as two copies | ✅ | `TestDirResolverCanonicalizesAliases`, `TestRefineGroupsNeverAliases`; audit "overlapping and aliased scan folders": one file reached through a folder, a folder inside it and a shortcut is not its own duplicate |
 | A5 | Not count a NAS folder mounted back into the same NAS as a second copy | ✅ | `TestFindSelfMounts`, audit "mounted into itself" |
 | A6 | Not follow shortcuts (symlinks) out of the folders you chose | ✅ | `TestDirHandleSurvivesPathSwap`, `TestOpenRelRefusesSwappedSymlink`, smoke symlink refusals |
 | A7 | Never scan the recycle bin (`#recycle`) or snapshots (`#snapshot`). Otherwise a copy in the bin could count as "the copy that stays" and vanish when the bin is emptied | ✅ | Audit "recycle bin and snapshots": copies inside both are never listed or paired, and choosing one directly — as a scan folder, a reference folder, or through a shortcut — is refused (it was accepted until 2026-11-17); `TestACopyInTheRecycleBinNeverStays`: a bin copy in results saved before that is never the copy that stays, and the walk re-checks each root once pinned |
-| A8 | Never merge different files when matching by name or created date | ✅ | `TestRefineGroupsByName`, `TestCreatedMatchUnknownNeverGroups` |
+| A8 | Never merge different files when matching by name or created date | ✅ | `TestRefineGroupsByName`, `TestCreatedMatchUnknownNeverGroups`; `TestFilesDifferingOnlyPastThePrefixAreNotGrouped`: same name and size, different content, matching by name, not merged |
 | A9 | Compare everything even in huge collections of same-size files, and report rather than silently skip anything over a limit | ✅ | `TestSkewedKeyStillFindsDuplicatesPastTheCap`, `TestKeyCounterDegradesWithoutFalseNegatives`, `TestOversizedGroupIsCappedAndReported` |
 | A10 | Keep file names that aren't valid text (old Windows or Mac names) exactly as stored, and never mix them up with a similar-looking neighbour | ✅ | `bytesafe` tests; audit "names outside UTF-8" (runs on Linux in CI) |
 | A11 | Never treat pipes, sockets or devices as files (opening one can freeze the app) | ✅ | `TestScannableIsRegularFilesAndDirectories`, `TestOpenRefusesFIFOWithoutBlocking`, audit "special files" |
@@ -70,7 +73,7 @@ would take away the only copy of something.
 | C2 | Refuse a file that changed since its scan, even if its size and date look the same | ✅ | `TestMoveIdentityCatchesSameSizeSameMtimeRewrite`, smoke "changed since its scan" |
 | C3 | Never move anything from the Conflicting Files list | ✅ | `TestMoveRefusesReadOnlyTool`, smoke read-only tool refusal |
 | C4 | Move exactly what's ticked. Changing the ticks while the folder picker is open moves nothing | ✅ | smoke "swapping the selection while the chooser is open"; a move made from results another scan has since replaced moves nothing (`TestMoveFromReplacedResultsIsRefused`, smoke "a move says which scan its files were chosen from"; added 2026-11-17) |
-| C5 | Never let Keep Newest or Select All tick a protected file or a copy the app already moved | ✅ | smoke "bulk select never selects protected rows", "Keep Newest never keeps or ticks a moved copy" |
+| C5 | Never let Keep Newest or Keep Oldest tick a protected file or a copy the app already moved | ✅ | smoke "bulk select never selects protected rows", "Keep Newest never keeps or ticks a moved copy", "Keep Oldest never keeps or ticks a moved copy" |
 | C6 | Refuse files File Station can't handle (`.DS_Store`, `._` files) and say why | ✅ | `TestFsCannotAddressMatchesMeasuredDSMBehaviour`, smoke "nomove" |
 | C7 | Not move an "empty" folder that has gained a file since the scan, at any depth inside it | ✅ | `TestScanEmptyFoldersHardConfirm`, `TestTransitFolderThatGainedAFileIsKept`, `TestTransitNestedFolderThatGainedAFileIsKept`, audit "folders holding only empty folders"; `TestTransitRefusesAFolderThatGainedARealFileBeforeItsCopy`: with Verify on across disks, what is read for the copy is held to the same rule, so a file arriving after the check is not copied along (until 2026-11-17 it was) |
 | C8 | Count a hidden folder (e.g. `.git`), a zero-byte file, or a folder named like junk as real content, at any depth inside a folder of empty folders | ✅ | `TestNativeJunkCheckRejectsJunkNamedDirectories`, `TestConfirmEmptyLooksInsideFolders`, `TestPassedOverIsContentMatchesTheConfirmation`, `TestJunkNamedFolderIsContentForItsParent`, `TestZeroByteFileIsNotJunk`, smoke "hiddenonly", audit "folders holding only empty folders" |
@@ -107,9 +110,9 @@ would take away the only copy of something.
 | E4 | Keep both if the original changes while being copied | ✅ | `TestTransitOriginalChangedAfterTheCopyIsKept`; `TestTransitKeepsANewerVersionWrittenInTheSameSecond` and its folder twin: a same-length rewrite within the same second, after the copy was verified, is caught by a nanosecond comparison (until 2026-11-17 the newer bytes were deleted) |
 | E5 | Check moved folders file by file, at every depth | ✅ | `TestTransitFolderIsCheckedFileByFileThenRemoved`, `TestTransitDamagedFileInsideAFolderKeepsTheFolder`, `TestTransitFolderOfFoldersIsCheckedThenRemoved`, `TestTransitDamagedFileInANestedFolderKeepsTheFolder` |
 | E6 | Refuse to move a file that has decayed since the scan | ✅ | `TestMoveVerifyRefusesDeepRotBeforeMoving`, `TestMoveVerifyRefusesUnreadableSource` |
-| E7 | Never copy bytes for a move on the same disk (it's a rename) | ✅ | `TestVerifiedMoveOnOneFilesystemDoesNotCopy` |
+| E7 | Never copy bytes for a move on the same disk (it's a rename) | ✅ | `TestVerifiedMoveOnOneFilesystemDoesNotCopy`; `TestTwoFoldersOnOneFilesystemDoNotCross` checks the real filesystem test, not a stub |
 | E8 | Keep Verify on by default and never turn it off by itself | ✅ | smoke move dialog; the daemon too: a request that does not say verifies (`TestAMoveThatDoesNotSayVerifies`; until 2026-11-17 it did not) |
-| E9 | Never change a scanned file: a scan only reads | ✅ | Audit "a scan only reads": every entry on both volumes fingerprinted before and after a scan with all five tools — type, permissions, size, modified time, inode change time, link count, inode and content |
+| E9 | Never change a scanned file: a scan only reads | ✅ | Audit "a scan only reads": every entry on both volumes fingerprinted before and after a scan with all five tools — type, permissions, size, modified time, inode change time, link count, inode and the whole content of every file |
 
 ## F. The app's own deletes
 
@@ -131,7 +134,7 @@ would take away the only copy of something.
 | G5 | Lose nothing if the destination fills up mid-move (something else writing to it) | ✅ | `TestDestinationFillingUpMidMoveLosesNothing`; audit "the destination fills up mid-move": verified or not, with "no space left" or a bare failure code, the original stays byte for byte, stays listed, is never taken for a moved copy, and the report says where any incomplete copy is. Until 2026-11-17 an unverified move could report the file "parked" and drop it from the list while the original never left. Since 2026-11-17 a cut-short copy is removed only under the file's own name or the name a USB disk gives it (`TestOnlyTheFilesOwnCutShortCopyIsRemoved`), and a lost answer while looking into the staging folder does not report the file as parked (`TestALostLookIntoStagingDoesNotCallTheFileParked`). File Station's own behaviour when a disk fills is simulated, not measured |
 | G6 | Set aside a damaged results file instead of overwriting it, keeping the move records | ✅ | `TestDamagedResultsSetAsideRecordsKept`, `TestDamagedJournalWarnsAndIsKept` |
 | G7 | Resume a stopped scan only with identical settings, never reusing old fingerprints otherwise | ✅ | `TestResumeMatchesExactRequestOnly`, release-gate resume checks |
-| G8 | Tell you when results couldn't be saved | ✅ | smoke "a failed save is announced"; a failed save is never hidden by another warning shown after it (smoke "a move report says everything, once"; added 2026-11-17) |
+| G8 | Tell you when results couldn't be saved | ✅ | smoke "a failed save is announced"; a failed save is never hidden by another warning shown after it (smoke "a move report says everything, once"; added 2026-11-17); audit "a save that fails is announced": a real failed save, read back from the daemon's state |
 | G9 | Keep the move records through a package upgrade | 🟡 | Checked by hand on the DS916+ at every release. No automated test |
 
 ## H. Hardware

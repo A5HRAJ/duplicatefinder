@@ -575,3 +575,16 @@ func TestTransitRefusesAFolderThatGainedARealFileBeforeItsCopy(t *testing.T) {
 		t.Fatalf("something reached the destination: %v", ents)
 	}
 }
+
+// The production filesystem check, not a stub: two folders on one
+// filesystem are not "across filesystems", so a verified move between them
+// is a rename that copies nothing.
+func TestTwoFoldersOnOneFilesystemDoNotCross(t *testing.T) {
+	root := t.TempDir()
+	a, b := filepath.Join(root, "a"), filepath.Join(root, "b")
+	os.Mkdir(a, 0o755)
+	os.Mkdir(b, 0o755)
+	if crossesFS(a, b) || crossesFS(a, a) {
+		t.Fatal("two folders on one filesystem were taken for two filesystems")
+	}
+}

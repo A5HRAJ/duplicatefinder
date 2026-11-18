@@ -417,6 +417,13 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     const sel = new Set(win.sm.getSelections().map((r) => r.id));
     const keptOriginals = grp.filter((r) => r !== moved && !sel.has(r.id)).length;
     check('Keep Newest never keeps or ticks a moved copy', !sel.has(moved.id) && keptOriginals === 1);
+    // The same with Keep Oldest, the moved copy made the OLDEST this time.
+    moved.set('date', '1999-01-01 00:00:00');
+    win.autoSelect('oldest');
+    const selO = new Set(win.sm.getSelections().map((r) => r.id));
+    check('Keep Oldest never keeps or ticks a moved copy',
+      !selO.has(moved.id) && grp.filter((r) => r !== moved && !selO.has(r.id)).length === 1);
+    moved.set('date', '2099-01-01 00:00:00');
     const row = win.grid.getView().getRow(win.store.indexOf(moved));
     const loc = row && row.querySelector('.df-loc');
     check('a moved copy says so on its location',
