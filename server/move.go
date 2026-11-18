@@ -85,7 +85,12 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Scanned != "" && req.Scanned != current {
-		writeErr(w, 409, "these results were replaced by a newer scan since you chose the files — look at the list again and choose them anew")
+		// "replaced" tells the app to fetch the newer results, so the list on
+		// screen is the one the next choice is made from.
+		writeJSON(w, 409, map[string]any{
+			"error":    "these results were replaced by a newer scan since you chose the files, so nothing was moved — choose the files again from the newer results",
+			"replaced": true,
+		})
 		return
 	}
 	destH, destCanon, destShare, sess, ok := s.vetDestination(w, r, req.Dest)

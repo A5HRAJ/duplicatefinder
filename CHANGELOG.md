@@ -15,6 +15,12 @@ package versions shown in Package Center.
   so a changed file or a copy damaged on its way can go unnoticed.
 
 ### Fixed
+- A move from a list that a newer scan had replaced (one started from
+  another window, say) was refused, but the old list stayed on screen, so
+  choosing the files again was refused again until you switched views. The
+  newer results are now loaded right away, and the notice says nothing was
+  moved. Notices passed on from the NAS also start with a capital letter
+  now.
 - The Scan Issues window cut off the end of its explanation on a NAS where
   the service user's name is long (such as "sc-duplicatefinder"), hiding
   "then a new scan." The explanation now scrolls with the list and is

@@ -166,7 +166,8 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   await sleep(60);
   check('notify uses DSM ToastBox, not the fallback element',
     (window.__toasts || 0) === toastsBefore + 1 &&
-    window.__lastToastText === 'toast check message' &&
+    // the daemon's lower-case messages are shown as sentences
+    window.__lastToastText === 'Toast check message' &&
     !doc.querySelector('.df-toast'));
   check('toast is app-scoped, not a new Ext window',
     doc.querySelectorAll('.x-window').length === winCountBefore);
@@ -1677,6 +1678,42 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     check('a clean move with warnings says all of it in one notice',
       notes.length === 1 && /SAVE-FAILED/.test(notes[0]) && /RECORD-FAILED/.test(notes[0]) && /a\.txt → a \(1\)\.txt/.test(notes[0]));
     window.Ext.Ajax.request = realApi;
+    win.notify = realNotify;
+  }
+
+  // ---- a move from results a newer scan replaced ---------------------------
+  // The window still shows the results it loaded, but another scan (from
+  // another window, say) has replaced them. The daemon refuses and nothing
+  // moves. The app must then put the newer results on screen — left as it
+  // was, the same choice is refused again however often it is made — and
+  // say so in a sentence, with a capital letter like DSM's own notices.
+  {
+    for (let i = 0; i < 40 && !win.store.getCount(); i++) await sleep(200);
+    const t = win.state.tool;
+    const idx = win.store.findBy((r) => !r.get('prot') && !r.get('out'));
+    const rec = win.store.getAt(idx);
+    const src = rec.get('path') + '/' + rec.get('name');
+    const current = win.state.scannedAt[t];
+    win.state.scannedAt[t] = '2000-01-01T00:00:00Z'; // what an older window holds
+    win.sm.clearSelections();
+    win.sm.selectRow(idx, true);
+    const seq = win.__loads;
+    const realNotify = win.notify;
+    win.notify = Object.getPrototypeOf(win).notify; // the real notice, not the recorder
+    window.__lastToastText = null;
+    win.openMoveDialog();
+    await sleep(200);
+    clickBtn(/^Choose Folder/);
+    await sleep(200);
+    window.__lastChooser.fireEvent('choose', window.__lastChooser, { path: '/spare/moved-ui2' });
+    for (let i = 0; i < 50 && !window.__lastToastText; i++) await sleep(100);
+    for (let i = 0; i < 50 && win.__loads === seq; i++) await sleep(100);
+    check('a move from replaced results moves nothing', idx >= 0 && fsm.existsSync(src));
+    check('and says so in a sentence (' + JSON.stringify(window.__lastToastText) + ')',
+      /^These results were replaced by a newer scan.*nothing was moved/.test(window.__lastToastText || ''));
+    check('the newer results are fetched and put on screen (' + JSON.stringify([win.state.scannedAt[t] === current, win.__loads - seq]) + ')',
+      win.state.scannedAt[t] === current && win.__loads > seq);
+    check('the refused choice is cleared', win.sm.getCount() === 0);
     win.notify = realNotify;
   }
 

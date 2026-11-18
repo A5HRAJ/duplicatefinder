@@ -166,6 +166,13 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 	function qtipText(s) {
 		return esc(esc(s));
 	}
+	/* The daemon's messages start in lower case, because they are also put
+	   inside other text. Shown on their own in a notice, they start with a
+	   capital letter, as DSM's own notices do. */
+	function sentence(s) {
+		s = String(s == null ? '' : s);
+		return /^[a-z]/.test(s) ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+	}
 	function pad6(n) {
 		var s = String(n);
 		while (s.length < 6) s = '0' + s;
@@ -979,14 +986,14 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				// whose X does nothing. Attach after construction instead.
 				this._toast = new UxToast({
 					owner: this,
-					text: esc(msg),
+					text: esc(sentence(msg)),
 					delay: 3600,
 					closable: true
 				});
 				this._toast.on('beforedestroy', function () { me._toast = null; });
 				return;
 			}
-			var el = Ext.getBody().createChild({ tag: 'div', cls: 'df-toast', html: esc(msg) });
+			var el = Ext.getBody().createChild({ tag: 'div', cls: 'df-toast', html: esc(sentence(msg)) });
 			this._toastEl = el;
 			window.setTimeout(function () {
 				if (me._toastEl === el) me._toastEl = null;
@@ -3740,6 +3747,20 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 					me.confirmSyncedMove(j.synced, paths.length, function () {
 						me.doMove(recs, dest, preserve, tool, verify, j.synced, scanned);
 					});
+					return;
+				}
+				// The list on screen was replaced by a newer scan (one started
+				// from another window, say), and nothing moved. Showing the
+				// newer results is the only way out: left as it was, the same
+				// choice would be refused again however often it was made.
+				if (err && j && j.replaced) {
+					me.sm.clearSelections();
+					api('/state', 'GET', null, function (err2, st) {
+						me.syncScanned(st, function (changed) {
+							if (!changed || changed.indexOf(me.state.tool) < 0) me.reloadPage();
+							me.notify(err);
+						});
+					}, { timeout: PAGE_TIMEOUT });
 					return;
 				}
 				if (err) {
