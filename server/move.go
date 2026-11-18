@@ -33,8 +33,8 @@ type MoveReq struct {
 	// source is re-read and hashed before the move (and must still match the
 	// scan's recorded hash where one exists), and the destination is read
 	// back and hashed after it. The dialog sends it explicitly (checked by
-	// default); absent means false, so a caller that does not know the field
-	// gets an unverified move. Onto another filesystem a verified move copies
+	// default); absent means true (decodeMoveRequest), so a caller that does
+	// not say gets the checked move. Onto another filesystem a verified move copies
 	// first and removes the original only once the copy matches (transit.go),
 	// and a folder's every entry is checked there; on one filesystem a folder
 	// moves as a single rename, with nothing in transit to check.
@@ -46,6 +46,17 @@ type MoveReq struct {
 	// service keeps in step elsewhere (synced.go). Without it such a move is
 	// answered 409 with the folders listed under "synced", and nothing moves.
 	SyncOK bool `json:"syncOK"`
+	// SyncAgreed lists the synced folders the user was shown when they
+	// agreed. The move goes ahead only if every folder it would now take
+	// files out of is among them: one that became synced while the question
+	// was open is asked about in its turn.
+	SyncAgreed []syncHit `json:"syncAgreed"`
+	// Scanned is the scan the app's selection was made from (the result's
+	// scannedAt). When another scan has replaced that result since — while a
+	// question was open, or from another window — the files at those paths
+	// are not the ones the user saw listed, and nothing moves. Empty skips
+	// the check, for a caller that does not know.
+	Scanned string `json:"scanned"`
 }
 
 func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
@@ -64,9 +75,22 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	// sufficient: mu is dropped on the next line.
 	s.mu.Lock()
 	scanning := s.job.Running
+	current := ""
+	if res := s.results[req.Tool]; res != nil {
+		current = res.Scanned
+	}
 	s.mu.Unlock()
 	if scanning {
 		writeErr(w, 409, "a scan is running — wait for it to finish before moving files")
+		return
+	}
+	if req.Scanned != "" && req.Scanned != current {
+		// "replaced" tells the app to fetch the newer results, so the list on
+		// screen is the one the next choice is made from.
+		writeJSON(w, 409, map[string]any{
+			"error":    "these results were replaced by a newer scan since you chose the files, so nothing was moved — choose the files again from the newer results",
+			"replaced": true,
+		})
 		return
 	}
 	destH, destCanon, destShare, sess, ok := s.vetDestination(w, r, req.Dest)
@@ -124,7 +148,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	// partway, one file at a time, once the volume was full.
 	if need := v.crossVolumeNeed(req.Files, destCanon); need > 0 {
 		if free, known := sess.volumeFree(destCanon); known && need > free {
-			writeErr(w, 400, fmt.Sprintf("the destination volume has %s free, and moving these files onto it needs %s — free some space, or choose a destination on the same volume as the files", fmtBytes(free), fmtBytes(need)))
+			writeErr(w, 400, fmt.Sprintf("the destination volume has %s free, and moving these files onto it needs %s — free some space, or choose another destination", fmtBytes(free), fmtBytes(need)))
 			return
 		}
 	}
@@ -134,12 +158,12 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	// places too — the user's cloud account, their laptop, another NAS. That
 	// is the user's call, so it is asked before anything is created, and the
 	// app sends the move again with syncOK once they have agreed.
-	if !req.SyncOK {
+	{
 		canon := make([]string, 0, len(req.Files))
 		for _, f := range req.Files {
 			canon = append(canon, v.canon.path(filepath.Clean(f)))
 		}
-		if hits := moveSyncHits(sess, canon, destCanon); len(hits) > 0 {
+		if hits := moveSyncHits(sess, canon, destCanon); len(hits) > 0 && !(req.SyncOK && syncAgreedCovers(req.SyncAgreed, hits)) {
 			writeJSON(w, 409, map[string]any{"error": syncHitsMessage(hits), "synced": hits})
 			return
 		}
@@ -199,6 +223,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	defer func() { jr.finish(saved) }()
 
 	moved := []string{}
+	var renamed []map[string]string
 	var movedCanon, movedDirs, allLanded, flatLanded []string
 	anyLanded, batchRecorded := false, false
 	errs := []map[string]string{}
@@ -308,6 +333,9 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		moved = append(moved, src)
+		if at != "" && filepath.Base(at) != filepath.Base(src) {
+			renamed = append(renamed, map[string]string{"from": src, "to": filepath.Join(req.Dest, strings.TrimPrefix(at, destCanon))})
+		}
 	}
 	// Every file accounted for — report the full count before the response is
 	// written, so a poll racing the last file cannot show N-1 of N and then
@@ -368,7 +396,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 			saved = false
 		}
 	}
-	rep := &moveReport{ID: req.ID, Tool: req.Tool, Dest: req.Dest, Total: len(req.Files), Moved: moved, Errors: errs, RecordError: recordErr}
+	rep := &moveReport{ID: req.ID, Tool: req.Tool, Dest: req.Dest, Total: len(req.Files), Moved: moved, Errors: errs, Renamed: renamed, RecordError: recordErr}
 	s.mu.Lock()
 	// The prune above could not be saved: the moved rows would be back after
 	// a restart, and the app tells the user so.
@@ -400,6 +428,9 @@ func decodeMoveRequest(w http.ResponseWriter, r *http.Request) (req MoveReq, fol
 		writeErr(w, 405, "POST required")
 		return req, "", false
 	}
+	// Verify is on unless the body turns it off: the decoder leaves a field
+	// the body does not name as it was.
+	req.Verify = true
 	if err := decodeBytesafe(r.Body, &req); err != nil {
 		writeErr(w, 400, "bad request body")
 		return req, "", false
@@ -562,6 +593,12 @@ func (s *Server) newMoveVet(req MoveReq, sess *fsSession) *moveVet {
 		if _, in := selfm.under(p); in {
 			delete(exists, p)
 		}
+		// Nor is a copy in the recycle bin or a snapshot, which disappears
+		// on its own. Results saved before such folders were refused as scan
+		// folders can still hold one.
+		if inSelfEmptying(p) {
+			delete(exists, p)
+		}
 	}
 	drops, outHeld, _ := keepOneDropsWhy(groups, requested, canonRefs, canon, exists, moveOut.isOut, nil)
 	return &moveVet{
@@ -645,6 +682,12 @@ func (v *moveVet) refuse(cp string) error {
 		return errors.New("keeping one copy of a duplicate group that lives inside this folder")
 	case isUnder(cp, v.canonRefs):
 		return errors.New("read-only reference file")
+	// A folder offered as empty can hold a junk-only folder that is a
+	// reference folder; moving it would carry the reference away, and with it
+	// a copy keep-one counted as staying. Checked against the live list, so a
+	// reference set after the scan is honoured too.
+	case isDirIdent(v.idents[cp]) && holdsAny(cp, v.canonRefs):
+		return errors.New("this folder holds a read-only reference folder, so it stays where it is")
 	// Refused BEFORE File Station is asked, because asking produces "no
 	// such file or folder" for a file that plainly exists — a refusal
 	// that sends the user looking for a vanished file instead of telling
@@ -938,7 +981,9 @@ func execMoveFSAt(sess *fsSession, src, cp, destShare, destCanon string, wants [
 	// A file's content is hashed before it moves. Placed above batch() with
 	// every other refusal, so a verify refusal creates nothing.
 	preHash := ""
+	var preStat os.FileInfo // taken BEFORE the hash: a write during it shows
 	if verify && !e.IsDir {
+		preStat, _ = os.Lstat(cp)
 		if preHash, err = preMoveHash(cp, want, note); err != nil {
 			return "", err
 		}
@@ -949,6 +994,9 @@ func execMoveFSAt(sess *fsSession, src, cp, destShare, destCanon string, wants [
 	// filesystem its move is a rename and no byte of it travels.
 	transit := verify && crossesFS(filepath.Dir(cp), destCanon)
 	ref := transitRef{hash: preHash}
+	if preStat != nil && preStat.Mode().IsRegular() {
+		ref.size, ref.mtimeNs = preStat.Size(), preStat.ModTime().UnixNano()
+	}
 	if transit && e.IsDir {
 		if note != nil {
 			note(" — verifying")
@@ -956,6 +1004,9 @@ func execMoveFSAt(sess *fsSession, src, cp, destShare, destCanon string, wants [
 		man, merr := takeManifest(cp, true)
 		if merr != nil {
 			return "", errors.New("could not read what the folder holds to verify it (" + merr.Error() + ") — nothing was moved")
+		}
+		if !manifestHoldsOnlyJunk(man) {
+			return "", errors.New("the folder is no longer empty — rescan and try again")
 		}
 		ref = transitRef{isDir: true, man: man}
 	}
@@ -1396,7 +1447,10 @@ func keepOneDropsWhy(groups []Group, requested map[string]bool, refDirs []string
 // crossVolumeNeed sums the sizes of the request's files that would have to be
 // COPIED to reach dest: File Station moves a file to another volume by
 // copying it there and deleting the source, so the destination's volume must
-// hold every such byte, while a move within one volume needs none. Sizes are
+// hold every such byte. Within one volume a move between two filesystems (a
+// Btrfs shared folder is a subvolume of its own) copies too, one file at a
+// time, so the largest such file is added; any other move within a volume
+// is a rename and needs nothing. Sizes are
 // the scan's own record of each entry — the identity the move is vetted
 // against. A junk-only folder's size is the junk it carries with it; paths no
 // scan listed contribute nothing here, the vetting refuses those on its own.
@@ -1404,17 +1458,27 @@ func keepOneDropsWhy(groups []Group, requested map[string]bool, refDirs []string
 // stay sparse.
 func (v *moveVet) crossVolumeNeed(files []string, destCanon string) int64 {
 	destVol := volumeOf(destCanon, v.vols)
-	var need int64
+	var need, largest int64
 	for _, src := range files {
 		cp := v.canon.path(filepath.Clean(src))
-		if destVol == "" || volumeOf(cp, v.vols) == destVol {
+		ids := v.idents[cp]
+		if destVol == "" || len(ids) == 0 {
 			continue
 		}
-		if ids := v.idents[cp]; len(ids) > 0 {
+		switch {
+		case volumeOf(cp, v.vols) != destVol:
+			// From another volume: every such file stays on the destination.
 			need += ids[0].size
+		case crossesFS(filepath.Dir(cp), destCanon):
+			// Same volume, another filesystem (a Btrfs shared folder is a
+			// subvolume of its own): each file is copied before its original
+			// goes, so the largest must fit, one at a time.
+			if ids[0].size > largest {
+				largest = ids[0].size
+			}
 		}
 	}
-	return need
+	return need + largest
 }
 
 // volumeOf returns the volume root p lives under, or "" when none does.

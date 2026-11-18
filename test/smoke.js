@@ -166,7 +166,8 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   await sleep(60);
   check('notify uses DSM ToastBox, not the fallback element',
     (window.__toasts || 0) === toastsBefore + 1 &&
-    window.__lastToastText === 'toast check message' &&
+    // the daemon's lower-case messages are shown as sentences
+    window.__lastToastText === 'Toast check message' &&
     !doc.querySelector('.df-toast'));
   check('toast is app-scoped, not a new Ext window',
     doc.querySelectorAll('.x-window').length === winCountBefore);
@@ -417,6 +418,13 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     const sel = new Set(win.sm.getSelections().map((r) => r.id));
     const keptOriginals = grp.filter((r) => r !== moved && !sel.has(r.id)).length;
     check('Keep Newest never keeps or ticks a moved copy', !sel.has(moved.id) && keptOriginals === 1);
+    // The same with Keep Oldest, the moved copy made the OLDEST this time.
+    moved.set('date', '1999-01-01 00:00:00');
+    win.autoSelect('oldest');
+    const selO = new Set(win.sm.getSelections().map((r) => r.id));
+    check('Keep Oldest never keeps or ticks a moved copy',
+      !selO.has(moved.id) && grp.filter((r) => r !== moved && !selO.has(r.id)).length === 1);
+    moved.set('date', '2099-01-01 00:00:00');
     const row = win.grid.getView().getRow(win.store.indexOf(moved));
     const loc = row && row.querySelector('.df-loc');
     check('a moved copy says so on its location',
@@ -524,6 +532,17 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     check('issue dialog lists every line, escaped',
       !!dom && dom.querySelectorAll('.df-issue').length === 3 &&
       dom.innerHTML.indexOf('&lt;img') >= 0 && !dom.querySelector('img'));
+    // The explanation's height depends on the service user's name and DSM's
+    // font, so it must never sit in a fixed-height box that can cut it
+    // short: it scrolls in the same body as the list. (jsdom has no layout;
+    // the clipping itself was measured on DSM.)
+    const lead = dom ? dom.querySelector('.df-issues-lead') : null;
+    const leadBody = lead ? lead.closest('.x-panel-body') : null;
+    const leadPanel = leadBody ? window.Ext.getCmp(leadBody.parentNode.closest('.x-panel').id) : null;
+    check('the issue explanation scrolls with the list, in no fixed-height box',
+      !!lead && /then a new scan\./.test(lead.textContent) &&
+      !!leadBody && leadBody.querySelectorAll('.df-issue').length === 3 &&
+      !!leadPanel && leadPanel.autoScroll === true && !leadPanel.initialConfig.height);
     if (dlg) dlg.close();
     // A failed state save rides on the completion toast.
     win.state.saveError = 'results could not be saved to disk (no space) — they will be lost when the package restarts';
@@ -1004,6 +1023,15 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     vR('corrupt', meta, fakeRec);
     const vTip = decodeAttr(meta.attr || '');
     check('status tooltip decodes to text, never markup', vTip.indexOf('<') < 0 && /&lt;img/.test(vTip));
+    // The scope list in the sidebar: a folder's name is whatever someone with
+    // write access to a share typed, and the admin adding that folder to the
+    // scope must not run it by hovering over the row.
+    win.scopeList.getStore().loadData([['/volume1/share/' + hostile, false], ['/volume1/share/ref' + hostile, true]]);
+    const scopeTips = Array.from(win.scopeList.getEl().dom.querySelectorAll('[ext\\:qtip]')).map((el) => el.getAttribute('ext:qtip') || '');
+    check('scope list tooltips decode to text, never markup',
+      scopeTips.length === 2 && scopeTips.every((t) => t.indexOf('<') < 0 && /&lt;img/.test(t)));
+    check('scope list text is escaped', !win.scopeList.getEl().dom.querySelector('img'));
+    win.syncScopeList();
   }
 
   // ---- a failed page load still ENDS the load ----------------------------
@@ -1431,6 +1459,21 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
   const verifyInput = radioFor(/Verify file contents after moving/);
   check('verification is offered as a checkbox, ticked by default',
     !!verifyInput && verifyInput.type === 'checkbox' && verifyInput.checked === true);
+  // An ⓘ after its label says what each choice gains and risks, drawn by
+  // DSM's own SYNO.ux.AddTip as File Station does for its security options:
+  // one icon, in the checkbox's own wrapper, after the label.
+  const verifyLabel = Array.from(doc.querySelectorAll('label')).find((l) => /Verify file contents after moving/.test(l.textContent));
+  const verifyWrap = verifyInput ? verifyInput.parentNode : null;
+  const verifyIcons = verifyWrap ? verifyWrap.querySelectorAll('.syno-ux-whitetip-icon') : [];
+  const verifyTip = verifyIcons.length ? verifyIcons[0].getAttribute('ext:wtip') || '' : '';
+  check('the verification checkbox has one DSM info icon, after its label',
+    verifyIcons.length === 1 && !!verifyLabel &&
+    !!(verifyLabel.compareDocumentPosition(verifyIcons[0]) & window.Node.DOCUMENT_POSITION_FOLLOWING));
+  check('the info icon explains both choices',
+    /<b>On \(recommended\):<\/b>/.test(verifyTip) && /Safer, but slower/.test(verifyTip) &&
+    /<b>Off:<\/b>/.test(verifyTip) && /can go unnoticed/.test(verifyTip));
+  check('the checkbox and its label carry no tooltip of their own',
+    !!verifyWrap && !verifyWrap.querySelector('[ext\\:qtip]') && !verifyWrap.getAttribute('ext:qtip'));
   // The prose explaining WHEN turning verification off is reasonable (a move
   // within one shared folder only renames) is deliberately kept out of the
   // dialog and lives in the README alone — the checkbox is the whole
@@ -1557,6 +1600,8 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
       txt.indexOf(shareDir) >= 0 && /Cloud Sync/.test(txt));
     check('the question is owned by the app window', !!win._syncWin && win._syncWin.owner === win);
     check('the first request did not claim permission', bodies.length === 1 && bodies[0].syncOK === false);
+    check('a move says which scan its files were chosen from',
+      bodies.length === 1 && !!bodies[0].scanned && bodies[0].scanned === win.state.scannedAt[win.state.tool]);
     check('nothing moved while the question is open', fsm.existsSync(srcS));
     clickBtn(/^Cancel$/);
     await sleep(400);
@@ -1566,12 +1611,22 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
     msg2 = null;
     await pickTo();
     check('the question comes back for a second try', await syncAsked());
+    // While the question is open, Synology Drive starts keeping the same
+    // folder in step too. Agreeing to Cloud Sync is not agreeing to that.
+    fsm.writeFileSync(syncedConf, JSON.stringify({ cloudsync: [shareDir], drive: [shareDir.split('/')[1]] })); // Drive syncs whole shared folders, by name
+    clickBtn(/^Move Anyway$/);
+    for (let i = 0; i < 50 && bodies.length < 3; i++) await sleep(100);
+    check('Move Anyway names the folders it agreed to',
+      bodies.length === 3 && bodies[2].syncOK === true &&
+      JSON.stringify(bodies[2].syncAgreed.map((h) => h.by)) === JSON.stringify(['Cloud Sync']));
+    check('a folder that became synced meanwhile is asked about, and nothing moved',
+      await syncAsked() && /Synology Drive/.test(doc.body.textContent) && fsm.existsSync(srcS));
     clickBtn(/^Move Anyway$/);
     for (let i = 0; i < 50 && !/Moved 1 file/.test(msg2 || ''); i++) await sleep(200);
     check('Move Anyway sends the same move with syncOK',
-      bodies.length === 3 && bodies[2].syncOK === true &&
-      JSON.stringify(bodies[2].files) === JSON.stringify(bodies[1].files) &&
-      bodies[2].dest === bodies[1].dest);
+      bodies.length === 4 && bodies[3].syncOK === true &&
+      JSON.stringify(bodies[3].files) === JSON.stringify(bodies[1].files) &&
+      bodies[3].dest === bodies[1].dest && bodies[3].syncAgreed.length === 2);
     check('and the file moved (' + JSON.stringify(msg2) + ')', !fsm.existsSync(srcS));
 
     // A service that is installed but does not answer cannot be ruled out:
@@ -1595,6 +1650,71 @@ async function waitForLoadAfter(win, seqBefore, min, tries) {
       fsm.existsSync(srcU) && bodies.length === sent + 1 && /Nothing was moved/.test(msg2 || ''));
     window.Ext.Ajax.request = oa2;
     fsm.unlinkSync(syncedConf);
+  }
+
+  // ---- a move report says everything, once ---------------------------------
+  // Warnings and renamed files must not replace one another: two notices in
+  // a row leave only the second on screen. With issues they go into the
+  // Move Issues window, which stays until closed; without, into one notice.
+  {
+    const renamed = [{ from: '/volume1/share/a.txt', to: '/volume1/share/dest/a (1).txt' }];
+    let notes = [];
+    const realNotify = win.notify;
+    win.notify = function (m) { notes.push(m); };
+    const realApi = window.Ext.Ajax.request;
+    window.Ext.Ajax.request = function () { return {}; }; // the report's acknowledgement
+    win.presentMoveReport({ tool: 'duplicates', total: 2, moved: ['/volume1/share/a.txt'],
+      errors: [{ path: '/volume1/share/b.txt', error: 'could not be moved' }],
+      saveError: 'SAVE-FAILED', recordError: 'RECORD-FAILED', renamed: renamed });
+    await sleep(200);
+    const txt = doc.body.textContent;
+    check('the Move Issues window lists both warnings and the renamed file',
+      /Move Issues/.test(txt) && /SAVE-FAILED/.test(txt) && /RECORD-FAILED/.test(txt) && /a \(1\)\.txt/.test(txt) && notes.length === 0);
+    clickBtn(/^OK$/);
+    await sleep(200);
+    notes = [];
+    win.presentMoveReport({ tool: 'duplicates', total: 1, moved: ['/volume1/share/a.txt'], dest: '/volume1/share/dest',
+      errors: [], saveError: 'SAVE-FAILED', recordError: 'RECORD-FAILED', renamed: renamed });
+    check('a clean move with warnings says all of it in one notice',
+      notes.length === 1 && /SAVE-FAILED/.test(notes[0]) && /RECORD-FAILED/.test(notes[0]) && /a\.txt → a \(1\)\.txt/.test(notes[0]));
+    window.Ext.Ajax.request = realApi;
+    win.notify = realNotify;
+  }
+
+  // ---- a move from results a newer scan replaced ---------------------------
+  // The window still shows the results it loaded, but another scan (from
+  // another window, say) has replaced them. The daemon refuses and nothing
+  // moves. The app must then put the newer results on screen — left as it
+  // was, the same choice is refused again however often it is made — and
+  // say so in a sentence, with a capital letter like DSM's own notices.
+  {
+    for (let i = 0; i < 40 && !win.store.getCount(); i++) await sleep(200);
+    const t = win.state.tool;
+    const idx = win.store.findBy((r) => !r.get('prot') && !r.get('out'));
+    const rec = win.store.getAt(idx);
+    const src = rec.get('path') + '/' + rec.get('name');
+    const current = win.state.scannedAt[t];
+    win.state.scannedAt[t] = '2000-01-01T00:00:00Z'; // what an older window holds
+    win.sm.clearSelections();
+    win.sm.selectRow(idx, true);
+    const seq = win.__loads;
+    const realNotify = win.notify;
+    win.notify = Object.getPrototypeOf(win).notify; // the real notice, not the recorder
+    window.__lastToastText = null;
+    win.openMoveDialog();
+    await sleep(200);
+    clickBtn(/^Choose Folder/);
+    await sleep(200);
+    window.__lastChooser.fireEvent('choose', window.__lastChooser, { path: '/spare/moved-ui2' });
+    for (let i = 0; i < 50 && !window.__lastToastText; i++) await sleep(100);
+    for (let i = 0; i < 50 && win.__loads === seq; i++) await sleep(100);
+    check('a move from replaced results moves nothing', idx >= 0 && fsm.existsSync(src));
+    check('and says so in a sentence (' + JSON.stringify(window.__lastToastText) + ')',
+      /^These results were replaced by a newer scan.*nothing was moved/.test(window.__lastToastText || ''));
+    check('the newer results are fetched and put on screen (' + JSON.stringify([win.state.scannedAt[t] === current, win.__loads - seq]) + ')',
+      win.state.scannedAt[t] === current && win.__loads > seq);
+    check('the refused choice is cleared', win.sm.getCount() === 0);
+    win.notify = realNotify;
   }
 
   // ---- external (USB-shaped) share as destination ------------------------

@@ -192,6 +192,7 @@ type inflight struct {
 	src                   string
 	aheads, from, placed  []string
 	staging, where, phase string
+	stagingWhere          string // the staging folder as the user sees it
 }
 
 // settle returns the move records an entry with no outcome must add: its
@@ -222,7 +223,12 @@ func (in *inflight) report() string {
 		}
 		return msg
 	case "ahead":
-		return "Duplicate Finder stopped while File Station was moving this, and File Station may have finished on its own: if it is no longer in its folder, it is at " + in.where
+		msg := "Duplicate Finder stopped while File Station was moving this, and File Station may have finished on its own: if it is no longer in its folder, it is at " + in.where
+		if in.stagingWhere != "" {
+			// It was on its last hop, out of the hidden staging folder.
+			msg += ", or, if not there either, still in the hidden folder " + in.stagingWhere
+		}
+		return msg
 	case "staging":
 		return "Duplicate Finder stopped while File Station was moving or copying this into a hidden folder at the destination: if it is no longer in its folder, it is in " + in.where + "; if it is, any copy left there can be deleted"
 	}
@@ -294,7 +300,7 @@ func (s *Server) replayMoveJournal() {
 			cur.from = l.From
 			cur.phase, cur.where = "ahead", l.Where
 		case l.Staging != "" && cur != nil:
-			cur.staging = l.Staging
+			cur.staging, cur.stagingWhere = l.Staging, l.Where
 			cur.phase, cur.where = "staging", l.Where
 		case l.Placed != "" && cur != nil:
 			cur.placed = append(cur.placed, l.Placed)

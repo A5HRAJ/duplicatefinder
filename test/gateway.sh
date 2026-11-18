@@ -44,6 +44,8 @@ tok=""
 case "$QUERY_STRING" in SynoToken=*) tok="${QUERY_STRING#SynoToken=}" ;; esac
 [ -n "$tok" ] || tok="${HTTP_X_SYNO_TOKEN:-}"
 if [ -n "$tok" ]; then
+	# Like DSM's, a token is checked against the session: no cookie, no user.
+	case "${HTTP_COOKIE:-}" in *id=*) ;; *) exit 1 ;; esac
 	case "$tok" in
 		tok-alice) echo alice ;;
 		tok-bob) echo bob ;;
@@ -71,6 +73,12 @@ case "$1" in
 		bob) echo "100" ;;
 		carol) echo "100 1234" ;;
 		dave) echo "100 2000" ;;
+		*) exit 1 ;;
+	esac ;;
+	-Gn) case "${3:-}" in
+		alice|carol) echo "users administrators" ;;
+		bob) echo "users" ;;
+		dave) echo "users backup administrators" ;;
 		*) exit 1 ;;
 	esac ;;
 	-un) echo http ;;
@@ -119,11 +127,11 @@ echo "== gateway"
 expect "no session is refused"                                     401 /state "" "" ""
 expect "a signed-in non-administrator is refused"                  403 /state "" "id=sess-bob" ""
 expect "an administrator's session cookie gets through when no token is sent" reached /state "" "id=sess-alice" ""
-expect "an administrator's SynoToken in the query gets through"    reached /state "SynoToken=tok-alice" "" ""
-expect "an administrator's SynoToken in the header gets through"   reached /state "" "" "tok-alice"
-expect "a non-administrator's token is refused"                    403 /state "SynoToken=tok-bob" "" ""
-expect "an administrator whose group has another GID gets through" reached /state "SynoToken=tok-carol" "" ""
-expect "a group merely named like administrators is refused"       403 /state "SynoToken=tok-dave" "" ""
+expect "an administrator's SynoToken in the query gets through"    reached /state "SynoToken=tok-alice" "id=sess-any" ""
+expect "an administrator's SynoToken in the header gets through"   reached /state "" "id=sess-any" "tok-alice"
+expect "a non-administrator's token is refused"                    403 /state "SynoToken=tok-bob" "id=sess-any" ""
+expect "an administrator whose group has another GID gets through" reached /state "SynoToken=tok-carol" "id=sess-any" ""
+expect "a group merely named like administrators is refused"       403 /state "SynoToken=tok-dave" "id=sess-any" ""
 # The stand-in cannot tell a cookie-only call from a token call (both see the
 # request's own variables), so the fall-back is caught by counting: after a
 # token fails, authenticate.cgi must not be asked a second time.
@@ -133,26 +141,28 @@ expect "a token that does not validate never falls back to the cookie" 401 /stat
 : > "$W/auth.log"
 expect "a forged token in the header never falls back to the cookie"    401 /state "" "id=sess-alice" "tok-forged"
 [ "$(wc -l < "$W/auth.log" | tr -d ' ')" = 1 ] || fail "after a header token failed to validate, authenticate.cgi was asked again: $(cat "$W/auth.log")"
-expect "a helper that prints a name and then fails is refused"     401 /state "SynoToken=tok-broken" "" ""
+expect "a helper that prints a name and then fails is refused"     401 /state "SynoToken=tok-broken" "id=sess-any" ""
 expect "an empty SynoToken is refused, never sliding to the cookie" 400 /state "SynoToken=" "id=sess-alice" ""
-expect "two SynoTokens are refused"                                400 /state "SynoToken=tok-alice&SynoToken=tok-bob" "" ""
-expect "a second parameter smuggled inside the token is refused"   400 /state "SynoToken=tok-alice%26SynoToken%3Dx" "" ""
-expect "the diagnostics page is refused to a non-administrator"    403 /debug "SynoToken=tok-bob" "" ""
-out="$(gate /debug "SynoToken=tok-alice" "" "")"
+expect "a token without the session cookie is refused"              401 /state "SynoToken=tok-alice" "" ""
+expect "a valid token followed by an empty one is refused"          400 /state "SynoToken=tok-alice&SynoToken=" "id=sess-any" ""
+expect "two SynoTokens are refused"                                400 /state "SynoToken=tok-alice&SynoToken=tok-bob" "id=sess-any" ""
+expect "a second parameter smuggled inside the token is refused"   400 /state "SynoToken=tok-alice%26SynoToken%3Dx" "id=sess-any" ""
+expect "the diagnostics page is refused to a non-administrator"    403 /debug "SynoToken=tok-bob" "id=sess-any" ""
+out="$(gate /debug "SynoToken=tok-alice" "id=sess-any" "")"
 echo "$out" | grep -q '"isAdmin":true' || fail "the diagnostics page did not answer an administrator: $out"
 reached && fail "the diagnostics page ran the app binary"
 pass "the diagnostics page answers an administrator, from the gate itself"
-out="$(gate /state "SynoToken=tok-alice" "" "")"
+out="$(gate /state "SynoToken=tok-alice" "id=sess-any" "")"
 echo "$out" | grep -q "\"var\":\"$W/packages/duplicatefinder/var\"" || fail "the app was not told this package's own data folder: $out"
 pass "the app is handed this package's own data folder"
 grep -q 'SynoToken=tok-alice%26' "$W/auth.log" && fail "a smuggled parameter reached authenticate.cgi"
 pass "authenticate.cgi is only ever asked about a single, plain token"
 
 MODULES="$W/no-modules"
-expect "no authenticate.cgi refuses every request"                 403 /state "SynoToken=tok-alice" "" ""
+expect "no authenticate.cgi refuses every request"                 403 /state "SynoToken=tok-alice" "id=sess-any" ""
 MODULES="$W/modules"
 rm "$W/packages/duplicatefinder/target/bin/dupfinder"
-expect "a package that is not installed is refused"                500 /state "SynoToken=tok-alice" "" ""
+expect "a package that is not installed is refused"                500 /state "SynoToken=tok-alice" "id=sess-any" ""
 
 echo
 echo "GATEWAY CHECKS PASSED"

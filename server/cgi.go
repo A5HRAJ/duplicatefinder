@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -117,10 +118,77 @@ func runCGI(port int) {
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+		// The request carries the administrator's DSM session, and the proxy
+		// adds the daemon token: they go only to a listener owned by this
+		// gateway's own user, the package user the daemon runs as. A process
+		// that took the port while the daemon was down gets nothing.
+		if uids, known := listeningUIDs(port); !listenerTrusted(uids, known, os.Getuid()) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "Something other than the Duplicate Finder service is listening on its port, so nothing was sent to it. Restart the package in Package Center.",
+			})
+			return
+		}
 		proxy.ServeHTTP(w, r)
 	})
 	if err := cgi.Serve(limited); err != nil {
 		fmt.Fprintf(os.Stderr, "cgi: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// listeningUIDs lists the owner of every TCP socket listening on port, from
+// the kernel's own tables (IPv4 and IPv6, either of which can take a
+// connection to 127.0.0.1). known is false where the tables do not exist,
+// off Linux, as in development on a Mac.
+func listeningUIDs(port int) (uids []int, known bool) {
+	for _, f := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		known = true
+		uids = append(uids, parseListenUIDs(string(b), port)...)
+	}
+	return uids, known
+}
+
+// parseListenUIDs reads one /proc/net/tcp-format table: the owning uid of
+// each socket in state 0A (listening) whose local port is port.
+func parseListenUIDs(table string, port int) []int {
+	var out []int
+	for i, line := range strings.Split(table, "\n") {
+		f := strings.Fields(line)
+		if i == 0 || len(f) < 8 || f[3] != "0A" {
+			continue
+		}
+		c := strings.LastIndexByte(f[1], ':')
+		if c < 0 {
+			continue
+		}
+		if p, err := strconv.ParseUint(f[1][c+1:], 16, 32); err != nil || int(p) != port {
+			continue
+		}
+		if uid, err := strconv.Atoi(f[7]); err == nil {
+			out = append(out, uid)
+		}
+	}
+	return out
+}
+
+// listenerTrusted decides whether the gateway may hand the request to what
+// listens on the daemon's port: every listener must be its own user's.
+// Nobody listening is not refused here — the proxy then reports the daemon
+// is down — and without the kernel's tables there is nothing to check.
+func listenerTrusted(uids []int, known bool, self int) bool {
+	if !known {
+		return true
+	}
+	for _, u := range uids {
+		if u != self {
+			return false
+		}
+	}
+	return true
 }

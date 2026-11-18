@@ -81,10 +81,13 @@ TOKEN_SENT=0
 case "&$QUERY_STRING" in
 	*\&SynoToken=*)
 		TOKEN_SENT=1
-		TOKENS="$(printf '&%s' "$QUERY_STRING" | tr '&' '\n' | sed -n 's/^SynoToken=//p')"
-		if [ "$(printf '%s\n' "$TOKENS" | grep -c .)" -ne 1 ]; then
+		# Counted as FIELDS, not as non-empty values: "SynoToken=x&SynoToken="
+		# would otherwise lose its empty second value in $(…) and pass as one.
+		if [ "$(printf '&%s' "$QUERY_STRING" | tr '&' '\n' | grep -c '^SynoToken=')" -ne 1 ]; then
 			deny "400 Bad Request" "Malformed request"
 		fi
+		TOKENS="$(printf '&%s' "$QUERY_STRING" | tr '&' '\n' | sed -n 's/^SynoToken=//p')"
+		[ -n "$TOKENS" ] || deny "400 Bad Request" "Malformed request"
 		TOKEN="$(urldecode "$TOKENS")"
 		case "$TOKEN" in
 			*[!A-Za-z0-9._-]*) deny "400 Bad Request" "Malformed request" ;;

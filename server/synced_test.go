@@ -267,9 +267,36 @@ func TestSyncHitsSeesThroughTheTwoNamesOfAHome(t *testing.T) {
 	if h := syncHits(areas, nil, []string{"/volume1/homes/ash/Dropbox/a"}, "/volume1/homes/ash/Dropbox/Duplicates"); len(h) != 0 {
 		t.Errorf("a move inside the synced home folder was flagged: %+v", h)
 	}
+	// But one user's synced folder is not another's: moving from Ash's
+	// Dropbox into Bob's removes it from Ash's, and is warned about.
+	if h := syncHits(areas, nil, []string{"/volume1/homes/ash/Dropbox/a"}, "/volume1/homes/bob/Dropbox/Duplicates"); len(h) != 1 {
+		t.Errorf("a move between two users' synced home folders was not flagged: %+v", h)
+	}
 	// Without a "homes" share listed, the homes are found beside "home".
 	areas = locate([]syncedFolder{{"/home", byCloudSync}}, []shareEntry{{name: "home", real: "/volume1/homes/ash"}})
 	if h := syncHits(areas, nil, []string{"/volume1/homes/ash/x", "/volume1/homes/bob/y"}, "/volume1/Team"); len(h) != 1 || h[0].Files != 2 {
 		t.Errorf("hits = %+v, want both homes matched", h)
+	}
+}
+
+// Agreeing to move out of the synced folders shown covers those folders
+// only: one that is synced now and was not shown — by another service, or
+// newly — must be asked about first.
+func TestSyncConsentCoversOnlyWhatWasShown(t *testing.T) {
+	shown := []syncHit{{Folder: "/Photos", By: byCloudSync, Files: 2}}
+	if !syncAgreedCovers(shown, []syncHit{{Folder: "/Photos", By: byCloudSync, Files: 5}}) {
+		t.Fatal("the folder that was shown is not covered (file counts may change)")
+	}
+	if syncAgreedCovers(shown, []syncHit{{Folder: "/Photos", By: byCloudSync}, {Folder: "/Photos", By: byDrive}}) {
+		t.Fatal("a second service on the same folder was covered without being shown")
+	}
+	if syncAgreedCovers(shown, []syncHit{{Folder: "/Work", By: byCloudSync}}) {
+		t.Fatal("another folder was covered without being shown")
+	}
+	if syncAgreedCovers(nil, []syncHit{{Folder: "/Photos", By: byCloudSync}}) {
+		t.Fatal("agreeing to nothing covered a synced folder")
+	}
+	if syncAgreedCovers(shown, []syncHit{{By: byDrive, Unchecked: true}}) {
+		t.Fatal("a service that could not be checked was covered without being shown")
 	}
 }

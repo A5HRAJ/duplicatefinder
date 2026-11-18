@@ -145,6 +145,15 @@ func (s *Server) walkStream(roots []string, recurse, withDirs bool, cancel chan 
 			noteUnreadable(root)
 			continue
 		}
+		// The root was vetted by path; what was pinned is checked again, so a
+		// root swapped for a shortcut into the recycle bin or a snapshot in
+		// between is refused too.
+		if inSelfEmptying(canon) {
+			h.Close()
+			addErr(root + ": not scanned — " + errSelfEmptying.Error())
+			noteUnreadable(root)
+			continue
+		}
 		// The handle stays open past enumeration: content reads (hashing,
 		// EXIF) open entries through it, so it is closed by the caller
 		// only when the whole scan is finished.

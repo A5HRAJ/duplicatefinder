@@ -1033,3 +1033,50 @@ func TestDestinationWithoutAccessSaysHowToGrantIt(t *testing.T) {
 		}
 	}
 }
+
+// A move made from results that another scan has replaced since is refused
+// before anything is looked at: the files at those paths are not the ones
+// the user saw listed. The same scan, or a caller that does not say, is not.
+func TestMoveFromReplacedResultsIsRefused(t *testing.T) {
+	s := &Server{results: map[string]*toolResult{"duplicates": {Tool: "duplicates", Scanned: "2026-11-17T10:00:00.5Z"}}}
+	var reply map[string]any
+	move := func(scanned string) int {
+		body, _ := json.Marshal(MoveReq{Tool: "duplicates", Files: []string{"/volume1/x/a"}, Dest: "/volume1/x/d", Scanned: scanned})
+		rec := httptest.NewRecorder()
+		s.handleMove(rec, httptest.NewRequest("POST", "/api/move", strings.NewReader(string(body))))
+		reply = nil
+		_ = json.Unmarshal(rec.Body.Bytes(), &reply)
+		return rec.Code
+	}
+	if c := move("2026-11-17T09:00:00.1Z"); c != 409 {
+		t.Fatalf("a move from replaced results: want 409, got %d", c)
+	}
+	// The refusal says why, and marks itself so the app fetches the newer
+	// results instead of leaving the replaced ones on screen.
+	if reply["replaced"] != true || !strings.Contains(fmt.Sprint(reply["error"]), "newer scan") {
+		t.Fatalf("the refusal does not say the results were replaced: %v", reply)
+	}
+	for _, same := range []string{"2026-11-17T10:00:00.5Z", ""} {
+		if c := move(same); c == 409 {
+			t.Fatalf("scanned %q was refused as replaced", same)
+		}
+	}
+}
+
+// Verify is on unless the request turns it off: a caller that does not say
+// gets the checked move, never the unchecked one.
+func TestAMoveThatDoesNotSayVerifies(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{`{"tool":"duplicates","files":["/volume1/x/a"],"dest":"/volume1/x/d"}`, true},
+		{`{"tool":"duplicates","files":["/volume1/x/a"],"dest":"/volume1/x/d","verify":true}`, true},
+		{`{"tool":"duplicates","files":["/volume1/x/a"],"dest":"/volume1/x/d","verify":false}`, false},
+	} {
+		req, _, ok := decodeMoveRequest(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/move", strings.NewReader(tc.body)))
+		if !ok || req.Verify != tc.want {
+			t.Errorf("%s: verify=%v (ok %v), want %v", tc.body, req.Verify, ok, tc.want)
+		}
+	}
+}

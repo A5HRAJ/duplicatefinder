@@ -186,8 +186,11 @@ for top in sys.argv[1:]:
         dirs.sort()
         for n in sorted(dirs+files):
             p=os.path.join(d,n); st=os.lstat(p); h=""
-            if stat.S_ISREG(st.st_mode) and st.st_size<=64<<20:
-                with open(p,"rb") as f: h=hashlib.sha256(f.read()).hexdigest()
+            if stat.S_ISREG(st.st_mode):
+                d2=hashlib.sha256()
+                with open(p,"rb") as f:
+                    for blk in iter(lambda: f.read(8<<20), b""): d2.update(blk)
+                h=d2.hexdigest()
             print(repr(p), stat.S_IFMT(st.st_mode), oct(st.st_mode&0o7777), st.st_size,
                   st.st_mtime_ns, st.st_ctime_ns, st.st_nlink, st.st_ino, h)
 PY
@@ -201,6 +204,19 @@ api GET '/api/results?tool=empty_folders' | grep -q 'empty dir' || fail "fixture
 api GET '/api/results?tool=corrupted_files' | grep -q 'z2.zip' || fail "fixture: the ZIP pair was not checked"
 pass "a scan with every tool changes nothing on disk ($(wc -l < "$WORK/fp-before" | tr -d ' ') entries fingerprinted)"
 rm -rf "$SHARE/e9"
+
+echo "== overlapping and aliased scan folders"
+# One file reached through a folder, a folder inside it, and a shortcut to
+# it is one file: it is never listed as its own duplicate.
+mkdir -p "$SHARE/ov/in"
+printf 'one file, three routes to it' > "$SHARE/ov/in/o.txt"
+ln -s "$SHARE/ov" "$SHARE/ovlink"
+r=$(api POST /api/scan "{\"tool\":\"duplicates\",\"tools\":[\"duplicates\"],\"dirs\":[\"$SHARE\",\"$SHARE/ov/in\",\"$SHARE/ovlink\"],\"recurse\":true,\"match\":{}}")
+echo "$r" | grep -q '"started":true' || fail "scan refused: $r"
+wait_idle
+api GET '/api/results?tool=duplicates' | grep -q 'o.txt' && fail "a file reached by three routes was listed as its own duplicate"
+rm -rf "$SHARE/ov" "$SHARE/ovlink"
+pass "a file reached through overlapping folders and a shortcut is one file"
 
 echo "== recycle bin and snapshots"
 # Copies in the recycle bin or a snapshot disappear on their own. Met inside
@@ -356,6 +372,34 @@ r=$(efmove j6); echo "$r" | grep -q 'keeping' || fail "after a rescan, the folde
 rm -rf "$SHARE/jf" "$SHARE/jfdest"
 pass "a folder holding the last copy of a duplicate is held back, in one request, one after another, and after a rescan"
 
+echo "== a reference folder inside a folder offered as empty"
+# A folder holding nothing but a junk-only folder is offered as empty. When
+# that inner folder is a read-only reference folder, the outer one must not
+# be offered, and must not move if the reference was set after the scan —
+# not even alongside a twin folder whose copy the reference was keeping.
+mkdir -p "$SHARE/rf/A/reference" "$SHARE/rf/B"
+printf 'a real file, so A and B are offered on their own' > "$SHARE/rf/keep.txt"
+printf 'thumbnail cache kept by a reference' > "$SHARE/rf/A/reference/Thumbs.db"; cp -p "$SHARE/rf/A/reference/Thumbs.db" "$SHARE/rf/B/Thumbs.db"
+mkdir -p "$SHARE/rfdest"
+r=$(api POST /api/scan "{\"tool\":\"duplicates\",\"tools\":[\"duplicates\",\"empty_folders\"],\"dirs\":[\"$SHARE\"],\"refDirs\":[\"$SHARE/rf/A/reference\"],\"recurse\":true,\"match\":{}}")
+echo "$r" | grep -q '"started":true' || fail "scan refused: $r"
+wait_idle
+api GET '/api/results?tool=empty_folders' | python3 -c '
+import json,sys
+rows=[f["path"]+"/"+f["name"] for f in json.load(sys.stdin)["files"]]
+sys.exit(1 if any(r.endswith("/rf/A") for r in rows) else 0)' || fail "a folder holding a reference folder was offered as empty"
+api POST /api/refs '{"refDirs":[]}' >/dev/null
+scan '["duplicates","empty_folders"]'
+api GET '/api/results?tool=empty_folders' | grep -q '"name":"A"' || fail "fixture: without a reference, A is not offered"
+r=$(api POST /api/refs "{\"refDirs\":[\"$SHARE/rf/A/reference\"]}")
+echo "$r" | grep -q 'reference' || fail "fixture: the reference could not be set: $r"
+r=$(api POST /api/move "{\"tool\":\"empty_folders\",\"files\":[\"$SHARE/rf/A\",\"$SHARE/rf/B\"],\"dest\":\"$SHARE/rfdest\",\"verify\":false,\"preserve\":false}")
+echo "$r" | grep -q 'read-only reference folder' || fail "a folder holding a reference folder was not refused: $r"
+[ -f "$SHARE/rf/A/reference/Thumbs.db" ] || fail "the reference folder's file left with its parent"
+api POST /api/refs '{"refDirs":[]}' >/dev/null
+rm -rf "$SHARE/rf" "$SHARE/rfdest"
+pass "a folder holding a reference folder is neither offered as empty nor moved"
+
 echo "== copies that went away after the scan"
 # Which copies still exist is asked of File Station at move time. A copy
 # deleted since the scan, or rewritten so it no longer has the scan's size
@@ -373,6 +417,22 @@ for f in b7a b7c; do
 done
 rm -f "$SHARE"/b7*.txt
 pass "a copy deleted or rewritten after the scan never counts as the copy that stays"
+
+echo "== a move under a new name is reported"
+# A clash at the destination is settled with " (1)"; the report must say so,
+# with where the file is now, so the user can tell which file is theirs.
+mkdir -p "$SHARE/rn/dest"
+printf 'already at the destination' > "$SHARE/rn/dest/n.txt"
+printf 'the one being moved' > "$SHARE/rn/n.txt"; cp -p "$SHARE/rn/n.txt" "$SHARE/rn/n-twin.txt"
+scan '["duplicates"]'
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/rn/n.txt\"],\"dest\":\"$SHARE/rn/dest\",\"verify\":false,\"preserve\":false}")
+echo "$r" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); share=sys.argv[1]
+want=[{"from": share+"/rn/n.txt", "to": share+"/rn/dest/n (1).txt"}]
+sys.exit(0 if r.get("renamed")==want else "renamed %r" % r.get("renamed"))' "$SHARE" || fail "a move under a new name was not reported with its new name: $r"
+rm -rf "$SHARE/rn"
+pass "a file moved under a new name is reported with where it is now"
 
 echo "== a name too long for ' (1)'"
 # A clash at the destination is settled with " (1)", but a name already at
@@ -684,35 +744,111 @@ echo "== move records gone entirely"
 printf 'kept by the record in its folder' > "$SHARE/w1.txt"; cp -p "$SHARE/w1.txt" "$SHARE/w1-copy.txt"
 printf 'a file of the user'"'"'s own' > "$SHARE/w2.txt"
 mkdir -p "$SHARE/flatdest"; cp -p "$SHARE/w2.txt" "$SHARE/flatdest/w2.txt"
-scan '["duplicates"]'
+# And a junk-only folder moved flat (an Empty Folders row): its Thumbs.db is
+# a duplicate of one left in place, and must still be known as moved.
+mkdir -p "$SHARE/wj" "$SHARE/wtwin"
+printf 'thumbnail cache carried by a folder move' > "$SHARE/wj/Thumbs.db"; cp -p "$SHARE/wj/Thumbs.db" "$SHARE/wtwin/Thumbs.db"
+scan '["duplicates","empty_folders"]'
+r=$(api POST /api/move "{\"tool\":\"empty_folders\",\"files\":[\"$SHARE/wj\"],\"dest\":\"$SHARE/flatdest\",\"verify\":true,\"preserve\":false}")
+echo "$r" | grep -q '"moved":\["' || fail "fixture: the flat folder move failed: $r"
 r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/w1-copy.txt\"],\"dest\":\"$SHARE/flatdest\",\"verify\":true,\"preserve\":false}")
 echo "$r" | grep -q '"moved":\["' || fail "the flat move for the records check failed: $r"
 echo "$r" | grep -q 'recordError' && fail "the record was not left: $r"
 python3 - "$SHARE/flatdest" <<'PY' || fail "the destination holds no record of the move"
 import glob,json,os,sys
 recs=[json.load(open(p)) for p in glob.glob(os.path.join(sys.argv[1], ".duplicate-finder-moved", "*.json"))]
-assert [e["name"] for r in recs for e in r["moved"]]==["w1-copy.txt"], recs
+assert sorted(e["name"] for r in recs for e in r["moved"])==["w1-copy.txt","wj/Thumbs.db"], recs
 PY
 stop_daemon
 rm -rf "$STATE"; mkdir -p "$STATE"
 FREESPACE=1000 start_daemon "$WORK/daemon3.log"
 [ -z "$(api GET /api/state | field recordsWarning)" ] || fail "fixture: a wiped state was announced as damaged records"
-scan '["duplicates"]'
+scan '["duplicates","empty_folders"]'
 api POST /api/results '{"tool":"duplicates","offset":0,"limit":100}' | python3 -c '
 import json,sys
 share=sys.argv[1]
 out={f["path"]+"/"+f["name"]: f.get("out",False) for g in json.load(sys.stdin)["groups"] for f in g["files"]}
-want={share+"/w1.txt":False, share+"/flatdest/w1-copy.txt":True, share+"/w2.txt":False, share+"/flatdest/w2.txt":False}
+want={share+"/w1.txt":False, share+"/flatdest/w1-copy.txt":True, share+"/w2.txt":False, share+"/flatdest/w2.txt":False,
+      share+"/flatdest/wj/Thumbs.db":True, share+"/wtwin/Thumbs.db":False}
 bad={p:(out.get(p),w) for p,w in want.items() if out.get(p)!=w}
 if bad: sys.exit("flags wrong after the records were lost (got, want): %r" % bad)' "$SHARE" || fail "the folder record did not identify the moved copy"
 r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/w1.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")
 echo "$r" | grep -q 'already moved' || fail "with every record lost, the original was allowed to follow its moved copy: $r"
 [ -f "$SHARE/w1.txt" ] || fail "the original moved despite the refusal"
+r=$(api POST /api/move "{\"tool\":\"empty_folders\",\"files\":[\"$SHARE/wtwin\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")
+echo "$r" | grep -q 'keeping' || fail "with every record lost, the folder holding the last copy followed its moved twin: $r"
+[ -f "$SHARE/wtwin/Thumbs.db" ] || fail "the last copy left its folder"
 stop_daemon
 FREESPACE=1000 start_daemon "$WORK/daemon3.log"
 r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/w1.txt\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")
 echo "$r" | grep -q 'already moved' || fail "what the folder record restored was not kept across a restart: $r"
 pass "with every record of the app's lost, the record a flat move left in its folder keeps the original in place"
+
+echo "== a folder record copied beside the original"
+# A record speaks for the folder it was written in. Copied anywhere else —
+# beside the original, say, by copying a cleanup folder's contents back — it
+# must not mark the original as moved: with every copy marked, any copy may
+# stay, and the last original could follow the others.
+mkdir -p "$SHARE/lib" "$SHARE/other" "$SHARE/clean"
+printf 'the library photo' > "$SHARE/lib/p.jpg"; cp -p "$SHARE/lib/p.jpg" "$SHARE/other/p.jpg"
+scan '["duplicates"]'
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/other/p.jpg\"],\"dest\":\"$SHARE/clean\",\"verify\":false,\"preserve\":false}")
+echo "$r" | grep -q '"moved":\["' || fail "fixture: the flat move failed: $r"
+cp -Rp "$SHARE/clean/.duplicate-finder-moved" "$SHARE/lib/"
+scan '["duplicates"]'
+api POST /api/results '{"tool":"duplicates","offset":0,"limit":100}' | python3 -c '
+import json,sys
+share=sys.argv[1]
+out={f["path"]+"/"+f["name"]: f.get("out",False) for g in json.load(sys.stdin)["groups"] for f in g["files"]}
+want={share+"/lib/p.jpg":False, share+"/clean/p.jpg":True}
+bad={p:(out.get(p),w) for p,w in want.items() if out.get(p)!=w}
+if bad: sys.exit("flags wrong (got, want): %r" % bad)' "$SHARE" || fail "a record copied beside the original marked the original as moved"
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/lib/p.jpg\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")
+echo "$r" | grep -q 'already moved' || fail "the original moved past its moved copy: $r"
+[ -f "$SHARE/lib/p.jpg" ] || fail "the original left despite the refusal"
+rm -rf "$SHARE/lib" "$SHARE/other" "$SHARE/clean"
+pass "a folder record copied into another folder does not speak for that folder"
+
+echo "== protection recovered by a scan that is then stopped"
+# A scan that recovers a moved copy from its folder record, and is then
+# stopped before any result is published, must still keep what it
+# recovered: after a restart, the groups stored earlier must not treat the
+# moved copy as an original. The 2 GiB sparse images make the hashing slow
+# enough for the Stop to land after the walk.
+mkdir -p "$SHARE/sv/clean"
+printf 'recovered, then the scan was stopped' > "$SHARE/sv/o.dat"; cp -p "$SHARE/sv/o.dat" "$SHARE/sv/o-copy.dat"
+scan '["duplicates"]'
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/sv/o-copy.dat\"],\"dest\":\"$SHARE/sv/clean\",\"verify\":false,\"preserve\":false}")
+echo "$r" | grep -q '"moved":\["' || fail "fixture: the flat move failed: $r"
+stop_daemon
+rm -rf "$STATE"; mkdir -p "$STATE"
+mv "$SHARE/sv/clean/.duplicate-finder-moved" "$SHARE/sv/clean/.held-aside"
+FREESPACE=1000 start_daemon "$WORK/daemon3.log"
+scan '["duplicates"]'
+mv "$SHARE/sv/clean/.held-aside" "$SHARE/sv/clean/.duplicate-finder-moved"
+r=$(api POST /api/scan "{\"tool\":\"duplicates\",\"tools\":[\"duplicates\"],\"dirs\":[\"$SHARE\"],\"recurse\":true,\"match\":{}}")
+echo "$r" | grep -q '"started":true' || fail "scan refused: $r"
+for _ in $(seq 1 400); do api GET /api/state | grep -qi 'hash' && break; sleep 0.025; done
+api POST /api/cancel '{}' >/dev/null
+wait_idle
+[ "$(api GET /api/state | field lastEnd.completed)" = "False" ] || fail "fixture: the scan finished before the Stop landed"
+stop_daemon
+FREESPACE=1000 start_daemon "$WORK/daemon3.log"
+r=$(api POST /api/move "{\"tool\":\"duplicates\",\"files\":[\"$SHARE/sv/o.dat\"],\"dest\":\"$SHARE/dest\",\"verify\":false,\"preserve\":true}")
+echo "$r" | grep -q 'already moved' || fail "what a stopped scan recovered was forgotten, and the original may follow its moved copy: $r"
+[ -f "$SHARE/sv/o.dat" ] || fail "the original moved despite the refusal"
+rm -rf "$SHARE/sv"
+pass "protection a scan recovers from a folder record survives the scan being stopped and a restart"
+
+echo "== a save that fails is announced"
+# The results of a scan that cannot be written to disk would be gone after a
+# restart: the app is told, through the daemon's own state.
+chmod a-w "$STATE"
+scan '["empty_files"]'
+w=$(api GET /api/state | field saveError)
+chmod u+w "$STATE"
+[ -n "$w" ] || fail "a scan whose results could not be saved was not announced"
+pass "a scan whose results cannot be saved says so: $w"
 
 echo "== SIGTERM"
 kill -TERM "$DPID"

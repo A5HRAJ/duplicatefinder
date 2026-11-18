@@ -139,8 +139,39 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 	   come through the daemon's evidence text and run in the tooltip.
 	   Encoding twice makes the decoded value HTML-safe text, so the tooltip
 	   shows the literal characters. */
+	/* One line for the files a move put down under another name: " (1)"
+	   because the name was taken, or the name a disk that cannot store some
+	   characters gave them. A few by name, then a count. */
+	function renamedSummary(renamed) {
+		var shown = [], i;
+		for (i = 0; i < renamed.length && i < 3; i++) {
+			var from = String(renamed[i].from || ''), to = String(renamed[i].to || '');
+			shown.push(from.substring(from.lastIndexOf('/') + 1) + ' → ' + to.substring(to.lastIndexOf('/') + 1));
+		}
+		var more = renamed.length > 3 ? ', and ' + (renamed.length - 3) + ' more' : '';
+		return (renamed.length === 1 ? '1 is' : renamed.length + ' are') +
+			' under a new name, because the name was taken or the destination cannot store it: ' + shown.join(', ') + more;
+	}
+	/* What each Verify choice gains and risks, shown from the ⓘ after the
+	   checkbox's label. DSM's white tip renders it as markup, so the <b> and
+	   <br> show as such: this is fixed markup of the app's own, and file
+	   names or other outside text must never be put in it. */
+	var VERIFY_TIP = '<b>On (recommended):</b> before each file moves, it is read again and must still ' +
+		'match what the scan found; the copy that stays behind is checked too, and the moved copy is ' +
+		'read back afterwards. Moving to another disk, the original is removed only once its copy checks ' +
+		'out. Safer, but slower: every file is read before and after it moves.' +
+		'<br><br><b>Off:</b> faster, but only a quick check of each file\'s size, date and first 64 KB is ' +
+		'made, and nothing is read back. A file that changed since the scan, or a copy damaged on its way ' +
+		'to another disk, can go unnoticed.';
 	function qtipText(s) {
 		return esc(esc(s));
+	}
+	/* The daemon's messages start in lower case, because they are also put
+	   inside other text. Shown on their own in a notice, they start with a
+	   capital letter, as DSM's own notices do. */
+	function sentence(s) {
+		s = String(s == null ? '' : s);
+		return /^[a-z]/.test(s) ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 	}
 	function pad6(n) {
 		var s = String(n);
@@ -955,14 +986,14 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				// whose X does nothing. Attach after construction instead.
 				this._toast = new UxToast({
 					owner: this,
-					text: esc(msg),
+					text: esc(sentence(msg)),
 					delay: 3600,
 					closable: true
 				});
 				this._toast.on('beforedestroy', function () { me._toast = null; });
 				return;
 			}
-			var el = Ext.getBody().createChild({ tag: 'div', cls: 'df-toast', html: esc(msg) });
+			var el = Ext.getBody().createChild({ tag: 'div', cls: 'df-toast', html: esc(sentence(msg)) });
 			this._toastEl = el;
 			window.setTimeout(function () {
 				if (me._toastEl === el) me._toastEl = null;
@@ -1127,9 +1158,11 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			this.scopeList = new Ext.list.ListView({
 				store: new Ext.data.ArrayStore({ fields: ['path', 'ro'], data: [] }),
 				// {path:htmlEncode}: folder names are user-created data and
-				// XTemplate does not escape by default (stored-XSS hazard)
+				// XTemplate does not escape by default (stored-XSS hazard). The
+				// tooltip is encoded TWICE, as qtipText does: QuickTips reads the
+				// attribute back already decoded and renders it as HTML.
 				columns: [{ header: 'Folder', dataIndex: 'path', tpl:
-					'<span class="df-mono" ext:qtip="{path:htmlEncode}{[values.ro ? \' — read-only reference folder: its files are scanned but never selected or moved\' : \'\']}">' +
+					'<span class="df-mono" ext:qtip="{[Ext.util.Format.htmlEncode(Ext.util.Format.htmlEncode(values.path))]}{[values.ro ? \' — read-only reference folder: its files are scanned but never selected or moved\' : \'\']}">' +
 					'{[values.ro ? \'\\ud83d\\udd12 \' : \'\']}{path:htmlEncode}</span>' }],
 				hideHeaders: true,
 				singleSelect: true,
@@ -2737,6 +2770,10 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		// to grant access to), the daemon's closing "… and N more" line when
 		// its own list ran out, and anything else the scan had to say. Every
 		// line is escaped — they carry folder names.
+		// The explanation scrolls with the list in one body, never in a
+		// panel of its own fixed height: how many lines it takes depends on
+		// the service user's name and on DSM's font, and a fixed height cut
+		// its last words off ("then a new scan.") on a NAS where it took three.
 		openIssuesDialog: function (tool) {
 			var res = this.state.results[tool];
 			if (!res || !res.errors || !res.errors.length) return null;
@@ -2744,18 +2781,19 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			var who = this.state.serviceUser ? 'the "' + esc(this.state.serviceUser) + '" user' : "the package's user";
 			var rows = [];
 			Ext.each(res.errors, function (e) { rows.push('<div class="df-issue">' + esc(String(e)) + '</div>'); });
+			var lead = fmtCount(n) + (n === 1 ? ' issue' : ' issues') + ' from the last scan. A location that could not be read needs ' + who +
+				' granted access under Control Panel → Shared Folder → Edit → Permissions → System internal user, then a new scan.';
 			var win = new UxModal({
 				owner: this,
 				title: 'Scan Issues — ' + (TOOL_NAME[tool] || tool),
 				width: 640, height: 420, modal: false,
 				cls: 'df-app',
-				layout: 'vbox', layoutConfig: { align: 'stretch' },
-				items: [
-					{ xtype: 'panel', border: false, height: 48, bodyStyle: 'padding:10px 12px 0;font-size:' + FSMALL + ';color:' + FONT2 + ';line-height:1.4;',
-						html: fmtCount(n) + (n === 1 ? ' issue' : ' issues') + ' from the last scan. A location that could not be read needs ' + who +
-							' granted access under Control Panel → Shared Folder → Edit → Permissions → System internal user, then a new scan.' },
-					{ xtype: 'panel', border: false, flex: 1, autoScroll: true, bodyStyle: 'padding:6px 12px;', cls: 'df-mono', html: rows.join('') }
-				],
+				layout: 'fit',
+				items: [{
+					xtype: 'panel', border: false, autoScroll: true, bodyStyle: 'padding:10px 12px;',
+					html: '<div class="df-issues-lead" style="font-size:' + FSMALL + ';color:' + FONT2 + ';line-height:1.4;padding-bottom:8px;">' + lead + '</div>' +
+						'<div class="df-mono" style="display:block;">' + rows.join('') + '</div>'
+				}],
 				buttons: [new UxButton({ btnStyle: 'blue', text: 'Close', handler: function () { win.close(); } })]
 			});
 			win.show();
@@ -3516,6 +3554,10 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// Captured, not read back at request time, so the batch carries the
 			// tool it was selected under even if state.tool changes underneath.
 			var tool = this.state.tool;
+			// And the scan the selection was made from: should another scan
+			// replace these results before the move is sent, the daemon
+			// refuses rather than acting on paths the user did not see listed.
+			var scanned = this.state.scannedAt[tool] || '';
 			// Fingerprint of the batch this dialog was opened for. The records
 			// are captured, so a selection REPLACED between here and the pick
 			// would move rows the user is no longer pointing at — and the pick
@@ -3558,6 +3600,14 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				hideLabel: true,
 				checked: true
 			});
+			// An ⓘ after the label explains the choice, the way File Station
+			// explains "Always open HTML files using plain text format":
+			// SYNO.ux.AddTip draws DSM's own icon beside the field and shows
+			// the text in DSM's white tip when it is hovered. Without that call
+			// (a DSM that lacks it) the dialog still works, unexplained.
+			verifyBox.on('afterrender', function (cb) {
+				if (SYNO.ux.AddTip) SYNO.ux.AddTip(cb.getEl(), VERIFY_TIP);
+			}, null, { single: true });
 			var win = new UxModal({
 				owner: me,
 				title: 'Move ' + n + ' ' + noun,
@@ -3626,7 +3676,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 									me.notify('The selection changed while the folder was being chosen — nothing was moved.');
 									return;
 								}
-								me.doMove(recs, dest, doPreserve, tool, doVerify);
+								me.doMove(recs, dest, doPreserve, tool, doVerify, null, scanned);
 							}
 						});
 					} }),
@@ -3642,7 +3692,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		// stays clickable while the folder chooser is up — see the capture
 		// there. It only ever labels the folder the daemon creates; the move's
 		// vetting is unaffected by it.
-		doMove: function (recs, dest, preserve, tool, verify, syncOK) {
+		doMove: function (recs, dest, preserve, tool, verify, syncAgreed, scanned) {
 			var me = this;
 			var paths = [];
 			Ext.each(recs, function (r) { paths.push(r.get('path') + '/' + r.get('name')); });
@@ -3672,7 +3722,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			// verify defaults ON when the caller does not say otherwise — the
 			// dialog always says, so this covers programmatic callers, and the
 			// default lands on the safe side.
-			api('/move', 'POST', { files: paths, dest: dest, preserve: preserve, tool: tool, verify: verify !== false, id: id, syncOK: syncOK === true }, function (err, j, meta) {
+			api('/move', 'POST', { files: paths, dest: dest, preserve: preserve, tool: tool, verify: verify !== false, id: id, syncOK: !!syncAgreed, syncAgreed: syncAgreed || [], scanned: scanned || '' }, function (err, j, meta) {
 				if (err && meta && meta.transport) {
 					// The connection died — DSM's web server gave up on the
 					// request long before the 12-hour timeout here — while the
@@ -3690,11 +3740,27 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				busy.close();
 				// Some of the files are in folders another service keeps in
 				// step elsewhere, and nothing has moved: ask, and send the
-				// same move again only on the user's say-so.
-				if (err && j && j.synced && j.synced.length && syncOK !== true) {
+				// same move again only on the user's say-so, naming the
+				// folders they agreed to. A folder that became synced while
+				// the question was open comes back here, and is asked about.
+				if (err && j && j.synced && j.synced.length) {
 					me.confirmSyncedMove(j.synced, paths.length, function () {
-						me.doMove(recs, dest, preserve, tool, verify, true);
+						me.doMove(recs, dest, preserve, tool, verify, j.synced, scanned);
 					});
+					return;
+				}
+				// The list on screen was replaced by a newer scan (one started
+				// from another window, say), and nothing moved. Showing the
+				// newer results is the only way out: left as it was, the same
+				// choice would be refused again however often it was made.
+				if (err && j && j.replaced) {
+					me.sm.clearSelections();
+					api('/state', 'GET', null, function (err2, st) {
+						me.syncScanned(st, function (changed) {
+							if (!changed || changed.indexOf(me.state.tool) < 0) me.reloadPage();
+							me.notify(err);
+						});
+					}, { timeout: PAGE_TIMEOUT });
 					return;
 				}
 				if (err) {
@@ -3785,6 +3851,13 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 			var tool = j.tool || this.state.tool;
 			var n = (j.moved || []).length;
 			var requested = j.total || (n + (j.errors || []).length);
+			// Files that landed under another name, and the warnings a move can
+			// end with, travel together: one toast replaces another, so two in
+			// a row would leave only the second on screen.
+			var renamed = j.renamed || [];
+			var warnings = [];
+			if (j.saveError) warnings.push(j.saveError);
+			if (j.recordError) warnings.push(j.recordError);
 			if (j.errors && j.errors.length) {
 				// A persistent dialog, never only the 3.6-second toast:
 				// among these entries may sit the one message this whole
@@ -3792,9 +3865,7 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				// not match" — and its row has just been pruned, so this
 				// listing (plus the daemon log) is the only place the
 				// user can still learn WHICH file needs their attention.
-				this.showMoveIssues(requested, n, j.errors, lead);
-				if (j.saveError) this.notify(j.saveError);
-				if (j.recordError) this.notify(j.recordError);
+				this.showMoveIssues(requested, n, j.errors, lead, warnings, renamed);
 			} else {
 				// Under preserve the files are NOT at `dest` — the daemon
 				// created a folder inside it and may have had to number
@@ -3803,7 +3874,8 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 				// failed after the prune rides on the same toast: the
 				// pruned rows would be back after a restart.
 				this.notify((lead || '') + 'Moved ' + n + ' ' + itemNoun(tool, n).toLowerCase() + ' to ' + (j.folder || j.dest) +
-					(j.saveError ? ' — ' + j.saveError : '') + (j.recordError ? ' — ' + j.recordError : ''));
+					(renamed.length ? ' — ' + renamedSummary(renamed) : '') +
+					(warnings.length ? ' — ' + warnings.join(' — ') : ''));
 			}
 			if (j.id) api('/move/report', 'POST', { id: j.id }, function () {});
 		},
@@ -3811,13 +3883,21 @@ Ext.namespace('SYNO.SDS.DuplicateFinder');
 		// The full per-file account of a move that did not end clean. Every
 		// entry is listed with its path — errors[0] alone cannot say which of
 		// forty files is the one whose destination copy failed verification.
-		showMoveIssues: function (requested, movedCount, errors, lead) {
+		showMoveIssues: function (requested, movedCount, errors, lead, warnings, renamed) {
 			var me = this;
 			var rows = [];
+			Ext.each(warnings || [], function (w) {
+				rows.push('<div style="padding:4px 0;border-bottom:1px solid rgba(128,128,128,0.25);"><b>' + esc(w) + '</b></div>');
+			});
 			Ext.each(errors, function (e) {
 				rows.push('<div style="padding:4px 0;border-bottom:1px solid rgba(128,128,128,0.25);">' +
 					'<div style="word-break:break-all;">' + esc(e.path || '') + '</div>' +
 					'<div style="color:' + FONT2 + ';">' + esc(e.error || '') + '</div></div>');
+			});
+			Ext.each(renamed || [], function (r) {
+				rows.push('<div style="padding:4px 0;border-bottom:1px solid rgba(128,128,128,0.25);">' +
+					'<div style="word-break:break-all;">' + esc(r.from || '') + '</div>' +
+					'<div style="color:' + FONT2 + ';word-break:break-all;">moved, under a new name: ' + esc(r.to || '') + '</div></div>');
 			});
 			var win = new UxModal({
 				owner: me,

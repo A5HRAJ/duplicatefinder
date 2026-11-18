@@ -4,6 +4,128 @@ Notable changes to Duplicate Finder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are the
 package versions shown in Package Center.
 
+## [Unreleased]
+
+### Added
+- An ⓘ after "Verify file contents after moving" in the move dialog, like
+  the ones in DSM's own settings, now explains the choice when the pointer
+  rests on it: with Verify on, each file is read again before it moves
+  and its copy read back afterwards, safer but slower; with it off, the move
+  is faster, but only a quick check is made first and nothing is read back,
+  so a changed file or a copy damaged on its way can go unnoticed.
+
+### Fixed
+- A move from a list that a newer scan had replaced (one started from
+  another window, say) was refused, but the old list stayed on screen, so
+  choosing the files again was refused again until you switched views. The
+  newer results are now loaded right away, and the notice says nothing was
+  moved. Notices passed on from the NAS also start with a capital letter
+  now.
+- The Scan Issues window cut off the end of its explanation on a NAS where
+  the service user's name is long (such as "sc-duplicatefinder"), hiding
+  "then a new scan." The explanation now scrolls with the list and is
+  always shown in full.
+- A folder name containing HTML could run as code in the administrator's
+  DSM page when the mouse rested on that folder in the sidebar's scan
+  scope. Its tooltip now shows the name as plain text, like every other
+  tooltip in the app.
+- Since 1.1.12, a folder holding nothing but a read-only reference folder
+  (one that held only junk files such as Thumbs.db) was offered as an
+  empty folder, and moving it took the reference folder along. With a twin
+  folder selected too, both copies of a file could leave. Such a folder is
+  no longer offered, and is refused at move time if the reference folder
+  was set after the scan.
+- The hidden record a move straight into a folder leaves there could be
+  copied into another folder, for example by copying a cleanup folder's
+  contents back, hidden folder included. Beside the original it then
+  marked the original as moved too, and with every copy marked as moved,
+  the last original could be moved after them. A record now names the
+  folder it was written for and counts only there.
+- A verified move to another disk checked, just before deleting the
+  original, that it had not changed since its copy was verified, but only
+  to the second. A file rewritten in place at the same length within that
+  second, such as a download still being written, was deleted, and only
+  the older copy survived at the destination. The check is now to the
+  nanosecond, and such a file is kept beside its copy.
+- A real file saved into an empty folder in the moment between the app's
+  last emptiness check and its copying of the folder to another disk was
+  copied along and left with the folder. What is copied is now checked
+  against the same rule, and the folder stays.
+- The hidden record a move straight into a folder leaves there listed
+  only the files moved; when a folder was moved (an Empty Folders row),
+  the junk files it carried were not listed. Should the app's own records
+  be lost, a copy among them could look like an original again. The
+  record now lists every file inside a moved folder too.
+- A very large move wrote its whole list as one hidden record, which
+  could be bigger than the app would read back, and a record that was
+  damaged or too big was passed over without a word. A large move now
+  writes several records, and a record that cannot be read is listed as
+  an issue of the scan, naming its folder. How much a scan reads from
+  such records is bounded, so a planted or damaged one cannot exhaust a
+  small NAS's memory.
+- Stopping a scan right after it had recognised moved copies from their
+  folder's record, before it showed any results, threw that away: after
+  the package restarted, results from earlier could treat a moved copy as
+  an original again. What a scan recognises this way is now saved at once.
+- Results saved before 1.1.12 could still list a copy inside the recycle
+  bin or a snapshot, from when such a folder could be scanned directly, and
+  that copy could count as the one that stays. It never does now, even
+  before the next scan.
+- With DSM's own protection against cross-site requests turned off (it is
+  on by default), a web page on another site could make an administrator's
+  browser start a scan or a move, or clear the reference folders. The app
+  now accepts such requests only in the form it sends them itself, which a
+  browser will not send to another site without its consent.
+- The app's gateway passed the administrator's DSM session to whatever was
+  listening on the service's port. Had the service stopped and another
+  program on the NAS taken its port, that program would have received the
+  session. The gateway now checks that the listener belongs to the
+  package's own user, and sends nothing otherwise.
+- The gateway accepted a request carrying a valid sign-in token followed by
+  an empty second one as if it carried one. It still needed a valid
+  administrator's token, but it now refuses any request with more than one.
+- Moving a file from one user's Cloud Sync folder in their home into another
+  user's folder of the same name gave no warning, though it removed the file
+  from the first user's synced copy. It now warns, as any other move out of
+  a synced folder does.
+- Choosing Move Anyway after the synced-folder warning agreed to every
+  synced folder, including one that became synced while the question was
+  open. It now agrees only to the folders the question named; any other is
+  asked about first, and nothing moves until then.
+- If another scan replaced the results while a question about a move was
+  open (from another window, or by another administrator), the move went
+  ahead with whatever files the new scan listed at those places. It now
+  moves nothing and asks you to look at the list again.
+- When a move onto a full destination failed and DSM's next answer was then
+  lost too, the app could report the file as "parked" in a hidden folder and
+  drop it from the list, though it had not moved. It now checks that the
+  original is still in place first. And it now removes an incomplete copy
+  from that hidden folder only when it carries the file's own name.
+- After a move, a file that had to be given another name, " (1)" because
+  the name was taken or a new name a USB disk chose for it, was not
+  mentioned, so you could not tell which file was yours. The report now
+  names each one with where it is.
+- A move that ended with both "the results could not be saved" and "the
+  record could not be left" showed the second warning over the first.
+  Both now appear together, in the Move Issues window when there are
+  issues, otherwise in one notice.
+- When the package stopped just as a file left a hidden holding folder for
+  its final name, the report of the cut-short move named only the final
+  place, though the file could still be in the holding folder. It now
+  names both.
+- With "Match by name" turned on, two names for one and the same file (a
+  hard link) could show as a duplicate group, and so could such names left
+  together after the real copy beside them was moved. They no longer do.
+- A move request that did not say whether to verify was not verified. The
+  app always says so, but the service itself now verifies unless told not
+  to.
+- The check that the destination has room before a move began now also
+  covers a move between two shared folders on one Btrfs volume, which
+  copies each file before removing it.
+- On start-up the service cleared leftover temporary files in its own data
+  folder by their shape alone, so any file there ending in ".tmp-" and a
+  number went too. It now clears only its own.
+
 ## [1.1.12] - 2026-11-17
 
 ### Added

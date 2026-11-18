@@ -15,6 +15,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 )
@@ -48,6 +49,13 @@ type transitRef struct {
 	isDir bool
 	hash  string
 	man   manifest
+	// size and mtimeNs are the original file as the disk itself reported it
+	// just before it was hashed, to the nanosecond. Retirement requires the
+	// same: File Station's identity is whole seconds, and an in-place write
+	// within the same second, after the copy was verified, would otherwise
+	// pass and delete the only copy of the newer bytes. 0 when not taken.
+	size    int64
+	mtimeNs int64
 }
 
 // manEnt is one entry of a folder manifest, keyed by its path inside the
@@ -58,7 +66,7 @@ type transitRef struct {
 type manEnt struct {
 	typ   fs.FileMode // the type bits only
 	size  int64
-	mtime int64
+	mtime int64  // nanoseconds: a same-second in-place write must show
 	hash  string // regular files, when hashed
 	link  string // symlinks
 }
@@ -119,7 +127,7 @@ func readManifestDir(dir, rel string, hashed bool, m manifest) ([]string, error)
 			if err != nil {
 				return nil, err
 			}
-			me := manEnt{typ: fi.Mode().Type(), size: fi.Size(), mtime: fi.ModTime().Unix()}
+			me := manEnt{typ: fi.Mode().Type(), size: fi.Size(), mtime: fi.ModTime().UnixNano()}
 			switch {
 			case fi.IsDir():
 				subs = append(subs, key)
@@ -141,6 +149,31 @@ func readManifestDir(dir, rel string, hashed bool, m manifest) ([]string, error)
 			return nil, rerr
 		}
 	}
+}
+
+// manifestHoldsOnlyJunk holds a folder's manifest to the empty-folder rule
+// that offered it (innerDir and isTempName, as dirHoldsOnlyJunk applies
+// them): every folder inside an ordinary one, every other entry a junk FILE.
+// The move-time check ran a moment earlier; a real file arriving in between
+// would otherwise be hashed into the manifest, copied, verified, and leave
+// with the folder.
+func manifestHoldsOnlyJunk(m manifest) bool {
+	for key, e := range m {
+		name := path.Base(key)
+		switch {
+		case e.typ.IsDir():
+			if _, reject := innerDir(name); reject {
+				return false
+			}
+		case e.typ.IsRegular():
+			if !isTempName(name) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // copyMatches reports whether a copy's manifest reproduces the original's:
@@ -366,6 +399,10 @@ func (s *fsSession) retireOriginal(srcShare, cp string, want entIdent, ref trans
 		if e, ok := info[qShare]; ok && e.exists() {
 			_, same = identMatches(e, []entIdent{want})
 		}
+	}
+	if same && !ref.isDir && ref.mtimeNs != 0 {
+		fi, lerr := os.Lstat(qFS)
+		same = lerr == nil && fi.Size() == ref.size && fi.ModTime().UnixNano() == ref.mtimeNs
 	}
 	if same && ref.isDir {
 		now, merr := takeManifest(qFS, false)
