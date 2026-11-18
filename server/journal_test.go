@@ -212,3 +212,42 @@ func TestJournalCutOffMidLineIsNotDamage(t *testing.T) {
 		t.Error("the complete lines were not applied")
 	}
 }
+
+// A stop while a staged file makes its last hop, from the hidden staging
+// folder to its final name: if it is not at the final name, it is still in
+// the staging folder, and the report must name both places.
+func TestReplayNamesTheHoldingFolderOfAFileCutShortOnItsLastHop(t *testing.T) {
+	dir := t.TempDir()
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	b := filepath.Join(root, "b.txt")
+	dest := filepath.Join(root, "dest")
+	s := &Server{varDir: dir, results: map[string]*toolResult{}}
+	if err := s.saveState(); err != nil {
+		t.Fatal(err)
+	}
+	j, err := openJournal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range []journalLine{
+		{Begin: &journalBegin{ID: "m2", Tool: "duplicates", Dest: dest, Files: []string{b}}},
+		{Start: b},
+		{Staging: filepath.Join(dest, ".dupfinder-tmp-1"), Where: "/share/dest/.dupfinder-tmp-1"},
+		{Ahead: filepath.Join(dest, "b.txt"), From: []string{b, b}, Where: "/share/dest/b.txt"},
+	} {
+		if err := j.write(l, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	j.f.Close()
+	s = reload(dir)
+	s.replayMoveJournal()
+	r := s.lastMove
+	if r == nil || len(r.Errors) != 1 {
+		t.Fatalf("no report for the cut-short move: %+v", r)
+	}
+	e := r.Errors[0]["error"]
+	if !strings.Contains(e, "/share/dest/b.txt") || !strings.Contains(e, "/share/dest/.dupfinder-tmp-1") {
+		t.Fatalf("the report does not name both places the file can be: %q", e)
+	}
+}

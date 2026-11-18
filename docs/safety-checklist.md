@@ -124,7 +124,7 @@ would take away the only copy of something.
 
 | # | The app must… | | Proof |
 |---|---|---|---|
-| G1 | When the package is stopped mid-move, keep the records and report what moved, what was in flight and what wasn't reached | ✅ | `TestReplay*`, audit "a move cut short by a stop"; checked on the NAS for 1.1.10 |
+| G1 | When the package is stopped mid-move, keep the records and report what moved, what was in flight and what wasn't reached | ✅ | `TestReplay*`, audit "a move cut short by a stop"; checked on the NAS for 1.1.10; a file stopped on its last hop out of a hidden holding folder is reported at both places it can be (`TestReplayNamesTheHoldingFolderOfAFileCutShortOnItsLastHop`; added 2026-11-17) |
 | G2 | Survive a power cut or crash mid-move with no warning: the same promise as G1, without the few seconds' grace | 🟡 | Each file's destination is written to disk before the file moves (`TestMoveRecordsWhereItWillLandBeforeFileStationMovesIt`, `TestJournalCutOffMidLineIsNotDamage`). Never tested with a real hard kill |
 | G3 | Keep following a move when DSM's reply goes missing, never giving up on it or reporting a false failure | ✅ | `TestLostProgressReplyDoesNotAbandonARunningMove`, `TestLostStartReply*` |
 | G4 | Lose nothing if a USB disk is unplugged mid-move | 🟡 | Safe by design (the original stays until its copy is checked). Never tested |

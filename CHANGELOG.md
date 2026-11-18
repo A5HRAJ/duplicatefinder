@@ -91,6 +91,10 @@ package versions shown in Package Center.
   record could not be left" showed the second warning over the first.
   Both now appear together, in the Move Issues window when there are
   issues, otherwise in one notice.
+- When the package stopped just as a file left a hidden holding folder for
+  its final name, the report of the cut-short move named only the final
+  place, though the file could still be in the holding folder. It now
+  names both.
 
 ## [1.1.12] - 2026-11-17
 
