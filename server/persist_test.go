@@ -680,7 +680,7 @@ func TestLoadStateDropsTempRowsNoLongerJunk(t *testing.T) {
 func TestStaleTempFilesAreClearedAtStart(t *testing.T) {
 	d := t.TempDir()
 	stale := []string{"hashcache.bin.tmp-3254280108", "results.json.gz.tmp-1", ".authtoken.tmp-42"}
-	keep := []string{"hashcache.bin", "results.json.gz", "notes.tmp-draft", "moves.journal"}
+	keep := []string{"hashcache.bin", "results.json.gz", "notes.tmp-draft", "moves.journal", "before-repair.tmp-1"} // the last is not ours
 	for _, n := range append(append([]string{}, stale...), keep...) {
 		if err := os.WriteFile(filepath.Join(d, n), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)

@@ -104,6 +104,9 @@ package versions shown in Package Center.
 - The check that the destination has room before a move began now also
   covers a move between two shared folders on one Btrfs volume, which
   copies each file before removing it.
+- On start-up the service cleared leftover temporary files in its own data
+  folder by their shape alone, so any file there ending in ".tmp-" and a
+  number went too. It now clears only its own.
 
 ## [1.1.12] - 2026-11-17
 

@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -121,8 +122,16 @@ func (s *Server) stateDir() string {
 }
 
 // staleTempRe matches the temporary siblings writeAtomic and the token
-// writer create: "<name>.tmp-<digits>" (os.CreateTemp's pattern).
-var staleTempRe = regexp.MustCompile(`\.tmp-[0-9]+$`)
+// writer create — "<name>.tmp-<digits>", os.CreateTemp's pattern — for the
+// files this package writes, and nothing else: whatever else sits in its
+// data folder is not its to remove.
+var staleTempRe = func() *regexp.Regexp {
+	var names []string
+	for _, n := range []string{stateFile, recordsFile, recordsPrev, hashCacheFile, markerFile, moveReportFile, readyFile, authTokenFile} {
+		names = append(names, regexp.QuoteMeta(n))
+	}
+	return regexp.MustCompile(`^(` + strings.Join(names, "|") + `)\.tmp-[0-9]+$`)
+}()
 
 // removeStaleTemps clears the temporary files an earlier run of the daemon
 // was stopped in the middle of writing. writeAtomic removes its own on every
