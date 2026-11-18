@@ -101,6 +101,9 @@ package versions shown in Package Center.
 - A move request that did not say whether to verify was not verified. The
   app always says so, but the service itself now verifies unless told not
   to.
+- The check that the destination has room before a move began now also
+  covers a move between two shared folders on one Btrfs volume, which
+  copies each file before removing it.
 
 ## [1.1.12] - 2026-11-17
 

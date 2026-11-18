@@ -203,3 +203,19 @@ func TestALostLookIntoStagingDoesNotCallTheFileParked(t *testing.T) {
 		t.Fatal("the original changed")
 	}
 }
+
+// Room is checked for every move that copies data, not only one between
+// volumes: between two shared folders of one Btrfs volume (each its own
+// subvolume) a move copies each file before its original goes, so the
+// largest of them must fit, beside everything coming from another volume.
+func TestFreeSpaceIsCheckedForCopiesBetweenSubvolumes(t *testing.T) {
+	old := crossesFS
+	crossesFS = func(a, b string) bool { return a != b }
+	t.Cleanup(func() { crossesFS = old })
+	v := &moveVet{canon: newDirResolver(), vols: []string{"/vol1", "/vol2"}, idents: map[string][]entIdent{
+		"/vol1/a/x": {{size: 100}}, "/vol1/a/y": {{size: 300}}, "/vol2/b/z": {{size: 50}}, "/vol1/d/w": {{size: 900}},
+	}}
+	if need := v.crossVolumeNeed([]string{"/vol1/a/x", "/vol1/a/y", "/vol2/b/z", "/vol1/d/w"}, "/vol1/d"); need != 50+300 {
+		t.Fatalf("need %d, want 350 (50 from the other volume, plus the largest copy between subvolumes, 300)", need)
+	}
+}

@@ -143,7 +143,7 @@ func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
 	// partway, one file at a time, once the volume was full.
 	if need := v.crossVolumeNeed(req.Files, destCanon); need > 0 {
 		if free, known := sess.volumeFree(destCanon); known && need > free {
-			writeErr(w, 400, fmt.Sprintf("the destination volume has %s free, and moving these files onto it needs %s — free some space, or choose a destination on the same volume as the files", fmtBytes(free), fmtBytes(need)))
+			writeErr(w, 400, fmt.Sprintf("the destination volume has %s free, and moving these files onto it needs %s — free some space, or choose another destination", fmtBytes(free), fmtBytes(need)))
 			return
 		}
 	}
@@ -1442,7 +1442,10 @@ func keepOneDropsWhy(groups []Group, requested map[string]bool, refDirs []string
 // crossVolumeNeed sums the sizes of the request's files that would have to be
 // COPIED to reach dest: File Station moves a file to another volume by
 // copying it there and deleting the source, so the destination's volume must
-// hold every such byte, while a move within one volume needs none. Sizes are
+// hold every such byte. Within one volume a move between two filesystems (a
+// Btrfs shared folder is a subvolume of its own) copies too, one file at a
+// time, so the largest such file is added; any other move within a volume
+// is a rename and needs nothing. Sizes are
 // the scan's own record of each entry — the identity the move is vetted
 // against. A junk-only folder's size is the junk it carries with it; paths no
 // scan listed contribute nothing here, the vetting refuses those on its own.
@@ -1450,17 +1453,27 @@ func keepOneDropsWhy(groups []Group, requested map[string]bool, refDirs []string
 // stay sparse.
 func (v *moveVet) crossVolumeNeed(files []string, destCanon string) int64 {
 	destVol := volumeOf(destCanon, v.vols)
-	var need int64
+	var need, largest int64
 	for _, src := range files {
 		cp := v.canon.path(filepath.Clean(src))
-		if destVol == "" || volumeOf(cp, v.vols) == destVol {
+		ids := v.idents[cp]
+		if destVol == "" || len(ids) == 0 {
 			continue
 		}
-		if ids := v.idents[cp]; len(ids) > 0 {
+		switch {
+		case volumeOf(cp, v.vols) != destVol:
+			// From another volume: every such file stays on the destination.
 			need += ids[0].size
+		case crossesFS(filepath.Dir(cp), destCanon):
+			// Same volume, another filesystem (a Btrfs shared folder is a
+			// subvolume of its own): each file is copied before its original
+			// goes, so the largest must fit, one at a time.
+			if ids[0].size > largest {
+				largest = ids[0].size
+			}
 		}
 	}
-	return need
+	return need + largest
 }
 
 // volumeOf returns the volume root p lives under, or "" when none does.
